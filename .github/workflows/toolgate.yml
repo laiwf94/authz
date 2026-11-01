@@ -8,10 +8,14 @@ on:
 permissions:
   contents: read
 
-# toolgate's packages live in the root module under internal/agents, with its
-# commands still under toolgate/cmd until they become `authz mcp` and
-# `authz mcpfake`. This job keeps toolgate's own gate (fuzz targets, policy
-# cases and the demo) running from the repository root.
+# toolgate's packages live in the root module under internal/agents, and its
+# commands are `authz mcp` and `authz mcpfake` (cmd/authz/internal/mcp and
+# mcpfake). This job keeps toolgate's own gate (fuzz targets, policy cases and
+# the demo) running from the repository root.
+env:
+  AGENTS: internal/agents cmd/authz/internal/mcp cmd/authz/internal/mcpfake
+  AGENTS_PKGS: ./internal/agents/... ./cmd/authz/internal/mcp/... ./cmd/authz/internal/mcpfake/...
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,11 +25,11 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Format
-        run: test -z "$(gofmt -l internal/agents toolgate)" || (gofmt -l internal/agents toolgate && exit 1)
+        run: test -z "$(gofmt -l $AGENTS)" || (gofmt -l $AGENTS && exit 1)
       - name: Vet
-        run: go vet ./internal/agents/... ./toolgate/...
+        run: go vet $AGENTS_PKGS
       - name: Test (race, coverage)
-        run: go test -race -coverprofile=coverage.out ./internal/agents/... ./toolgate/...
+        run: go test -race -coverprofile=coverage.out $AGENTS_PKGS
       - name: Coverage
         run: go tool cover -func=coverage.out | tail -1
       - name: Fuzz (short)
@@ -37,8 +41,8 @@ jobs:
           go test ./internal/agents/identity -run=^$ -fuzz=FuzzAuthenticate -fuzztime=20s
           go test ./internal/agents/audit -run=^$ -fuzz=FuzzVerify -fuzztime=20s
       - name: Policy cases
-        run: go run ./toolgate/cmd/toolgate policy test toolgate/examples/policy.json toolgate/examples/policy_cases.json
+        run: go run ./cmd/authz mcp policy test toolgate/examples/policy.json toolgate/examples/policy_cases.json
       - name: Demo
         run: ./toolgate/examples/demo.sh
       - name: Vulnerabilities
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./internal/agents/... ./toolgate/...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 $AGENTS_PKGS

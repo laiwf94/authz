@@ -170,7 +170,7 @@ func TestRegistry(t *testing.T) {
 			t.Errorf("%s -no-such-flag: exit %d, want 2", c.name, code)
 		}
 	}
-	for _, want := range []string{"serve", "check", "ctl", "version"} {
+	for _, want := range []string{"serve", "check", "ctl", "mcp", "mcpfake", "version"} {
 		if !seen[want] {
 			t.Errorf("%s is not registered", want)
 		}
@@ -329,10 +329,16 @@ func TestMainExitCodes(t *testing.T) {
 		"serve":           1, // no GRANTD_API_KEYS
 		"check -schema":   exitUsage,
 		"ctl schema read": exitUsage, // no AUTHZ_API_KEY
+		"mcp":             1,         // no TOOLGATE_ADMIN_TOKEN
+		"mcp policy test": exitUsage, // no files
+		"mcp -x":          exitUsage,
+		"mcpfake":         1, // no MCPFAKE_SANDBOX
+		"mcpfake extra":   exitUsage,
 	}
 	for args, want := range cases {
 		cmd := exec.Command(os.Args[0], "-test.run=^$")
-		cmd.Env = append(os.Environ(), "AUTHZ_TEST_MAIN_ARGS="+args, "GRANTD_API_KEYS=", "AUTHZ_API_KEY=")
+		cmd.Env = append(os.Environ(), "AUTHZ_TEST_MAIN_ARGS="+args, "GRANTD_API_KEYS=", "AUTHZ_API_KEY=",
+			"TOOLGATE_ADMIN_TOKEN=", "AUTHZ_MCP_ADMIN_TOKEN=", "MCPFAKE_SANDBOX=", "AUTHZ_MCPFAKE_SANDBOX=")
 		if args == "" {
 			// An empty value would run the tests instead of main.
 			cmd.Env = append(cmd.Env, "AUTHZ_TEST_MAIN_ARGS= ")

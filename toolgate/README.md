@@ -146,34 +146,38 @@ with `DEMO_RECORD=1 ./examples/demo.sh` and review the diff.
 To run the pieces yourself:
 
 ```console
-$ go build ./cmd/toolgate ./cmd/mcpfake
-$ ./toolgate token new                                  # a key for an agent, and the hash for the config
+$ (cd .. && go build -o toolgate/authz ./cmd/authz)    # the one binary: authz mcp is the gateway
+$ ./authz mcp token new                                 # a key for an agent, and the hash for the config
 $ MCPFAKE_SANDBOX=examples/sandbox MCPFAKE_TOKEN=upstream-secret-0123456789 \
-    MCPFAKE_ADDR=127.0.0.1:19100 ./mcpfake &
+    MCPFAKE_ADDR=127.0.0.1:19100 ./authz mcpfake &
 $ export FAKE_UPSTREAM_TOKEN=upstream-secret-0123456789
 $ TOOLGATE_CONFIG=examples/config.json TOOLGATE_POLICY=examples/policy.json \
     TOOLGATE_AUDIT_LOG=audit.jsonl TOOLGATE_AUDIT_KEY=$(openssl rand -hex 32) \
-    TOOLGATE_ADMIN_TOKEN=$(openssl rand -hex 24) TOOLGATE_STATE_DIR=. ./toolgate
+    TOOLGATE_ADMIN_TOKEN=$(openssl rand -hex 24) TOOLGATE_STATE_DIR=. ./authz mcp
 ```
+
+Every `TOOLGATE_` variable can also be spelled `AUTHZ_MCP_` (and every
+`MCPFAKE_` one `AUTHZ_MCPFAKE_`); setting both spellings to different values
+stops the command at start.
 
 Then point any MCP client at `http://127.0.0.1:8080/mcp` with
 `Authorization: Bearer <agent key>`. Configuration is documented in
-[cmd/toolgate/main.go](cmd/toolgate/main.go); the config and policy formats in
+`authz mcp -h` and [cmd/authz/internal/mcp/mcp.go](../cmd/authz/internal/mcp/mcp.go); the config and policy formats in
 [examples/config.json](examples/config.json) and
 [examples/policy.json](examples/policy.json), with its test cases in
 [examples/policy_cases.json](examples/policy_cases.json).
 
-The Docker image holds both binaries, runs as `nonroot` on distroless, and
+The Docker image holds the one `authz` binary (entry point `authz mcp`), runs as `nonroot` on distroless, and
 keeps the audit log and tool pins in `/data`. In this example the fake
 upstream runs as a second container, so the config must name it
 (`http://mcpfake:19100/mcp`):
 
 ```console
-$ docker build -t toolgate .
+$ (cd .. && docker build -t toolgate -f toolgate/Dockerfile .)
 $ docker network create tgnet
-$ docker run -d --network tgnet --network-alias mcpfake --entrypoint /mcpfake \
+$ docker run -d --network tgnet --network-alias mcpfake --entrypoint /authz \
     -v "$PWD/examples/sandbox:/sandbox:ro" -e MCPFAKE_ADDR=0.0.0.0:19100 \
-    -e MCPFAKE_SANDBOX=/sandbox -e MCPFAKE_TOKEN=upstream-secret-0123456789 toolgate
+    -e MCPFAKE_SANDBOX=/sandbox -e MCPFAKE_TOKEN=upstream-secret-0123456789 toolgate mcpfake
 $ sed 's#127.0.0.1:19100#mcpfake:19100#' examples/config.json > /tmp/tg/config.json   # plus policy.json
 $ docker run -d --network tgnet -p 127.0.0.1:8080:8080 -v /tmp/tg:/etc/toolgate:ro -v tgdata:/data \
     -e TOOLGATE_CONFIG=/etc/toolgate/config.json -e TOOLGATE_POLICY=/etc/toolgate/policy.json \
@@ -232,7 +236,7 @@ Admin errors look like
 | Concurrency | The whole suite runs under the race detector in CI. |
 
 ```console
-$ go test -race ./internal/agents/... ./toolgate/...   # full suite, 96% statement coverage
+$ go test -race ./internal/agents/... ./cmd/authz/internal/mcp/... ./cmd/authz/internal/mcpfake/...   # full suite, 96% statement coverage
 $ go test -run=^$ -bench=. ./internal/agents/...
 ```
 
@@ -261,12 +265,12 @@ the order of checks, the policy semantics, approvals, rug-pull detection, the
 audit log format, how both MCP protocol eras are served, failure modes, limits
 and what would change to run it as a fleet. toolgate is part of the authz
 module: its packages live in the repository root under `internal/agents/`,
-and its commands stay under `toolgate/cmd/` until they become `authz mcp` and
-`authz mcpfake`. Paths below are relative to the repository root:
+and its commands are `authz mcp` and `authz mcpfake` in the one `authz`
+binary. Paths below are relative to the repository root:
 
 ```text
-toolgate/cmd/toolgate          gateway entry point, `audit verify` and `token` subcommands
-toolgate/cmd/mcpfake           a small MCP server to put behind the gateway
+cmd/authz/internal/mcp         `authz mcp`: gateway entry point, `audit verify`, `policy test` and `token`
+cmd/authz/internal/mcpfake     `authz mcpfake`: a small MCP server to put behind the gateway
 internal/agents/gateway        the enforcement pipeline, upstream tool caching, admin API, configuration
 internal/agents/mcp            MCP over Streamable HTTP: dual-era server, client, header rules
 internal/agents/jsonrpc        strict JSON-RPC 2.0 decoding and encoding
@@ -278,7 +282,7 @@ internal/agents/approval       human approval requests and single-use grants
 internal/agents/pins           tool definition pinning and quarantine
 internal/agents/guard          output redaction, truncation and audit previews
 internal/agents/audit          hash-chained audit log and verification
-internal/agents/fakeserver     the tools behind toolgate/cmd/mcpfake
+internal/agents/fakeserver     the tools behind `authz mcpfake`
 internal/agents/httpx          request IDs, logging, metrics, errors
 internal/agents/metrics        Prometheus text exposition
 ```

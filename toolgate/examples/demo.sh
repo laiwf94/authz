@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Builds toolgate and mcpfake, starts both with the files in this directory,
-# and walks an agent through every control: filtered tool lists, an allowed
-# call, argument constraints, output redaction, rate limits, human approval,
-# tool-definition change detection, and a tamper-evident audit log.
+# Builds the authz binary, starts `authz mcpfake` and `authz mcp` (formerly
+# toolgate) with the files in this directory, and walks an agent through every
+# control: filtered tool lists, an allowed call, argument constraints, output
+# redaction, rate limits, human approval, tool-definition change detection,
+# and a tamper-evident audit log.
 #
 # Needs go, curl and python3. Uses ports 18080, 18081 and 19100 on 127.0.0.1.
 #
@@ -39,18 +40,18 @@ wait_for() { # url
 }
 
 echo "== build"
-(cd "$ROOT" && go build -o "$WORK/toolgate" ./cmd/toolgate && go build -o "$WORK/mcpfake" ./cmd/mcpfake)
+(cd "$REPO" && go build -o "$WORK/authz" ./cmd/authz)
 cp "$DIR/policy.json" "$WORK/policy.json"
 mkdir -p "$WORK/state"
 
 MCPFAKE_ADDR=127.0.0.1:19100 MCPFAKE_SANDBOX="$DIR/sandbox" MCPFAKE_TOKEN="$FAKE_UPSTREAM_TOKEN" \
   MCPFAKE_ADMIN_TOKEN="$FAKE_ADMIN" MCPFAKE_HTTP_ALLOW=example.com \
-  "$WORK/mcpfake" >"$WORK/mcpfake.log" 2>&1 &
+  "$WORK/authz" mcpfake >"$WORK/mcpfake.log" 2>&1 &
 FAKE_PID=$!
 TOOLGATE_ADDR=127.0.0.1:18080 TOOLGATE_ADMIN_ADDR=127.0.0.1:18081 TOOLGATE_ADMIN_TOKEN="$ADMIN_TOKEN" \
   TOOLGATE_CONFIG="$DIR/config.json" TOOLGATE_POLICY="$WORK/policy.json" \
   TOOLGATE_AUDIT_LOG="$WORK/audit.jsonl" TOOLGATE_AUDIT_KEY="$(openssl rand -hex 32 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(32))')" \
-  TOOLGATE_STATE_DIR="$WORK/state" "$WORK/toolgate" >"$WORK/toolgate.log" 2>&1 &
+  TOOLGATE_STATE_DIR="$WORK/state" "$WORK/authz" mcp >"$WORK/mcp.log" 2>&1 &
 TG_PID=$!
 wait_for "$FAKE/healthz"
 wait_for "$GW/healthz"
@@ -158,7 +159,7 @@ for t in json.load(sys.stdin)["tools"]:
 
 echo
 echo "8. The audit log is a hash chain"
-"$WORK/toolgate" audit verify "$WORK/audit.jsonl" | sed 's/^/   /'
+"$WORK/authz" mcp audit verify "$WORK/audit.jsonl" | sed 's/^/   /'
 echo "   and it holds exactly the decisions recorded for this demo:"
 (cd "$REPO" && go run scripts/recorded-decisions.go ${DEMO_RECORD:+-update} \
   toolgate/examples/demo_decisions.jsonl "$WORK/audit.jsonl") | sed 's/^/   /'
@@ -173,7 +174,7 @@ for i, l in enumerate(lines):
         print(i + 1)
         break' "$WORK/audit.jsonl")
 echo "   someone rewrites line $LINE to turn a denial into an allow..."
-"$WORK/toolgate" audit verify "$WORK/audit.jsonl" | sed 's/^/   /' || true
+"$WORK/authz" mcp audit verify "$WORK/audit.jsonl" | sed 's/^/   /' || true
 
 echo
 echo "Done. Logs were in $WORK (removed on exit)."

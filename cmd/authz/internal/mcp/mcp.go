@@ -1,32 +1,35 @@
-// Command toolgate runs the tool gateway, verifies audit logs and issues
-// agent credentials.
+// Package mcp implements "authz mcp", the MCP gateway that was the toolgate
+// command. Its subcommands, flags, exit codes, config and policy files and
+// audit format are toolgate's, unchanged:
 //
-//	toolgate                                  run the gateway (configured from the environment)
-//	toolgate audit verify [-head HASH] FILE   check an audit log's hash chain
-//	toolgate policy test [-v] POLICY CASES    check a policy against a file of expected decisions
-//	toolgate token new                        print a new static agent key and its SHA-256 for the config
-//	toolgate token hash < key                 print the SHA-256 of a static key read from stdin
-//	toolgate token mint -sub ID [-owner NAME] [-scope "a b"] [-ttl 15m]
-//	                                          print a signed token (needs TOOLGATE_CONFIG and TOOLGATE_SIGNING_KEYS)
+//	authz mcp [serve]                          run the gateway (configured from the environment)
+//	authz mcp audit verify [-head HASH] FILE   check an audit log's hash chain
+//	authz mcp policy test [-v] POLICY CASES    check a policy against a file of expected decisions
+//	authz mcp token new                        print a new static agent key and its SHA-256 for the config
+//	authz mcp token hash < key                 print the SHA-256 of a static key read from stdin
+//	authz mcp token mint -sub ID [-owner NAME] [-scope "a b"] [-ttl 15m]
+//	                                           print a signed token (needs the config and signing keys)
 //
-// The gateway reads its configuration from the environment:
+// The gateway reads its configuration from the environment. Every variable
+// has the toolgate name and an AUTHZ_MCP_ name; either may be used, and
+// setting both to different values is an error (see env.go):
 //
-//	TOOLGATE_ADDR             agent listener (default "127.0.0.1:8080")
-//	TOOLGATE_ADMIN_ADDR       admin listener (default "127.0.0.1:8081")
-//	TOOLGATE_ADMIN_TOKEN      bearer token for the admin API, at least 32 characters (required)
-//	TOOLGATE_CONFIG           path of the JSON config: agents, upstreams, limits (required)
-//	TOOLGATE_POLICY           path of the JSON policy, reloaded when it changes (required)
-//	TOOLGATE_AUDIT_LOG        path of the append-only audit log (required)
-//	TOOLGATE_AUDIT_KEY        64 hex characters; keys the argument digests in the audit log (required)
-//	TOOLGATE_STATE_DIR        directory for trusted tool definitions; empty keeps them in memory only
-//	TOOLGATE_SIGNING_KEYS     kid=<64 hex>[,kid=<64 hex>...] for signed agent tokens; the first signs new tokens
-//	TOOLGATE_ALLOWED_ORIGINS  comma-separated browser origins allowed to call /mcp (default none)
-//	TOOLGATE_POLICY_POLL      how often to check the policy file (default "2s"; "0" disables; SIGHUP always reloads)
-//	TOOLGATE_LOG_LEVEL        debug, info, warn or error (default info)
+//	TOOLGATE_ADDR             AUTHZ_MCP_ADDR             agent listener (default "127.0.0.1:8080")
+//	TOOLGATE_ADMIN_ADDR       AUTHZ_MCP_ADMIN_ADDR       admin listener (default "127.0.0.1:8081")
+//	TOOLGATE_ADMIN_TOKEN      AUTHZ_MCP_ADMIN_TOKEN      bearer token for the admin API, at least 32 characters (required)
+//	TOOLGATE_CONFIG           AUTHZ_MCP_CONFIG           path of the JSON config: agents, upstreams, limits (required)
+//	TOOLGATE_POLICY           AUTHZ_MCP_POLICY           path of the JSON policy, reloaded when it changes (required)
+//	TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        path of the append-only audit log (required)
+//	TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters; keys the argument digests in the audit log (required)
+//	TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        directory for trusted tool definitions; empty keeps them in memory only
+//	TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,kid=<64 hex>...] for signed agent tokens; the first signs new tokens
+//	TOOLGATE_ALLOWED_ORIGINS  AUTHZ_MCP_ALLOWED_ORIGINS  comma-separated browser origins allowed to call /mcp (default none)
+//	TOOLGATE_POLICY_POLL      AUTHZ_MCP_POLICY_POLL      how often to check the policy file (default "2s"; "0" disables; SIGHUP always reloads)
+//	TOOLGATE_LOG_LEVEL        AUTHZ_MCP_LOG_LEVEL        debug, info, warn or error (default info)
 //
 // Upstream credentials are read from the environment variables the config
-// names in credential_env.
-package main
+// names in credential_env, exactly as named.
+package mcp
 
 import (
 	"bufio"
@@ -54,13 +57,59 @@ import (
 	"github.com/laiwf94/authz/internal/agents/policy"
 )
 
-func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	code := cli(ctx, os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr, nil)
-	stop()
-	os.Exit(code)
+// Summary is the one-line description shown in "authz help".
+const Summary = "run the MCP gateway for AI agents, verify its audit log, test policies and issue agent tokens"
+
+const usage = `usage: authz mcp [serve]
+       authz mcp audit verify [-head HASH] FILE
+       authz mcp policy test [-v] POLICY CASES
+       authz mcp token new | hash | mint -sub ID [-owner NAME] [-scope "a b"] [-ttl 15m]
+
+Runs the MCP gateway (formerly toolgate) with no arguments or "serve".
+Configuration comes from the environment. Each variable may be given by its
+toolgate name or its AUTHZ_MCP_ name; setting both to different values is an
+error:
+
+  TOOLGATE_ADDR             AUTHZ_MCP_ADDR             agent listener (default "127.0.0.1:8080")
+  TOOLGATE_ADMIN_ADDR       AUTHZ_MCP_ADMIN_ADDR       admin listener (default "127.0.0.1:8081")
+  TOOLGATE_ADMIN_TOKEN      AUTHZ_MCP_ADMIN_TOKEN      admin API bearer token, at least 32 characters (required)
+  TOOLGATE_CONFIG           AUTHZ_MCP_CONFIG           JSON config: agents, upstreams, limits (required)
+  TOOLGATE_POLICY           AUTHZ_MCP_POLICY           JSON policy, reloaded when it changes (required)
+  TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        append-only audit log (required)
+  TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters keying argument digests (required)
+  TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        trusted tool definitions; empty keeps them in memory
+  TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,...] for signed agent tokens
+  TOOLGATE_ALLOWED_ORIGINS  AUTHZ_MCP_ALLOWED_ORIGINS  browser origins allowed to call /mcp (default none)
+  TOOLGATE_POLICY_POLL      AUTHZ_MCP_POLICY_POLL      policy file check interval (default "2s"; "0" disables)
+  TOOLGATE_LOG_LEVEL        AUTHZ_MCP_LOG_LEVEL        debug, info, warn or error (default info)
+
+Logs are JSON lines on standard output. SIGHUP reloads the policy; SIGINT or
+SIGTERM drains requests and stops. Exit codes: 0 success, 1 failure (a failed
+verification or policy case, or a gateway that cannot start), 2 usage or
+unreadable input for "audit verify" and "policy test".
+`
+
+// Run is the "authz mcp" subcommand. It takes toolgate's arguments after
+// "mcp" and returns toolgate's exit codes, plus 0 for -h, and 2 for a flag
+// before the subcommand or conflicting environment variables.
+func Run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) > 0 && isHelp(args[0]) {
+		fmt.Fprint(stderr, usage)
+		return 0
+	}
+	if len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		fmt.Fprintf(stderr, "authz mcp: flag %s is not defined; flags follow the subcommand (\"authz mcp token mint -sub ID\")\n%s", args[0], usage)
+		return 2
+	}
+	env, err := compatEnv(getenv, gatewayEnv)
+	if err != nil {
+		fmt.Fprintln(stderr, "authz mcp:", err)
+		return 2
+	}
+	return cli(ctx, args, env, stdin, stdout, stderr, nil)
 }
+
+func isHelp(a string) bool { return a == "-h" || a == "-help" || a == "--help" || a == "help" }
 
 // cli dispatches subcommands and returns the process exit code.
 func cli(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, ready func(gw, admin string)) int {
@@ -75,10 +124,10 @@ func cli(ctx context.Context, args []string, getenv func(string) string, stdin i
 	case args[0] == "token" && len(args) > 1:
 		err = token(args[1], args[2:], getenv, stdin, stdout)
 	default:
-		err = errors.New("usage: toolgate [serve] | audit verify [-head HASH] FILE | policy test [-v] POLICY CASES | token new|hash|mint")
+		err = errors.New("usage: authz mcp [serve] | audit verify [-head HASH] FILE | policy test [-v] POLICY CASES | token new|hash|mint")
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "toolgate:", err)
+		fmt.Fprintln(stderr, "authz mcp:", err)
 		return 1
 	}
 	return 0
@@ -102,7 +151,7 @@ type config struct {
 func required(getenv func(string) string, name string) (string, error) {
 	v := getenv(name)
 	if v == "" {
-		return "", fmt.Errorf("%s is required", name)
+		return "", fmt.Errorf("%s is required%s", name, aliasHint(name))
 	}
 	return v, nil
 }
@@ -335,12 +384,12 @@ func auditVerify(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	head := fs.String("head", "", "expected hash of the last record (from GET /admin/audit/head)")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: toolgate audit verify [-head HASH] FILE")
+		fmt.Fprintln(stderr, "usage: authz mcp audit verify [-head HASH] FILE")
 		return 2
 	}
 	f, err := os.Open(fs.Arg(0))
 	if err != nil {
-		fmt.Fprintln(stderr, "toolgate:", err)
+		fmt.Fprintln(stderr, "authz mcp:", err)
 		return 2
 	}
 	defer f.Close()
@@ -365,26 +414,26 @@ func policyTest(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	verbose := fs.Bool("v", false, "also list the cases that pass")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 2 {
-		fmt.Fprintln(stderr, "usage: toolgate policy test [-v] POLICY CASES")
+		fmt.Fprintln(stderr, "usage: authz mcp policy test [-v] POLICY CASES")
 		return 2
 	}
 	src, err := readLimited(fs.Arg(0), policy.MaxBytes)
 	if err != nil {
-		fmt.Fprintln(stderr, "toolgate:", err)
+		fmt.Fprintln(stderr, "authz mcp:", err)
 		return 2
 	}
 	p, err := policy.Parse(src)
 	if err != nil {
-		fmt.Fprintf(stderr, "toolgate: %s: %v\n", fs.Arg(0), err)
+		fmt.Fprintf(stderr, "authz mcp: %s: %v\n", fs.Arg(0), err)
 		return 2
 	}
 	if src, err = readLimited(fs.Arg(1), policy.MaxCaseBytes); err != nil {
-		fmt.Fprintln(stderr, "toolgate:", err)
+		fmt.Fprintln(stderr, "authz mcp:", err)
 		return 2
 	}
 	cs, err := policy.ParseCases(src)
 	if err != nil {
-		fmt.Fprintf(stderr, "toolgate: %s: %v\n", fs.Arg(1), err)
+		fmt.Fprintf(stderr, "authz mcp: %s: %v\n", fs.Arg(1), err)
 		return 2
 	}
 	rep := policy.RunCases(p, cs)
@@ -467,6 +516,6 @@ func token(sub string, args []string, getenv func(string) string, stdin io.Reade
 		fmt.Fprintln(stdout, tok)
 		return nil
 	default:
-		return errors.New("usage: toolgate token new | hash | mint -sub ID [-owner NAME] [-scope \"a b\"] [-ttl 15m]")
+		return errors.New("usage: authz mcp token new | hash | mint -sub ID [-owner NAME] [-scope \"a b\"] [-ttl 15m]")
 	}
 }

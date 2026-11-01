@@ -4,10 +4,12 @@
 //	authz serve      the authorization API (formerly grantd)
 //	authz check      validate configuration and schema files without starting anything
 //	authz ctl        talk to a running authz serve: schema, relationships and checks
+//	authz mcp        the MCP gateway for AI agents (formerly toolgate)
 //	authz version    print the build's version
 //
-// The sign-on gateway and the MCP gateway register themselves here as they
-// move in. "authz help <command>" prints a subcommand's help.
+// authz mcpfake, a small MCP server to try the gateway against, runs but is
+// left out of the listing. The sign-on gateway registers itself here as it
+// moves in. "authz help <command>" prints a subcommand's help.
 //
 // The dispatcher only picks the subcommand. Everything after its name is
 // passed through untouched, so subcommands can nest their own commands
@@ -28,6 +30,8 @@ import (
 
 	"github.com/laiwf94/authz/cmd/authz/internal/checkcmd"
 	"github.com/laiwf94/authz/cmd/authz/internal/ctl"
+	"github.com/laiwf94/authz/cmd/authz/internal/mcp"
+	"github.com/laiwf94/authz/cmd/authz/internal/mcpfake"
 	"github.com/laiwf94/authz/cmd/authz/internal/serve"
 )
 
@@ -50,6 +54,8 @@ var commands = []command{
 	{name: "serve", summary: serve.Summary, run: serve.Run},
 	{name: "check", summary: checkcmd.Summary, run: checkcmd.Run},
 	{name: "ctl", summary: ctl.Summary, run: ctl.Run},
+	{name: "mcp", summary: mcp.Summary, run: mcp.Run},
+	{name: "mcpfake", summary: mcpfake.Summary, hidden: true, run: mcpfake.Run},
 	{name: "version", summary: "print the version, revision and Go toolchain of this build", run: runVersion},
 }
 

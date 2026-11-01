@@ -1,4 +1,4 @@
-package main
+package mcp
 
 import (
 	"bytes"
@@ -289,7 +289,7 @@ func TestPolicyTestCommand(t *testing.T) {
 		code := cli(context.Background(), append([]string{"policy", "test"}, args...), nil, nil, &out, &errOut, nil)
 		return code, out.String(), errOut.String()
 	}
-	pol, cases := filepath.Join("..", "..", "examples", "policy.json"), filepath.Join("..", "..", "examples", "policy_cases.json")
+	pol, cases := filepath.Join("..", "..", "..", "..", "toolgate", "examples", "policy.json"), filepath.Join("..", "..", "..", "..", "toolgate", "examples", "policy_cases.json")
 	if code, out, errOut := run(pol, cases); code != 0 || !strings.HasPrefix(out, "PASS ") || errOut != "" {
 		t.Fatalf("example cases: %d %q %q", code, out, errOut)
 	}
