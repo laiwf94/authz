@@ -1,6 +1,6 @@
-// Command grantd runs the authorization service.
-//
-// Configuration comes from the environment:
+// Package serve implements "authz serve", the authorization service that
+// was the grantd command. It keeps grantd's environment variables and
+// behaviour unchanged:
 //
 //	GRANTD_ADDR        listen address (default ":8080")
 //	GRANTD_DATA_DIR    directory for the write-ahead log; empty keeps data in memory only
@@ -9,22 +9,21 @@
 //	GRANTD_CACHE_SIZE  check results kept across requests (default 100000; 0 disables)
 //	GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
 //	GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
-package main
+package serve
 
 import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/laiwf94/authz/internal/authz/api"
@@ -33,13 +32,76 @@ import (
 	"github.com/laiwf94/authz/internal/metrics"
 )
 
-func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, os.Getenv, os.Stdout, nil); err != nil {
-		fmt.Fprintln(os.Stderr, "grantd:", err)
-		os.Exit(1)
+// Summary is the one-line description shown in "authz help".
+const Summary = "run the authorization (relationships and checks) API"
+
+const usage = `usage: authz serve
+
+Runs the authorization API: schema, relationships, checks, lookups and watch.
+It takes no flags; configuration comes from the environment, as grantd's did:
+
+  GRANTD_ADDR        listen address (default ":8080")
+  GRANTD_DATA_DIR    directory for the write-ahead log; empty keeps data in memory only
+  GRANTD_API_KEYS    comma-separated bearer keys, each at least 16 characters (required)
+  GRANTD_TOKEN_KEY   64 hex characters used to sign consistency tokens; required with GRANTD_DATA_DIR
+  GRANTD_CACHE_SIZE  check results kept across requests (default 100000; 0 disables)
+  GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
+  GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
+
+Logs are JSON lines on standard output. SIGINT or SIGTERM drains requests
+and stops. "authz check -serve" validates this environment without starting.
+`
+
+// Run is the "authz serve" subcommand. It serves until ctx ends and returns
+// the process exit code: 0 after a clean shutdown, 1 when the server cannot
+// start or fails, 2 for a usage error.
+func Run(ctx context.Context, args []string, getenv func(string) string, _ io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprint(fs.Output(), usage) }
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
 	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "authz serve: unexpected argument %q; configuration comes from the environment\n", fs.Arg(0))
+		return 2
+	}
+	if err := run(ctx, getenv, stdout, nil); err != nil {
+		fmt.Fprintln(stderr, "authz serve:", err)
+		return 1
+	}
+	return 0
+}
+
+// Check validates the environment "authz serve" would start with, without
+// opening the store or listening: every rule run applies before it starts
+// serving, including the API key length and a data directory that exists
+// but is not a directory.
+func Check(getenv func(string) string) []error {
+	cfg, err := loadConfig(getenv)
+	if err != nil {
+		return []error{err}
+	}
+	var errs []error
+	for i, k := range cfg.apiKeys {
+		if len(k) < api.MinKeyLength {
+			errs = append(errs, fmt.Errorf("GRANTD_API_KEYS: key %d is %d characters; each key must be at least %d", i+1, len(k), api.MinKeyLength))
+		}
+	}
+	if _, _, err := net.SplitHostPort(cfg.addr); err != nil {
+		errs = append(errs, fmt.Errorf("GRANTD_ADDR: %v", err))
+	}
+	if cfg.dataDir != "" {
+		if fi, err := os.Stat(cfg.dataDir); err == nil && !fi.IsDir() {
+			errs = append(errs, fmt.Errorf("GRANTD_DATA_DIR: %s exists and is not a directory", cfg.dataDir))
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("GRANTD_DATA_DIR: %v", err))
+		}
+	}
+	return errs
 }
 
 type config struct {

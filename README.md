@@ -75,19 +75,41 @@ byte. Around that sit API keys checked in constant time, limits on request size
 and work, deadlines, structured JSON logs with request IDs, Prometheus metrics
 and graceful shutdown.
 
-## Running grantd
+## Running authz
+
+Everything is one binary, `authz`, with a subcommand per part
+(`authz help` lists them). `authz serve` is the authorization API that used
+to be the grantd command, with the same `GRANTD_*` environment variables.
 
 ```console
 $ export GRANTD_API_KEYS=local-dev-key-0123456
-$ go run ./cmd/grantd                          # in memory; add GRANTD_DATA_DIR and GRANTD_TOKEN_KEY to persist
+$ go run ./cmd/authz check -serve -schema examples/docs.schema   # validate without starting
+$ go run ./cmd/authz serve                     # in memory; add GRANTD_DATA_DIR and GRANTD_TOKEN_KEY to persist
 $ ./examples/demo.sh                           # writes a schema and data, then runs checks
 ```
+
+`authz ctl` talks to a running server, with the key in `AUTHZ_API_KEY` and
+the address in `AUTHZ_URL` (default `http://localhost:8080`):
+
+```console
+$ export AUTHZ_API_KEY=local-dev-key-0123456
+$ authz ctl schema write examples/docs.schema
+$ tok=$(authz ctl rel touch group:eng#member@user:alice doc:design#editor@group:eng#member)
+$ authz ctl check -token "$tok" doc:design edit user:alice
+allowed
+$ authz ctl rel read doc:design            # pages through every match at one snapshot
+$ authz ctl lookup doc view user:alice
+```
+
+`check` exits 0 when allowed and 3 when denied; every subcommand exits 2 for
+a usage error. `authz check -relationships file -schema file` validates a
+file of relationships against a schema before you load it.
 
 Or with Docker:
 
 ```console
-$ docker build -t grantd .
-$ docker run -p 8080:8080 -e GRANTD_API_KEYS=local-dev-key-0123456 grantd
+$ docker build -t authz .
+$ docker run -p 8080:8080 -e GRANTD_API_KEYS=local-dev-key-0123456 authz
 ```
 
 ## HTTP API
@@ -157,13 +179,16 @@ log format and recovery, how consistency tokens work, how cycles are handled,
 the trade-offs taken and what would change to run this across many machines.
 
 ```text
-cmd/grantd                server entry point and configuration
-internal/authz/schema     schema language: lexer, parser, validation, canonical printer
-internal/authz/store      multi-version relationship store and write-ahead log
-internal/authz/check      check engine, result cache, lookups
-internal/authz/token      signed consistency tokens
-internal/authz/api        HTTP API, auth, errors, logging, metrics wiring
-internal/metrics          Prometheus text exposition
+cmd/authz                   the one binary: subcommand dispatcher and version
+cmd/authz/internal/serve    authz serve (formerly grantd): configuration and startup
+cmd/authz/internal/ctl      authz ctl: HTTP client for schema, relationships, checks
+cmd/authz/internal/checkcmd authz check: validate environment, schema and relationship files
+internal/authz/schema       schema language: lexer, parser, validation, canonical printer
+internal/authz/store        multi-version relationship store and write-ahead log
+internal/authz/check        check engine, result cache, lookups
+internal/authz/token        signed consistency tokens
+internal/authz/api          HTTP API, auth, errors, logging, metrics wiring
+internal/metrics            Prometheus text exposition
 ```
 
 ## License

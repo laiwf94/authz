@@ -244,6 +244,11 @@ func (s *Store) applySchema(rev Revision, sc *schema.Schema, src string) {
 	s.head = rev
 }
 
+// CheckAgainst reports whether sc allows r: its resource type is defined, its
+// relation is a relation (not a permission) and the relation allows its
+// subject. Write applies the same rule to every update.
+func CheckAgainst(sc *schema.Schema, r Relationship) error { return checkAgainst(sc, r) }
+
 func checkAgainst(sc *schema.Schema, r Relationship) error {
 	d, ok := sc.Defs[r.ResourceType]
 	if !ok {

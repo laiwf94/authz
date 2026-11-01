@@ -38,6 +38,9 @@ const (
 	maxRequestIDBytes = 128
 )
 
+// MinKeyLength is the shortest API key New accepts.
+const MinKeyLength = 16
+
 // Config configures a Server.
 type Config struct {
 	Store   *store.Store
@@ -81,8 +84,8 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{st: cfg.Store, tokens: cfg.Tokens, log: cfg.Logger, m: cfg.Metrics,
 		quantum: cfg.Quantum, timeout: cfg.Timeout}
 	for _, k := range cfg.APIKeys {
-		if len(k) < 16 {
-			return nil, errors.New("api: API keys must be at least 16 characters")
+		if len(k) < MinKeyLength {
+			return nil, fmt.Errorf("api: API keys must be at least %d characters", MinKeyLength)
 		}
 		s.keys = append(s.keys, sha256.Sum256([]byte(k)))
 	}
