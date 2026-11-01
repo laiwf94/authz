@@ -136,6 +136,13 @@ shown above:
 $ ./examples/demo.sh
 ```
 
+At the end it turns the audit log into recorded decisions (timestamps,
+latencies, request and approval ids and argument HMACs normalised) and
+compares them with `examples/demo_decisions.jsonl`, failing on any difference,
+so a change that alters what the gateway decides in these scenarios cannot
+pass CI unnoticed. When a change is meant to alter them, rewrite the recording
+with `DEMO_RECORD=1 ./examples/demo.sh` and review the diff.
+
 To run the pieces yourself:
 
 ```console

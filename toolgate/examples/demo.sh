@@ -5,10 +5,16 @@
 # tool-definition change detection, and a tamper-evident audit log.
 #
 # Needs go, curl and python3. Uses ports 18080, 18081 and 19100 on 127.0.0.1.
+#
+# The audit log the scenarios produce is compared with the recorded decisions
+# in demo_decisions.jsonl (timestamps, latencies and per-run identifiers
+# normalised; see scripts/recorded-decisions.go), and the demo fails on any
+# difference. DEMO_RECORD=1 rewrites the recording instead.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
+REPO="$(cd "$ROOT/.." && pwd)"
 WORK="$(mktemp -d)"
 GW=http://127.0.0.1:18080
 ADMIN=http://127.0.0.1:18081
@@ -153,6 +159,9 @@ for t in json.load(sys.stdin)["tools"]:
 echo
 echo "8. The audit log is a hash chain"
 "$WORK/toolgate" audit verify "$WORK/audit.jsonl" | sed 's/^/   /'
+echo "   and it holds exactly the decisions recorded for this demo:"
+(cd "$REPO" && go run scripts/recorded-decisions.go ${DEMO_RECORD:+-update} \
+  toolgate/examples/demo_decisions.jsonl "$WORK/audit.jsonl") | sed 's/^/   /'
 LINE=$(python3 -c '
 import sys
 path = sys.argv[1]
