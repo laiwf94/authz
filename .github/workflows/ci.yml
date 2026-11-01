@@ -28,5 +28,19 @@ jobs:
         run: |
           go test ./internal/authz/schema -run=^$ -fuzz=FuzzParse -fuzztime=30s
           go test ./internal/authz/store -run=^$ -fuzz=FuzzParseRelationship -fuzztime=30s
+          go test ./internal/authn/jose -run=^$ -fuzz=FuzzParse$ -fuzztime=20s
+          go test ./internal/authn/jose -run=^$ -fuzz=FuzzParseKeySet -fuzztime=20s
+          go test ./internal/authn/seal -run=^$ -fuzz=FuzzOpen -fuzztime=20s
+          go test ./internal/authn/redirect -run=^$ -fuzz=FuzzValidate -fuzztime=20s
+          go test ./internal/authn/saml -run=^$ -fuzz=FuzzParseResponse -fuzztime=30s
+          go test ./internal/authn/saml -run=^$ -fuzz=FuzzParseMetadata -fuzztime=20s
+          go test ./internal/authn/config -run=^$ -fuzz=FuzzCheck -fuzztime=20s
+      # Every test, subtest and fuzz seed the wicket suite ran before the
+      # move must still pass: internal/authn/testdata/wicket-suite.txt.
+      - name: Suite counts (authn)
+        shell: bash
+        run: |
+          go test -json -count=1 ./internal/authn/... ./cmd/wicket/... ./cmd/fakeidp/... ./examples/whoami/... \
+            | go run scripts/suite-counts.go internal/authn/testdata/wicket-suite.txt
       - name: Vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
