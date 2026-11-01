@@ -1,0 +1,230 @@
+> GET {{public}}/login?app=whoami&provider=corp
+> Accept: text/html
+< HTTP/1.1 302 Found
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Location: {{idp}}/authorize?client_id=wicket&code_challenge=<pkce#1>&code_challenge_method=S256&nonce=<nonce#1>&redirect_uri={{public}}%2Fcallback%2Fcorp&response_type=code&scope=openid+email+profile&state=<state#1>
+< Referrer-Policy: no-referrer
+< Set-Cookie: __Host-wicket-login-<login#1>=<cookie#1>; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-1
+<
+<a href="{{idp}}/authorize?client_id=wicket&amp;code_challenge=<pkce#1>&amp;code_challenge_method=S256&amp;nonce=<nonce#1>&amp;redirect_uri={{public}}%2Fcallback%2Fcorp&amp;response_type=code&amp;scope=openid+email+profile&amp;state=<state#1>">Found</a>.
+
+> GET {{public}}/callback/corp?code=<code#1>&state=<state#1>
+> Accept: text/html
+> Cookie: __Host-wicket-login-<login#1>=<cookie#1>
+< HTTP/1.1 302 Found
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Location: {{public}}/
+< Referrer-Policy: no-referrer
+< Set-Cookie: __Host-wicket-login-<login#1>=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax
+< Set-Cookie: __Host-wicket=<cookie#2>; Path=/; Expires=<T+24h0m0s>; HttpOnly; Secure; SameSite=Lax
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-2
+<
+<a href="{{public}}/">Found</a>.
+
+
+=== forbidden: API call
+> GET {{public}}/auth
+> X-Forwarded-Host: {{host}}
+> X-Forwarded-Proto: https
+> X-Forwarded-Uri: /
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 403 Forbidden
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-3
+<
+{"error":{"code":"permission_denied","message":"this account may not use this application","request_id":"golden-3"}}
+
+=== forbidden: browser page with sign-out form
+> GET {{public}}/auth
+> Accept: text/html
+> X-Forwarded-Host: {{host}}
+> X-Forwarded-Uri: /
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 403 Forbidden
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-4
+<
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>No access</title><style>
+:root{--bg:#f4f5f7;--card:#fff;--text:#1d2330;--muted:#5b6475;--line:#d9dde4;--accent:#2f5bd3;--danger:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--text:#e8eaee;--muted:#a3abb9;--line:#343a45;--accent:#7c9cf5;--danger:#f97066}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:100%;max-width:400px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px}
+h1{font-size:20px;margin:0 0 8px}
+p{margin:0 0 16px;color:var(--muted)}
+.list{display:grid;gap:10px;margin:20px 0 0}
+a.btn,button{display:block;width:100%;min-height:44px;padding:11px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit;text-align:center;text-decoration:none;cursor:pointer}
+a.btn:hover,button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.code{font:13px ui-monospace,monospace;color:var(--muted)}
+.who{color:var(--text);font-weight:600}
+</style></head><body><main>
+<h1>You don't have access</h1>
+<p>You are signed in as <span class="who">bob@example.org</span>, but this account is not allowed to use this application. Ask its owner for access, or sign in with another account.</p>
+<form method="post" action="{{public}}/logout"><input type="hidden" name="csrf" value="<csrf#1>"><button type="submit">Sign out</button></form>
+<p class="code">Reference: golden-4</p>
+</main></body></html>
+<no newline at end of body>
+
+=== admin without a token
+> GET {{admin}}/admin/sessions
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 401 Unauthorized
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< Www-Authenticate: Bearer realm="wicket-admin"
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-5
+<
+{"error":{"code":"unauthenticated","message":"missing or invalid admin token","request_id":"golden-5"}}
+
+=== admin session list
+> GET {{admin}}/admin/sessions?subject=bob
+> Authorization: Bearer admin-token-0123456789
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-6
+<
+{"sessions":[{"id":"<session#1>","identity":{"provider":"corp","sub":"bob","email":"bob@example.org","name":"Bob","groups":["sales"]},"created_at":"<T+0s>","last_seen_at":"<T+0s>","expires_at":"<T+24h0m0s>"}]}
+
+=== admin bad requests
+> GET {{admin}}/admin/sessions?limit=0
+> Authorization: Bearer admin-token-0123456789
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 400 Bad Request
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-7
+<
+{"error":{"code":"invalid_argument","message":"limit must be 1-1000","request_id":"golden-7"}}
+> DELETE {{admin}}/admin/sessions/not-an-id
+> Authorization: Bearer admin-token-0123456789
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 400 Bad Request
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-8
+<
+{"error":{"code":"invalid_argument","message":"session id must be 32 hex characters","request_id":"golden-8"}}
+> DELETE {{admin}}/admin/sessions/<session#2>
+> Authorization: Bearer admin-token-0123456789
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 404 Not Found
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-9
+<
+{"error":{"code":"not_found","message":"no such live session","request_id":"golden-9"}}
+
+=== admin revokes the session
+> DELETE {{admin}}/admin/sessions/<session#1>
+> Authorization: Bearer admin-token-0123456789
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 204 No Content
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-10
+
+=== forward-auth after revocation
+> GET {{public}}/auth
+> X-Forwarded-Host: {{host}}
+> X-Forwarded-Proto: https
+> X-Forwarded-Uri: /
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 401 Unauthorized
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< Www-Authenticate: Cookie realm="wicket"
+< X-Auth-Redirect: {{public}}/login?app=whoami&rd={{public}}%2F
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-11
+<
+{"error":{"code":"unauthenticated","message":"sign in at the URL in the X-Auth-Redirect header","request_id":"golden-11"}}
+
+=== admin reload and health
+> POST {{admin}}/admin/reload
+> Authorization: Bearer admin-token-0123456789
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-12
+<
+{"apps":2,"providers":2,"reloaded":true}
+> GET {{admin}}/healthz
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-13
+<
+{"status":"ok"}

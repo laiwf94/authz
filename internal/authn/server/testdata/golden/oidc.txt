@@ -1,0 +1,259 @@
+=== anonymous forward-auth from nginx
+> GET {{public}}/auth
+> X-Forwarded-Host: {{host}}
+> X-Forwarded-Proto: https
+> X-Forwarded-Uri: /private?x=1
+< HTTP/1.1 401 Unauthorized
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< Www-Authenticate: Cookie realm="wicket"
+< X-Auth-Redirect: {{public}}/login?app=whoami&rd={{public}}%2Fprivate%3Fx%3D1
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-1
+<
+{"error":{"code":"unauthenticated","message":"sign in at the URL in the X-Auth-Redirect header","request_id":"golden-1"}}
+
+=== provider chooser
+> GET {{public}}/login?app=whoami&rd={{public}}%2Fprivate%3Fx%3D1
+> Accept: text/html
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-2
+<
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Sign in</title><style>
+:root{--bg:#f4f5f7;--card:#fff;--text:#1d2330;--muted:#5b6475;--line:#d9dde4;--accent:#2f5bd3;--danger:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--text:#e8eaee;--muted:#a3abb9;--line:#343a45;--accent:#7c9cf5;--danger:#f97066}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:100%;max-width:400px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px}
+h1{font-size:20px;margin:0 0 8px}
+p{margin:0 0 16px;color:var(--muted)}
+.list{display:grid;gap:10px;margin:20px 0 0}
+a.btn,button{display:block;width:100%;min-height:44px;padding:11px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit;text-align:center;text-decoration:none;cursor:pointer}
+a.btn:hover,button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.code{font:13px ui-monospace,monospace;color:var(--muted)}
+.who{color:var(--text);font-weight:600}
+</style></head><body><main>
+<h1>Sign in to continue</h1><p>Choose how you want to sign in.</p>
+<div class="list"><a class="btn" href="{{public}}/login?app=whoami&amp;provider=corp&amp;rd={{public}}%2Fprivate%3Fx%3D1">Corp SSO</a><a class="btn" href="{{public}}/login?app=whoami&amp;provider=partner&amp;rd={{public}}%2Fprivate%3Fx%3D1">Partner SAML</a></div>
+</main></body></html>
+<no newline at end of body>
+
+=== OpenID Connect login and callback
+> GET {{public}}/login?app=whoami&provider=corp&rd={{public}}%2Fprivate%3Fx%3D1
+> Accept: text/html
+< HTTP/1.1 302 Found
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Location: {{idp}}/authorize?client_id=wicket&code_challenge=<pkce#1>&code_challenge_method=S256&nonce=<nonce#1>&redirect_uri={{public}}%2Fcallback%2Fcorp&response_type=code&scope=openid+email+profile&state=<state#1>
+< Referrer-Policy: no-referrer
+< Set-Cookie: __Host-wicket-login-<login#1>=<cookie#1>; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-3
+<
+<a href="{{idp}}/authorize?client_id=wicket&amp;code_challenge=<pkce#1>&amp;code_challenge_method=S256&amp;nonce=<nonce#1>&amp;redirect_uri={{public}}%2Fcallback%2Fcorp&amp;response_type=code&amp;scope=openid+email+profile&amp;state=<state#1>">Found</a>.
+
+> GET {{public}}/callback/corp?code=<code#1>&state=<state#1>
+> Accept: text/html
+> Cookie: __Host-wicket-login-<login#1>=<cookie#1>
+< HTTP/1.1 302 Found
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Location: {{public}}/private?x=1
+< Referrer-Policy: no-referrer
+< Set-Cookie: __Host-wicket-login-<login#1>=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax
+< Set-Cookie: __Host-wicket=<cookie#2>; Path=/; Expires=<T+24h0m0s>; HttpOnly; Secure; SameSite=Lax
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-4
+<
+<a href="{{public}}/private?x=1">Found</a>.
+
+
+=== signed-in forward-auth with identity headers and upstream token
+> GET {{public}}/auth
+> X-Forwarded-Host: {{host}}
+> X-Forwarded-Proto: https
+> X-Forwarded-Uri: /private
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Auth-Email: alice@example.org
+< X-Auth-Groups: eng,admins
+< X-Auth-Provider: corp
+< X-Auth-Token: jwt{{"alg":"ES256","kid":"<key#1>","typ":"JWT"}.{"iss":"{{public}}","aud":"whoami","sub":"alice","email":"alice@example.org","name":"Alice","groups":["eng","admins"],"idp":"corp","sid":"<session#1>","iat":"<T+0s>","nbf":"<T+0s>","exp":"<T+2m0s>"}}
+< X-Auth-User: alice
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-5
+
+=== published keys
+> GET {{public}}/.well-known/jwks.json
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 200 OK
+< Cache-Control: public, max-age=300
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-6
+<
+{"keys":[{"alg":"ES256","crv":"P-256","kid":"<key#1>","kty":"EC","use":"sig","x":"<key#2>","y":"<key#3>"}]}
+<no newline at end of body>
+
+=== logout confirmation page
+> GET {{public}}/logout
+> Accept: text/html
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-7
+<
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Sign out</title><style>
+:root{--bg:#f4f5f7;--card:#fff;--text:#1d2330;--muted:#5b6475;--line:#d9dde4;--accent:#2f5bd3;--danger:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--text:#e8eaee;--muted:#a3abb9;--line:#343a45;--accent:#7c9cf5;--danger:#f97066}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:100%;max-width:400px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px}
+h1{font-size:20px;margin:0 0 8px}
+p{margin:0 0 16px;color:var(--muted)}
+.list{display:grid;gap:10px;margin:20px 0 0}
+a.btn,button{display:block;width:100%;min-height:44px;padding:11px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit;text-align:center;text-decoration:none;cursor:pointer}
+a.btn:hover,button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.code{font:13px ui-monospace,monospace;color:var(--muted)}
+.who{color:var(--text);font-weight:600}
+</style></head><body><main>
+<h1>Sign out?</h1><p>You are signed in as <span class="who">alice@example.org</span>.</p>
+<form method="post" action="{{public}}/logout"><input type="hidden" name="csrf" value="<csrf#1>"><input type="hidden" name="rd" value=""><button class="primary" type="submit">Sign out</button></form>
+</main></body></html>
+<no newline at end of body>
+
+=== logout
+> POST {{public}}/logout
+> Accept: text/html
+> Content-Type: application/x-www-form-urlencoded
+> Cookie: __Host-wicket=<cookie#2>
+> 
+> csrf=<csrf#1>&rd=
+< HTTP/1.1 303 See Other
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Location: {{idp}}/logout?client_id=wicket&post_logout_redirect_uri={{public}}%2Flogged-out
+< Referrer-Policy: no-referrer
+< Set-Cookie: __Host-wicket=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-8
+
+=== forward-auth after logout
+> GET {{public}}/auth
+> X-Forwarded-Host: {{host}}
+> X-Forwarded-Proto: https
+> X-Forwarded-Uri: /private
+< HTTP/1.1 401 Unauthorized
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< Www-Authenticate: Cookie realm="wicket"
+< X-Auth-Redirect: {{public}}/login?app=whoami&rd={{public}}%2Fprivate
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-9
+<
+{"error":{"code":"unauthenticated","message":"sign in at the URL in the X-Auth-Redirect header","request_id":"golden-9"}}
+
+=== logged-out page and health
+> GET {{public}}/logged-out
+> Accept: text/html
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-10
+<
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Signed out</title><style>
+:root{--bg:#f4f5f7;--card:#fff;--text:#1d2330;--muted:#5b6475;--line:#d9dde4;--accent:#2f5bd3;--danger:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--text:#e8eaee;--muted:#a3abb9;--line:#343a45;--accent:#7c9cf5;--danger:#f97066}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:100%;max-width:400px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px}
+h1{font-size:20px;margin:0 0 8px}
+p{margin:0 0 16px;color:var(--muted)}
+.list{display:grid;gap:10px;margin:20px 0 0}
+a.btn,button{display:block;width:100%;min-height:44px;padding:11px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit;text-align:center;text-decoration:none;cursor:pointer}
+a.btn:hover,button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.code{font:13px ui-monospace,monospace;color:var(--muted)}
+.who{color:var(--text);font-weight:600}
+</style></head><body><main>
+<h1>You are signed out</h1><p>You can close this window.</p>
+</main></body></html>
+<no newline at end of body>
+> GET {{public}}/healthz
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-11
+<
+{"status":"ok"}
+
+=== unknown path
+> GET {{public}}/nope
+> Accept: application/json
+< HTTP/1.1 404 Not Found
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/json
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-12
+<
+{"error":{"code":"not_found","message":"no such endpoint","request_id":"golden-12"}}

@@ -1,0 +1,135 @@
+=== service provider metadata
+> GET {{public}}/saml/partner/metadata
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: application/samlmetadata+xml
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-1
+<
+<?xml version="1.0" encoding="UTF-8"?>
+<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" entityID="{{public}}/saml/partner/metadata">
+  <md:SPSSODescriptor AuthnRequestsSigned="false" WantAssertionsSigned="true" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:KeyDescriptor use="signing">
+      <ds:KeyInfo>
+        <ds:X509Data>
+          <ds:X509Certificate><cert#1></ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+    </md:KeyDescriptor>
+    <md:KeyDescriptor use="encryption">
+      <ds:KeyInfo>
+        <ds:X509Data>
+          <ds:X509Certificate><cert#1></ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+      <md:EncryptionMethod Algorithm="http://www.w3.org/2009/xmlenc11#aes256-gcm"/>
+      <md:EncryptionMethod Algorithm="http://www.w3.org/2009/xmlenc11#aes128-gcm"/>
+      <md:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p"/>
+      <md:EncryptionMethod Algorithm="http://www.w3.org/2009/xmlenc11#rsa-oaep"/>
+    </md:KeyDescriptor>
+    <md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified</md:NameIDFormat>
+    <md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="{{public}}/saml/partner/acs" index="0" isDefault="true"/>
+  </md:SPSSODescriptor>
+</md:EntityDescriptor>
+
+=== SAML login redirect
+> GET {{public}}/login?app=whoami&provider=partner
+> Accept: text/html
+< HTTP/1.1 302 Found
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Location: {{idp}}/saml/sso?SAMLRequest=<samlrequest#1>&RelayState=<relaystate#1>
+< Referrer-Policy: no-referrer
+< Set-Cookie: __Host-wicket-login-<login#1>=<cookie#1>; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=None
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-2
+<
+<a href="{{idp}}/saml/sso?SAMLRequest=<samlrequest#1>&amp;RelayState=<relaystate#1>">Found</a>.
+
+# AuthnRequest: <samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="<samlid#1>" Version="2.0" IssueInstant="<wall-clock>" Destination="{{idp}}/saml/sso" AssertionConsumerServiceURL="{{public}}/saml/partner/acs" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"><saml:Issuer>{{public}}/saml/partner/metadata</saml:Issuer><samlp:NameIDPolicy Format="urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified" AllowCreate="true"/></samlp:AuthnRequest>
+
+=== assertion consumer service
+> POST {{public}}/saml/partner/acs
+> Accept: text/html
+> Content-Type: application/x-www-form-urlencoded
+> Cookie: __Host-wicket-login-<login#1>=<cookie#1>
+> 
+> RelayState=<relaystate#1>&SAMLResponse=<samlresponse#1>
+< HTTP/1.1 303 See Other
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Location: {{public}}/
+< Referrer-Policy: no-referrer
+< Set-Cookie: __Host-wicket-login-<login#1>=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=None
+< Set-Cookie: __Host-wicket=<cookie#2>; Path=/; Expires=<T+8h0m0s>; HttpOnly; Secure; SameSite=Lax
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-3
+
+=== replayed assertion
+> POST {{public}}/saml/partner/acs
+> Accept: text/html
+> Content-Type: application/x-www-form-urlencoded
+> Cookie: __Host-wicket=<cookie#2>
+> 
+> RelayState=<relaystate#1>&SAMLResponse=<samlresponse#1>
+< HTTP/1.1 400 Bad Request
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Content-Type: text/html; charset=utf-8
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-4
+<
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Sign-in failed</title><style>
+:root{--bg:#f4f5f7;--card:#fff;--text:#1d2330;--muted:#5b6475;--line:#d9dde4;--accent:#2f5bd3;--danger:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--text:#e8eaee;--muted:#a3abb9;--line:#343a45;--accent:#7c9cf5;--danger:#f97066}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:100%;max-width:400px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px}
+h1{font-size:20px;margin:0 0 8px}
+p{margin:0 0 16px;color:var(--muted)}
+.list{display:grid;gap:10px;margin:20px 0 0}
+a.btn,button{display:block;width:100%;min-height:44px;padding:11px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit;text-align:center;text-decoration:none;cursor:pointer}
+a.btn:hover,button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.code{font:13px ui-monospace,monospace;color:var(--muted)}
+.who{color:var(--text);font-weight:600}
+</style></head><body><main>
+<h1>Sign-in failed</h1><p>We couldn&#39;t complete your sign-in. Please try again; if it keeps happening, give the reference below to your administrator.</p>
+
+<p class="code">Reference: golden-4</p>
+</main></body></html>
+<no newline at end of body>
+
+=== signed-in forward-auth
+> GET {{public}}/auth
+> X-Forwarded-Host: {{host}}
+> X-Forwarded-Proto: https
+> X-Forwarded-Uri: /
+> Cookie: __Host-wicket=<cookie#2>
+< HTTP/1.1 200 OK
+< Cache-Control: no-store
+< Content-Security-Policy: default-src 'none'; style-src 'sha256-EfDB+E4ozGZyNnGeFWw8YAFIRzU40oZ2Hx4vap8d8mI='; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'
+< Referrer-Policy: no-referrer
+< Strict-Transport-Security: max-age=31536000
+< X-Auth-Email: carol@partner.example
+< X-Auth-Groups: eng
+< X-Auth-Provider: partner
+< X-Auth-Token: jwt{{"alg":"ES256","kid":"<key#1>","typ":"JWT"}.{"iss":"{{public}}","aud":"whoami","sub":"carol@partner.example","email":"carol@partner.example","name":"Carol","groups":["eng"],"idp":"partner","sid":"<session#1>","iat":"<T+0s>","nbf":"<T+0s>","exp":"<T+2m0s>"}}
+< X-Auth-User: carol@partner.example
+< X-Content-Type-Options: nosniff
+< X-Frame-Options: DENY
+< X-Request-Id: golden-5
