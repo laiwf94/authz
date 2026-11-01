@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laiwf94/authz/internal/schema"
-	"github.com/laiwf94/authz/internal/store"
+	"github.com/laiwf94/authz/internal/authz/schema"
+	"github.com/laiwf94/authz/internal/authz/store"
 )
 
 const model = `

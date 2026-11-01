@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/laiwf94/authz/internal/authz/store"
+	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/metrics"
-	"github.com/laiwf94/authz/internal/store"
-	"github.com/laiwf94/authz/internal/token"
 )
 
 const apiKey = "test-key-0123456789"

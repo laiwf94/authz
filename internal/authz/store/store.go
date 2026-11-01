@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/laiwf94/authz/internal/schema"
+	"github.com/laiwf94/authz/internal/authz/schema"
 )
 
 // Revision identifies a consistent snapshot. Every committed write gets the

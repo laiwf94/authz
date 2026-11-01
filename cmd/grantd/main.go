@@ -27,10 +27,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/laiwf94/authz/internal/api"
+	"github.com/laiwf94/authz/internal/authz/api"
+	"github.com/laiwf94/authz/internal/authz/store"
+	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/metrics"
-	"github.com/laiwf94/authz/internal/store"
-	"github.com/laiwf94/authz/internal/token"
 )
 
 func main() {

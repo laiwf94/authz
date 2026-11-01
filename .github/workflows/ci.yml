@@ -26,7 +26,7 @@ jobs:
         run: go tool cover -func=coverage.out | tail -1
       - name: Fuzz (short)
         run: |
-          go test ./internal/schema -run=^$ -fuzz=FuzzParse -fuzztime=30s
-          go test ./internal/store -run=^$ -fuzz=FuzzParseRelationship -fuzztime=30s
+          go test ./internal/authz/schema -run=^$ -fuzz=FuzzParse -fuzztime=30s
+          go test ./internal/authz/store -run=^$ -fuzz=FuzzParseRelationship -fuzztime=30s
       - name: Vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laiwf94/authz/internal/store"
+	"github.com/laiwf94/authz/internal/authz/store"
 )
 
 func (f *fixture) explain(resource, perm, subject string, maxNodes int) (bool, *Trace) {

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/laiwf94/authz/internal/store"
+	"github.com/laiwf94/authz/internal/authz/store"
 )
 
 func issuer(t *testing.T, b byte) *Issuer {

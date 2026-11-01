@@ -132,7 +132,7 @@ with stable codes: `invalid_argument` 400, `unauthenticated` 401, `already_exist
 
 ```console
 $ go test -race ./...                 # full suite
-$ go test -run=^$ -bench=. ./internal/check/
+$ go test -run=^$ -bench=. ./internal/authz/check/
 ```
 
 ## Check latency
@@ -157,13 +157,13 @@ log format and recovery, how consistency tokens work, how cycles are handled,
 the trade-offs taken and what would change to run this across many machines.
 
 ```text
-cmd/grantd          server entry point and configuration
-internal/schema     schema language: lexer, parser, validation, canonical printer
-internal/store      multi-version relationship store and write-ahead log
-internal/check      check engine, result cache, lookups
-internal/token      signed consistency tokens
-internal/api        HTTP API, auth, errors, logging, metrics wiring
-internal/metrics    Prometheus text exposition
+cmd/grantd                server entry point and configuration
+internal/authz/schema     schema language: lexer, parser, validation, canonical printer
+internal/authz/store      multi-version relationship store and write-ahead log
+internal/authz/check      check engine, result cache, lookups
+internal/authz/token      signed consistency tokens
+internal/authz/api        HTTP API, auth, errors, logging, metrics wiring
+internal/metrics          Prometheus text exposition
 ```
 
 ## License

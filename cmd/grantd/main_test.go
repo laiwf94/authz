@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laiwf94/authz/internal/store"
+	"github.com/laiwf94/authz/internal/authz/store"
 )
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }

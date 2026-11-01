@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/laiwf94/authz/internal/schema"
-	"github.com/laiwf94/authz/internal/store"
+	"github.com/laiwf94/authz/internal/authz/schema"
+	"github.com/laiwf94/authz/internal/authz/store"
 )
 
 // Lister enumerates objects of a type, for lookups.
