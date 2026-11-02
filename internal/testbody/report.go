@@ -16,19 +16,39 @@ type FileResult struct {
 	Changes []Change
 	// Allowed lists the differing lines an allow list accepted.
 	Allowed []Change
+	// Added lists the keys of declarations added since the move.
+	Added []string
 	// OldTests and NewTests are the test functions on each side.
 	OldTests, NewTests []string
 	// OldPackage and NewPackage are the package clauses on each side.
 	OldPackage, NewPackage string
 }
 
-// Clean reports whether the file moved with an unchanged body and the same
-// tests. A file that is gone is never clean; an added file always is.
+// Clean reports whether the file moved with its old declarations unchanged
+// and all its old tests. A file that is gone is never clean; an added file
+// always is.
 func (r FileResult) Clean() bool {
 	if r.Old == "" {
 		return true
 	}
-	return r.New != "" && len(r.Changes) == 0 && equal(r.OldTests, r.NewTests)
+	return r.New != "" && len(r.Changes) == 0 && len(missing(r.OldTests, r.NewTests)) == 0
+}
+
+// missing returns the names in old that new lacks, counting repeats.
+func missing(old, new []string) []string {
+	have := map[string]int{}
+	for _, t := range new {
+		have[t]++
+	}
+	var out []string
+	for _, t := range old {
+		if have[t] > 0 {
+			have[t]--
+		} else {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // PackageCount is the test count of one old package directory before the
@@ -39,7 +59,7 @@ type PackageCount struct {
 	NewDirs []string
 	// Before counts the test functions in the old directory, Moved counts
 	// those still present in the files they moved to, and Added counts the
-	// tests in files added to the new directories since.
+	// tests added to the new directories since, in moved or new files.
 	Before, Moved, Added int
 	// Missing lists old tests not found after the move, as "file: Name".
 	Missing []string
@@ -78,7 +98,7 @@ func (r *Report) OK() bool {
 // Compare reads each pair from the old and new trees and compares them.
 func Compare(pairs []Pair, readOld, readNew func(path string) ([]byte, error)) (*Report, error) {
 	rep := &Report{}
-	newTests := map[string]int{} // new dir -> tests in added files
+	newTests := map[string]int{} // new dir -> tests added since the move
 	for _, p := range pairs {
 		res := FileResult{Pair: p}
 		var oldF, newF *File
@@ -103,10 +123,10 @@ func Compare(pairs []Pair, readOld, readNew func(path string) ([]byte, error)) (
 			res.NewTests, res.NewPackage = newF.Tests, newF.Package
 		}
 		if oldF != nil && newF != nil {
-			res.Changes = Diff(oldF.Body, newF.Body)
+			res.Changes, res.Added = CompareFiles(oldF, newF)
 		}
-		if p.Old == "" {
-			newTests[path.Dir(p.New)] += len(res.NewTests)
+		if p.New != "" {
+			newTests[path.Dir(p.New)] += len(missing(res.NewTests, res.OldTests))
 		}
 		rep.Files = append(rep.Files, res)
 	}
@@ -125,17 +145,10 @@ func Compare(pairs []Pair, readOld, readNew func(path string) ([]byte, error)) (
 			dirs = append(dirs, dir)
 		}
 		pc.Before += len(f.OldTests)
-		have := map[string]int{}
-		for _, t := range f.NewTests {
-			have[t]++
-		}
-		for _, t := range f.OldTests {
-			if have[t] > 0 {
-				have[t]--
-				pc.Moved++
-			} else {
-				pc.Missing = append(pc.Missing, f.Old+": "+t)
-			}
+		gone := missing(f.OldTests, f.NewTests)
+		pc.Moved += len(f.OldTests) - len(gone)
+		for _, t := range gone {
+			pc.Missing = append(pc.Missing, f.Old+": "+t)
 		}
 		if f.New != "" {
 			nd := path.Dir(f.New)
@@ -182,6 +195,9 @@ func (r *Report) Write(w io.Writer, verbose bool) {
 				if len(f.Allowed) > 0 {
 					note = fmt.Sprintf(" (%d allowed line(s))", len(f.Allowed))
 				}
+				if len(f.Added) > 0 {
+					note += fmt.Sprintf(" (+%d declaration(s) since)", len(f.Added))
+				}
 				fmt.Fprintf(w, "clean   %s -> %s%s%s\n", f.Old, f.New, pkgNote(f), note)
 			}
 			if verbose {
@@ -193,8 +209,8 @@ func (r *Report) Write(w io.Writer, verbose bool) {
 			allowed += len(f.Allowed)
 			fmt.Fprintf(w, "CHANGED %s -> %s%s: %d line(s)\n", f.Old, f.New, pkgNote(f), len(f.Changes))
 			writeChanges(w, f, f.Changes)
-			if !equal(f.OldTests, f.NewTests) {
-				fmt.Fprintf(w, "        tests: %s -> %s\n", strings.Join(f.OldTests, " "), strings.Join(f.NewTests, " "))
+			if gone := missing(f.OldTests, f.NewTests); len(gone) > 0 {
+				fmt.Fprintf(w, "        tests gone: %s\n", strings.Join(gone, " "))
 			}
 		}
 	}
@@ -221,7 +237,7 @@ func (r *Report) Write(w io.Writer, verbose bool) {
 		}
 		extra := ""
 		if p.Added > 0 {
-			extra = fmt.Sprintf(" (+%d in added files)", p.Added)
+			extra = fmt.Sprintf(" (+%d added since)", p.Added)
 		}
 		fmt.Fprintf(w, "%s %-*s %4d -> %4d  %s%s\n", mark, tw, p.OldDir, p.Before, p.Moved, to, extra)
 		for _, m := range p.Missing {
@@ -233,7 +249,7 @@ func (r *Report) Write(w io.Writer, verbose bool) {
 	}
 	fmt.Fprintf(w, "\n%d file(s) clean, %d changed (%d line(s)), %d gone, %d added; %d allowed line(s), %d stale allow entr(ies)\n",
 		clean, changed, lines, gone, added, allowed, len(r.Stale))
-	fmt.Fprintf(w, "%d package(s): %d test(s) before, %d after the move, %d in added files\n",
+	fmt.Fprintf(w, "%d package(s): %d test(s) before, %d still there, %d added since\n",
 		len(r.Packages), before, moved, addedTests)
 }
 
@@ -256,18 +272,6 @@ func pkgNote(f FileResult) string {
 		return ""
 	}
 	return fmt.Sprintf(" [package %s -> %s]", f.OldPackage, f.NewPackage)
-}
-
-func equal(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func contains(s []string, v string) bool {

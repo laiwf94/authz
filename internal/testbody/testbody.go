@@ -3,13 +3,15 @@
 // which compares every _test.go file of the pre-merge tree with its new
 // home after the week 1 moves.
 //
-// Each file is reduced to its body: the lines of the package clause and of
-// every import declaration (with the import's doc comment) are removed, and
-// blank lines before the first other declaration are dropped, so regrouping
-// imports does not count as a change. Everything else, comments included, is
-// compared line by line. Test functions (Test, Benchmark, Fuzz and Example,
-// not TestMain) are counted from the syntax tree, so the old tree does not
-// have to build.
+// The package clause and every import declaration (with its doc comment) are
+// removed. What is left is compared declaration by declaration: every
+// top-level declaration of the old file, with its doc comment, must be in the
+// new file with the same key (its kind and name) and the same lines, and the
+// comments and blank lines outside declarations must be the same apart from
+// blank lines. Declarations added since are allowed, so the suites can grow
+// after the move, except init and TestMain, which run before every old test.
+// Test functions (Test, Benchmark, Fuzz and Example, not TestMain) are
+// counted from the syntax tree, so the old tree does not have to build.
 package testbody
 
 import (
@@ -23,24 +25,39 @@ import (
 	"unicode/utf8"
 )
 
-// Line is one line of a file body with its line number in the original file.
+// Line is one line of a file with its line number in the original file.
 type Line struct {
 	N    int
 	Text string
+}
+
+// Decl is one top-level declaration other than an import, with its doc
+// comment.
+type Decl struct {
+	// Key names the declaration: "func Name", "method Recv.Name", or the
+	// token and spec names of a const, var or type declaration, such as
+	// "var a,b".
+	Key   string
+	Lines []Line
 }
 
 // File is a parsed test file.
 type File struct {
 	// Package is the name in the package clause.
 	Package string
-	// Body is every line outside the package clause and import blocks.
-	Body []Line
+	// Decls are the top-level declarations other than imports, in source
+	// order.
+	Decls []Decl
+	// Outside holds the non-blank lines outside the package clause, the
+	// import declarations and Decls: build constraints, the package doc
+	// and free-standing comments.
+	Outside []Line
 	// Tests lists the top-level test, benchmark, fuzz and example functions
 	// in source order.
 	Tests []string
 }
 
-// Parse reduces a Go source file to its body and lists its tests.
+// Parse reduces a Go source file to its declarations and lists its tests.
 func Parse(name string, src []byte) (*File, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, name, src, parser.ParseComments|parser.SkipObjectResolution)
@@ -49,70 +66,138 @@ func Parse(name string, src []byte) (*File, error) {
 	}
 	line := func(p token.Pos) int { return fset.Position(p).Line }
 
-	removed := map[int]bool{}
-	drop := func(from, to token.Pos) {
-		for n := line(from); n <= line(to); n++ {
-			removed[n] = true
-		}
-	}
-	drop(f.Package, f.Name.End())
-	header := -1 // last line before the first declaration that is not an import
-	for _, d := range f.Decls {
-		gd, ok := d.(*ast.GenDecl)
-		if ok && gd.Tok == token.IMPORT {
-			start := gd.Pos()
-			if gd.Doc != nil {
-				start = gd.Doc.Pos()
-			}
-			drop(start, gd.End())
-			continue
-		}
-		start := d.Pos()
-		switch d := d.(type) {
-		case *ast.GenDecl:
-			if d.Doc != nil {
-				start = d.Doc.Pos()
-			}
-		case *ast.FuncDecl:
-			if d.Doc != nil {
-				start = d.Doc.Pos()
-			}
-		}
-		header = line(start) - 1
-		break
-	}
 	lines := strings.Split(string(src), "\n")
-	if header < 0 {
-		// Nothing but imports: the whole file is header.
-		header = len(lines)
-	}
 	// A file ending in a newline splits into a final empty element that is
 	// not a line.
 	if n := len(lines); n > 0 && lines[n-1] == "" {
 		lines = lines[:n-1]
 	}
+	text := func(n int) string { return strings.TrimSuffix(lines[n-1], "\r") }
+
+	used := map[int]bool{}
+	span := func(from, to token.Pos) []Line {
+		var out []Line
+		for n := line(from); n <= line(to); n++ {
+			used[n] = true
+			out = append(out, Line{N: n, Text: text(n)})
+		}
+		return out
+	}
+	span(f.Package, f.Name.End())
 
 	out := &File{Package: f.Name.Name}
-	for i, text := range lines {
-		n := i + 1
-		if removed[n] {
-			continue
-		}
-		if n <= header && strings.TrimSpace(text) == "" {
-			continue
-		}
-		out.Body = append(out.Body, Line{N: n, Text: strings.TrimSuffix(text, "\r")})
-	}
 	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Recv != nil || fd.Name.Name == "TestMain" {
-			continue
+		var doc *ast.CommentGroup
+		var key string
+		switch d := d.(type) {
+		case *ast.GenDecl:
+			doc = d.Doc
+			if d.Tok == token.IMPORT {
+				key = ""
+				break
+			}
+			key = d.Tok.String() + " " + specNames(d)
+		case *ast.FuncDecl:
+			doc = d.Doc
+			if d.Recv != nil && len(d.Recv.List) > 0 {
+				key = "method " + types(d.Recv.List[0].Type) + "." + d.Name.Name
+			} else {
+				key = "func " + d.Name.Name
+				if IsTestName(d.Name.Name) && d.Name.Name != "TestMain" {
+					out.Tests = append(out.Tests, d.Name.Name)
+				}
+			}
+		default:
+			key = fmt.Sprintf("decl %T", d)
 		}
-		if IsTestName(fd.Name.Name) {
-			out.Tests = append(out.Tests, fd.Name.Name)
+		start := d.Pos()
+		if doc != nil {
+			start = doc.Pos()
+		}
+		ls := span(start, d.End())
+		if key != "" {
+			out.Decls = append(out.Decls, Decl{Key: key, Lines: ls})
+		}
+	}
+	for i := range lines {
+		n := i + 1
+		if !used[n] && strings.TrimSpace(text(n)) != "" {
+			out.Outside = append(out.Outside, Line{N: n, Text: text(n)})
 		}
 	}
 	return out, nil
+}
+
+func specNames(d *ast.GenDecl) string {
+	var names []string
+	for _, s := range d.Specs {
+		switch s := s.(type) {
+		case *ast.TypeSpec:
+			names = append(names, s.Name.Name)
+		case *ast.ValueSpec:
+			for _, n := range s.Names {
+				names = append(names, n.Name)
+			}
+		}
+	}
+	return strings.Join(names, ",")
+}
+
+// types renders a receiver type: T, *T, T[K] or *T[K].
+func types(e ast.Expr) string {
+	switch e := e.(type) {
+	case *ast.StarExpr:
+		return "*" + types(e.X)
+	case *ast.Ident:
+		return e.Name
+	case *ast.IndexExpr:
+		return types(e.X)
+	case *ast.IndexListExpr:
+		return types(e.X)
+	case *ast.ParenExpr:
+		return types(e.X)
+	}
+	return fmt.Sprintf("%T", e)
+}
+
+// runsFirst names the declarations that run before every test of the
+// package, so adding one can change how the old tests behave.
+var runsFirst = map[string]bool{"func init": true, "func TestMain": true}
+
+// CompareFiles returns the lines in which the new file differs from the old
+// one outside imports and the package clause, and the keys of the
+// declarations it adds. A declaration that changed gives its line diff, one
+// that is gone gives all its lines as deletions, and an added init or
+// TestMain gives all its lines as insertions. Declarations with the same
+// key (several init functions, var _ = ...) are paired in order.
+func CompareFiles(old, new *File) (changes []Change, added []string) {
+	byKey := map[string][]int{}
+	for i, d := range new.Decls {
+		byKey[d.Key] = append(byKey[d.Key], i)
+	}
+	paired := make([]bool, len(new.Decls))
+	for _, d := range old.Decls {
+		idx := byKey[d.Key]
+		if len(idx) == 0 {
+			changes = append(changes, Diff(d.Lines, nil)...)
+			continue
+		}
+		byKey[d.Key] = idx[1:]
+		paired[idx[0]] = true
+		changes = append(changes, Diff(d.Lines, new.Decls[idx[0]].Lines)...)
+	}
+	for i, d := range new.Decls {
+		if paired[i] {
+			continue
+		}
+		if runsFirst[d.Key] {
+			changes = append(changes, Diff(nil, d.Lines)...)
+		} else {
+			added = append(added, d.Key)
+		}
+	}
+	changes = append(changes, Diff(old.Outside, new.Outside)...)
+	return changes, added
 }
 
 // IsTestName reports whether go test treats a top-level function with this

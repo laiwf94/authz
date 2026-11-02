@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"go/ast"
 	"math/rand"
 	"reflect"
 	"strings"
@@ -42,6 +43,14 @@ func Example_second() {}
 func (s suite) TestMethod(t *testing.T) {}
 `
 
+func keys(f *File) []string {
+	var out []string
+	for _, d := range f.Decls {
+		out = append(out, d.Key)
+	}
+	return out
+}
+
 func TestParse(t *testing.T) {
 	f, err := Parse("a_test.go", []byte(before))
 	if err != nil {
@@ -54,28 +63,58 @@ func TestParse(t *testing.T) {
 	if !reflect.DeepEqual(f.Tests, wantTests) {
 		t.Errorf("tests = %v, want %v", f.Tests, wantTests)
 	}
-	var got []string
-	for _, l := range f.Body {
-		got = append(got, fmt.Sprintf("%d %s", l.N, l.Text))
+	wantKeys := []string{"func helper", "func TestA", "func TestMain", "func Testing", "func BenchmarkB", "func FuzzC", "func Example", "func Example_second", "method suite.TestMethod"}
+	if got := keys(f); !reflect.DeepEqual(got, wantKeys) {
+		t.Errorf("keys = %v", got)
 	}
-	want := []string{"1 // Copyright notice.", "3 //go:build !windows"}
-	if !reflect.DeepEqual(got[:2], want) {
-		t.Errorf("header = %q, want %q", got[:2], want)
+	if got := f.Decls[0].Lines; !reflect.DeepEqual(got, []Line{{13, "// helper is shared."}, {14, "func helper() int { return 1 }"}}) {
+		t.Errorf("helper lines = %v", got)
 	}
-	if got[2] != "13 // helper is shared." {
-		t.Errorf("first body line = %q", got[2])
-	}
-	for _, l := range f.Body {
-		if strings.Contains(l.Text, "import") || strings.Contains(l.Text, "grantd") || strings.HasPrefix(l.Text, "package") {
-			t.Errorf("line %d kept: %q", l.N, l.Text)
-		}
+	if want := []Line{{1, "// Copyright notice."}, {3, "//go:build !windows"}}; !reflect.DeepEqual(f.Outside, want) {
+		t.Errorf("outside = %v", f.Outside)
 	}
 }
 
-func TestParseMoveIsClean(t *testing.T) {
+func TestParseKeys(t *testing.T) {
+	src := `package p
+
+import "testing"
+
+const a, b = 1, 2
+
+var (
+	_ = 1
+	c int
+)
+
+type (
+	T[K any] struct{}
+	U        int
+)
+
+func (T[K]) M()     {}
+func (*U) N()       {}
+func (u *(U)) O()   {}
+func init()         {}
+func TestX(*testing.T) {}
+`
+	f, err := Parse("p.go", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"const a,b", "var _,c", "type T,U", "method T.M", "method *U.N", "method *U.O", "func init", "func TestX"}
+	if got := keys(f); !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
+	}
+	if types(&ast.ArrayType{Elt: ast.NewIdent("x")}) != "*ast.ArrayType" {
+		t.Error("types fallback")
+	}
+}
+
+func TestMoveIsClean(t *testing.T) {
 	// The package clause changes, the import path changes, the imports are
-	// regrouped into two blocks with a comment and the blank lines around
-	// them move: none of that is a body change.
+	// regrouped into two blocks with a comment, the blank lines around them
+	// move and the line endings change: none of that is a body change.
 	after := strings.Replace(before, "package main", "package serve // moved", 1)
 	after = strings.Replace(after, `import (
 	"testing"
@@ -98,31 +137,72 @@ import (
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := Diff(a.Body, b.Body); d != nil {
-		t.Errorf("diff = %v", d)
+	if d, added := CompareFiles(a, b); d != nil || added != nil {
+		t.Errorf("diff = %v, added = %v", d, added)
 	}
 	if b.Package != "serve" {
 		t.Errorf("package = %q", b.Package)
 	}
 }
 
-func TestParseBodyChanges(t *testing.T) {
-	for name, edit := range map[string][2]string{
-		"string literal": {`store.X`, `store.Y`},
-		"comment":        {`// helper is shared.`, `// helper is shared!`},
-		"blank line":     {"func helper() int { return 1 }\n", "func helper() int { return 1 }\n\n"},
-		"build tag":      {`//go:build !windows`, `//go:build linux`},
+func TestBodyChanges(t *testing.T) {
+	for name, tc := range map[string]struct {
+		from, to string
+		want     string
+	}{
+		"string literal":   {`store.X`, `store.Y`, "-16 +16"},
+		"doc comment":      {`// helper is shared.`, `// helper is shared!`, "-13 +13"},
+		"line inserted":    {"{ _ = store.X }", "{\n\tt.Skip()\n\t_ = store.X\n}", "-16 +16 +17 +18 +19"},
+		"blank in a func":  {"func FuzzC(f *testing.F) {}", "func FuzzC(f *testing.F) {\n\n}", "-24 +24 +25 +26"},
+		"build tag":        {`//go:build !windows`, `//go:build linux`, "-3 +3"},
+		"free comment":     {"func Example() {}\n", "func Example() {}\n\n// stray\n", "+28"},
+		"test removed":     {"func BenchmarkB(b *testing.B) {}\n", "", "-22"},
+		"test renamed":     {"func BenchmarkB(", "func BenchmarkBB(", "-22"},
+		"init added":       {"func Example() {}\n", "func Example() {}\n\nfunc init() { println() }\n", "+28"},
+		"TestMain added":   {"func TestMain(m *testing.M) {}\n", "func TestMain(m *testing.M) {}\nfunc TestMain(m *testing.M) {}\n", "+19"},
+		"moved and edited": {"func helper() int { return 1 }", "func helper() int { return 2 }", "-14 +14"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, _ := Parse("a", []byte(before))
-			b, err := Parse("b", []byte(strings.Replace(before, edit[0], edit[1], 1)))
+			b, err := Parse("b", []byte(strings.Replace(before, tc.from, tc.to, 1)))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if d := Diff(a.Body, b.Body); len(d) == 0 {
-				t.Error("change not found")
+			d, _ := CompareFiles(a, b)
+			var got []string
+			for _, c := range d {
+				got = append(got, fmt.Sprintf("%c%d", c.Op, c.Line.N))
+			}
+			if g := strings.Join(got, " "); g != tc.want {
+				t.Errorf("changes = %q, want %q (%v)", g, tc.want, d)
 			}
 		})
+	}
+}
+
+func TestDeclarationsAdded(t *testing.T) {
+	// New tests, helpers and types may follow the move, anywhere in the
+	// file; old declarations may be reordered.
+	after := strings.Replace(before, "func TestA(t *testing.T) { _ = store.X }\n", `// TestNew is new.
+func TestNew(t *testing.T) { t.Log(helper2()) }
+
+func helper2() int { return 2 }
+
+type fixture struct{}
+
+var _ = fixture{}
+`, 1) + "\nfunc TestA(t *testing.T) { _ = store.X }\n"
+	a, _ := Parse("a", []byte(before))
+	b, err := Parse("b", []byte(after))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, added := CompareFiles(a, b)
+	if d != nil {
+		t.Errorf("changes = %v", d)
+	}
+	if want := []string{"func TestNew", "func helper2", "type fixture", "var _"}; !reflect.DeepEqual(added, want) {
+		t.Errorf("added = %v, want %v", added, want)
 	}
 }
 
@@ -137,11 +217,11 @@ func TestParseEdgeFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if f.Package != "p" {
-				t.Errorf("package = %q", f.Package)
+			if f.Package != "p" || len(f.Outside) != 0 {
+				t.Errorf("package = %q, outside = %v", f.Package, f.Outside)
 			}
-			if name != "no newline" && len(f.Body) != 0 {
-				t.Errorf("body = %v", f.Body)
+			if name == "no newline" && !reflect.DeepEqual(f.Decls, []Decl{{"func TestX", []Line{{2, "func TestX(t *testing.T) {}"}}}}) {
+				t.Errorf("decls = %v", f.Decls)
 			}
 		})
 	}
@@ -429,7 +509,7 @@ func TestCompareCounts(t *testing.T) {
 	want := []PackageCount{
 		{OldDir: "p", NewDirs: []string{"m", "n"}, Before: 4, Moved: 4, Added: 2},
 		{OldDir: "q", Before: 1, Moved: 0, Missing: []string{"q/gone_test.go: TestQ"}},
-		{OldDir: "r", NewDirs: []string{"r"}, Before: 2, Moved: 1, Missing: []string{"r/r_test.go: TestS"}},
+		{OldDir: "r", NewDirs: []string{"r"}, Before: 2, Moved: 1, Added: 1, Missing: []string{"r/r_test.go: TestS"}},
 	}
 	if !reflect.DeepEqual(rep.Packages, want) {
 		t.Errorf("packages = %+v\nwant       %+v", rep.Packages, want)
@@ -442,14 +522,14 @@ func TestCompareCounts(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"GONE    q/gone_test.go (1 tests)",
-		"CHANGED r/r_test.go -> r/r_test.go [package main -> r]: 2 line(s)",
+		"CHANGED r/r_test.go -> r/r_test.go [package main -> r]: 1 line(s)",
 		"        - r/r_test.go:3: func TestS(t *testing.T) {}",
-		"        tests: TestR TestS -> TestR TestRenamed",
-		"ok   p    4 ->    4  m, n (+2 in added files)",
+		"        tests gone: TestS",
+		"ok   p    4 ->    4  m, n (+2 added since)",
 		"FAIL q    1 ->    0  (gone)",
 		"     missing r/r_test.go: TestS",
-		"2 file(s) clean, 1 changed (2 line(s)), 1 gone, 1 added",
-		"3 package(s): 7 test(s) before, 5 after the move, 2 in added files",
+		"2 file(s) clean, 1 changed (1 line(s)), 1 gone, 1 added",
+		"3 package(s): 7 test(s) before, 5 still there, 3 added since",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)

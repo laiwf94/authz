@@ -7,11 +7,11 @@
 //	go run scripts/testbody-diff.go [-v] [-allow FILE] BASE [HEAD]
 //
 // Every _test.go file of BASE is paired with its path in HEAD (git's rename
-// detection, or the same path), both are reduced to their bodies (see
-// internal/testbody) and diffed line by line. It then prints the test
-// functions per old package before and after the move. It exits 0 when every
-// old test file is still there with an unchanged body and the same tests, 1
-// when one is not, and 2 on a usage or git error. HEAD defaults to HEAD; -v
+// detection, or the same path) and compared outside its imports and package
+// clause, declaration by declaration (see internal/testbody). It then prints
+// the test functions per old package before and after the move. It exits 0
+// when every old test file is still there with its old declarations and
+// tests unchanged, 1 when one is not, and 2 on a usage or git error. HEAD defaults to HEAD; -v
 // also lists clean and added files. -allow names a list of changed lines a
 // move had to make (testbody.ParseAllow); an entry that matches nothing fails
 // the run too.
