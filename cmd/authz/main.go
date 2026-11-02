@@ -2,14 +2,19 @@
 // subcommand with its own flags, help text and exit codes:
 //
 //	authz serve      the authorization API (formerly grantd)
+//	authz gateway    the single sign-on gateway (formerly wicket)
 //	authz check      validate configuration and schema files without starting anything
 //	authz ctl        talk to a running authz serve: schema, relationships and checks
 //	authz mcp        the MCP gateway for AI agents (formerly toolgate)
 //	authz version    print the build's version
 //
-// authz mcpfake, a small MCP server to try the gateway against, runs but is
-// left out of the listing. The sign-on gateway registers itself here as it
-// moves in. "authz help <command>" prints a subcommand's help.
+// authz fakeidp, a test identity provider, and authz mcpfake, a small MCP
+// server to try the MCP gateway against, run but are left out of the
+// listing. "authz help <command>" prints a subcommand's help.
+//
+// A binary invoked as "wicket" (a symlink to authz, as in the image) is the
+// sign-on gateway under its old name: "wicket check" is "authz gateway
+// check", and so on.
 //
 // The dispatcher only picks the subcommand. Everything after its name is
 // passed through untouched, so subcommands can nest their own commands
@@ -24,12 +29,15 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/laiwf94/authz/cmd/authz/internal/checkcmd"
 	"github.com/laiwf94/authz/cmd/authz/internal/ctl"
+	"github.com/laiwf94/authz/cmd/authz/internal/fakeidp"
+	"github.com/laiwf94/authz/cmd/authz/internal/gateway"
 	"github.com/laiwf94/authz/cmd/authz/internal/mcp"
 	"github.com/laiwf94/authz/cmd/authz/internal/mcpfake"
 	"github.com/laiwf94/authz/cmd/authz/internal/serve"
@@ -52,11 +60,19 @@ type command struct {
 // commands is the registry. A track adds its subcommand with one line here.
 var commands = []command{
 	{name: "serve", summary: serve.Summary, run: serve.Run},
+	{name: "gateway", summary: gateway.Summary, run: gateway.Run},
+	{name: "fakeidp", summary: fakeidp.Summary, hidden: true, run: fakeidp.Run},
 	{name: "check", summary: checkcmd.Summary, run: checkcmd.Run},
 	{name: "ctl", summary: ctl.Summary, run: ctl.Run},
 	{name: "mcp", summary: mcp.Summary, run: mcp.Run},
 	{name: "mcpfake", summary: mcpfake.Summary, hidden: true, run: mcpfake.Run},
 	{name: "version", summary: "print the version, revision and Go toolchain of this build", run: runVersion},
+}
+
+// legacyNames maps the old command names that still work, through a
+// symlink to this binary, to the subcommand they now are.
+var legacyNames = map[string]runFunc{
+	gateway.LegacyName: gateway.Wicket,
 }
 
 // Exit codes of the dispatcher itself. Subcommands document their own.
@@ -67,7 +83,12 @@ const (
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := dispatch(ctx, commands, os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr)
+	var code int
+	if legacy, ok := legacyNames[filepath.Base(os.Args[0])]; ok {
+		code = legacy(ctx, os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr)
+	} else {
+		code = dispatch(ctx, commands, os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr)
+	}
 	stop()
 	os.Exit(code)
 }

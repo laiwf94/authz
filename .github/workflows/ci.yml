@@ -40,11 +40,15 @@ jobs:
           go test ./internal/authn/config -run=^$ -fuzz=FuzzCheck -fuzztime=20s
       # Every test, subtest and fuzz seed the wicket suite ran before the
       # move must still pass: internal/authn/testdata/wicket-suite.txt.
+      # cmd/wicket and cmd/fakeidp are now authz gateway and authz fakeidp.
       - name: Suite counts (authn)
         shell: bash
         run: |
-          go test -json -count=1 ./internal/authn/... ./cmd/wicket/... ./cmd/fakeidp/... ./examples/whoami/... \
-            | go run scripts/suite-counts.go internal/authn/testdata/wicket-suite.txt
+          go test -json -count=1 ./internal/authn/... ./cmd/authz/internal/gateway/... ./cmd/authz/internal/fakeidp/... ./examples/whoami/... \
+            | go run scripts/suite-counts.go \
+                -map github.com/laiwf94/authz/cmd/wicket=github.com/laiwf94/authz/cmd/authz/internal/gateway \
+                -map github.com/laiwf94/authz/cmd/fakeidp=github.com/laiwf94/authz/cmd/authz/internal/fakeidp \
+                internal/authn/testdata/wicket-suite.txt
       # Every _test.go file of the three pre-merge trees must have moved with
       # only its import block and package clause changed, apart from the
       # lines listed in scripts/testbody-allow.txt, and every package must

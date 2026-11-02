@@ -65,26 +65,26 @@ wait_for() { # url
   fail "timed out waiting for $1"
 }
 
-step "Build wicket, fakeidp and whoami; generate a throwaway CA and keys"
-(cd "$MODULE" && go build -o "$WORK/bin/" ./cmd/wicket ./cmd/fakeidp ./examples/whoami)
-"$WORK/bin/fakeidp" gencert -dir "$WORK/certs" -hosts localhost,127.0.0.1,host.docker.internal
+step "Build authz (gateway and fakeidp) and whoami; generate a throwaway CA and keys"
+(cd "$MODULE" && go build -o "$WORK/bin/" ./cmd/authz ./examples/whoami)
+"$WORK/bin/authz" fakeidp gencert -dir "$WORK/certs" -hosts localhost,127.0.0.1,host.docker.internal
 chmod 644 "$WORK/certs/tls.pem" "$WORK/certs/tls-key.pem" # readable by nginx in the container
 cp "$ROOT/examples/wicket.json" "$ROOT/examples/fakeidp.json" "$WORK/"
 ok "binaries in $WORK/bin"
 
 step "Start fakeidp (OIDC + SAML), whoami, wicket, and nginx in Docker"
 cd "$WORK"
-"$WORK/bin/fakeidp" -config fakeidp.json -addr 127.0.0.1:9443 -tls-cert certs/tls.pem -tls-key certs/tls-key.pem 2>"$WORK/fakeidp.log" &
+"$WORK/bin/authz" fakeidp -config fakeidp.json -addr 127.0.0.1:9443 -tls-cert certs/tls.pem -tls-key certs/tls-key.pem 2>"$WORK/fakeidp.log" &
 PIDS+=($!)
 wait_for https://localhost:9443/healthz
 WHOAMI_ADDR=0.0.0.0:8081 WHOAMI_ISSUER="$APP/_wicket" "$WORK/bin/whoami" 2>"$WORK/whoami.log" &
 PIDS+=($!)
-COOKIE_KEY="$("$WORK/bin/wicket" genkey)"
-"$WORK/bin/wicket" gensigningkey >"$WORK/signing.pem"
+COOKIE_KEY="$("$WORK/bin/authz" gateway genkey)"
+"$WORK/bin/authz" gateway gensigningkey >"$WORK/signing.pem"
 WICKET_CONFIG=wicket.json WICKET_COOKIE_KEYS="$COOKIE_KEY" WICKET_ADDR=0.0.0.0:4180 \
   WICKET_SESSION_FILE="$WORK/sessions.log" WICKET_SIGNING_KEYS="$WORK/signing.pem" \
   WICKET_TRUSTED_PROXIES=127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 \
-  "$WORK/bin/wicket" >"$WORK/wicket.log" 2>&1 &
+  "$WORK/bin/authz" gateway >"$WORK/wicket.log" 2>&1 &
 PIDS+=($!)
 wait_for http://127.0.0.1:4180/healthz
 docker run -d --name wicket-demo-nginx --add-host host.docker.internal:host-gateway -p 8443:8443 \
@@ -159,7 +159,7 @@ step "7. Sessions survive a crash: kill -9 wicket and start it again"
 WICKET_CONFIG=wicket.json WICKET_COOKIE_KEYS="$COOKIE_KEY" WICKET_ADDR=0.0.0.0:4180 \
   WICKET_SESSION_FILE="$WORK/sessions.log" WICKET_SIGNING_KEYS="$WORK/signing.pem" \
   WICKET_TRUSTED_PROXIES=127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 \
-  "$WORK/bin/wicket" >>"$WORK/wicket.log" 2>&1 &
+  "$WORK/bin/authz" gateway >>"$WORK/wicket.log" 2>&1 &
 PIDS[2]=$!
 wait_for http://127.0.0.1:4180/healthz
 [[ "$(status_of alice "$APP/")" == 200 ]] || fail "alice lost her session"

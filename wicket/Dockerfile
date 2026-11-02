@@ -5,10 +5,10 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wicket ./cmd/wicket
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/authz ./cmd/authz
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/wicket /wicket
+COPY --from=build /out/authz /authz
 USER nonroot:nonroot
 EXPOSE 4180
-ENTRYPOINT ["/wicket"]
+ENTRYPOINT ["/authz", "gateway"]

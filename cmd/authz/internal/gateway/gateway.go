@@ -1,4 +1,11 @@
-// Command wicket runs the single sign-on gateway.
+// Package gateway implements "authz gateway", the single sign-on gateway
+// that was the wicket command. Its subcommands, environment variables,
+// config file, endpoints, cookies and exit codes are wicket's, unchanged:
+//
+//	authz gateway                          run the gateway (configured from the environment)
+//	authz gateway check [-online] [file]   validate a configuration without starting the gateway
+//	authz gateway genkey                   print a new cookie key
+//	authz gateway gensigningkey            print a new P-256 signing key in PEM
 //
 // Identity providers and apps are described in a JSON file (see
 // docs/DESIGN.md and examples/wicket.json). Everything else comes from the
@@ -19,12 +26,7 @@
 //	WICKET_LOG_LEVEL        debug, info, warn or error (default info)
 //
 // The configuration is reloaded on SIGHUP or POST /admin/reload.
-//
-// "wicket check [-online] [file]" validates a configuration without starting
-// the gateway and lists every problem with its JSON path; "wicket genkey"
-// prints a new cookie key; "wicket gensigningkey" prints a new P-256 signing
-// key in PEM.
-package main
+package gateway
 
 import (
 	"context"
@@ -56,25 +58,82 @@ import (
 	"github.com/laiwf94/authz/internal/authn/session"
 )
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "check" {
-		os.Exit(runCheck(context.Background(), os.Args[2:], os.Getenv, os.Stdout, os.Stderr))
-	}
-	if len(os.Args) > 1 {
-		if err := subcommand(os.Args[1], os.Stdout); err != nil {
-			fmt.Fprintln(os.Stderr, "wicket:", err)
-			os.Exit(2)
+// Summary is the one-line description shown in "authz help".
+const Summary = "run the single sign-on gateway (formerly wicket), check its configuration and make keys"
+
+// LegacyName is the command name wicket deployments call the gateway by.
+// A binary invoked under that name runs Wicket.
+const LegacyName = "wicket"
+
+const usageText = `usage: %[1]s
+       %[1]s check [-online] [-timeout 10s] [config.json]
+       %[1]s genkey | gensigningkey
+
+Runs the single sign-on gateway (formerly wicket) with no arguments. "check"
+validates a configuration without starting it, "genkey" prints a new cookie
+key and "gensigningkey" a new P-256 signing key in PEM. Apps and identity
+providers are described in the JSON file named by WICKET_CONFIG; everything
+else comes from the environment:
+
+  WICKET_CONFIG           JSON configuration file (required)
+  WICKET_COOKIE_KEYS      comma-separated 64-hex-character keys; the first seals cookies (required)
+  WICKET_ADDR             public listener for forward-auth, login and logout (default ":4180")
+  WICKET_ADMIN_ADDR       admin API and metrics listener (default "127.0.0.1:4181");
+                          must be loopback unless WICKET_ADMIN_TOKEN is set
+  WICKET_ADMIN_TOKEN      admin API bearer token, at least 16 characters
+  WICKET_SESSION_FILE     append-only session log; empty keeps sessions in memory only
+  WICKET_SIGNING_KEYS     comma-separated PEM files with P-256 keys for upstream tokens
+  WICKET_TRUSTED_PROXIES  CIDRs whose X-Forwarded-For is believed (default loopback)
+  WICKET_LOGIN_RATE       login requests per minute per client address (default 30)
+  WICKET_LOG_LEVEL        debug, info, warn or error (default info)
+
+Logs are JSON lines on standard output. SIGHUP or POST /admin/reload reloads
+the configuration; SIGINT or SIGTERM drains requests and stops. Exit codes:
+0 success, 1 a gateway that cannot start or fails, or problems found by
+check, 2 a usage error.
+`
+
+// Run is the "authz gateway" subcommand. It takes wicket's arguments after
+// "gateway" and returns wicket's exit codes, plus 0 for -h.
+func Run(ctx context.Context, args []string, getenv func(string) string, _ io.Reader, stdout, stderr io.Writer) int {
+	return cli(ctx, "authz gateway", args, getenv, stdout, stderr, nil)
+}
+
+// Wicket is the gateway under its old name, for a binary invoked as
+// "wicket": the same as Run, with "wicket" in help and error messages.
+func Wicket(ctx context.Context, args []string, getenv func(string) string, _ io.Reader, stdout, stderr io.Writer) int {
+	return cli(ctx, LegacyName, args, getenv, stdout, stderr, nil)
+}
+
+// cli dispatches wicket's subcommands under the program name prog and
+// returns the process exit code. hup, when set, replaces the SIGHUP
+// subscription (for tests).
+func cli(ctx context.Context, prog string, args []string, getenv func(string) string, stdout, stderr io.Writer, hup <-chan os.Signal) int {
+	if len(args) == 0 {
+		if hup == nil {
+			c := make(chan os.Signal, 1)
+			signal.Notify(c, syscall.SIGHUP)
+			defer signal.Stop(c)
+			hup = c
 		}
-		return
+		if err := run(ctx, getenv, stdout, hup, nil); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", prog, err)
+			return 1
+		}
+		return 0
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	if err := run(ctx, os.Getenv, os.Stdout, hup, nil); err != nil {
-		fmt.Fprintln(os.Stderr, "wicket:", err)
-		os.Exit(1)
+	switch args[0] {
+	case "-h", "-help", "--help", "help":
+		fmt.Fprintf(stderr, usageText, prog)
+		return 0
+	case "check":
+		return checkCmd(ctx, prog, args[1:], getenv, stdout, stderr)
 	}
+	if err := subcommand(args[0], stdout); err != nil {
+		fmt.Fprintf(stderr, "%s: %v; run \"%s -h\" for help\n", prog, err, prog)
+		return 2
+	}
+	return 0
 }
 
 func subcommand(name string, out io.Writer) error {
@@ -133,12 +192,12 @@ func loadSettings(getenv func(string) string) (settings, error) {
 		}
 		b, err := hex.DecodeString(k)
 		if err != nil || len(b) != seal.KeySize {
-			return s, errors.New("WICKET_COOKIE_KEYS entries must be 64 hex characters (run: wicket genkey)")
+			return s, errors.New("WICKET_COOKIE_KEYS entries must be 64 hex characters (run: authz gateway genkey)")
 		}
 		s.cookieKeys = append(s.cookieKeys, b)
 	}
 	if len(s.cookieKeys) == 0 {
-		return s, errors.New("WICKET_COOKIE_KEYS is required (run: wicket genkey)")
+		return s, errors.New("WICKET_COOKIE_KEYS is required (run: authz gateway genkey)")
 	}
 	s.sessionFile = getenv("WICKET_SESSION_FILE")
 	for _, f := range strings.Split(getenv("WICKET_SIGNING_KEYS"), ",") {

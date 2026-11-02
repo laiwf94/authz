@@ -1,8 +1,10 @@
-// Command fakeidp runs a test identity provider that speaks OpenID Connect
-// and SAML 2.0, for tests and the demo. It is not for production use.
+// Package fakeidp implements "authz fakeidp", the test identity provider
+// that was the fakeidp command. It speaks OpenID Connect and SAML 2.0, for
+// tests and the demo, and is not for production use. Its flags, config file
+// and output are fakeidp's, unchanged:
 //
-//	fakeidp -config fakeidp.json [-addr :9443] [-tls-cert cert.pem -tls-key key.pem]
-//	fakeidp gencert -dir DIR -hosts localhost,host.docker.internal
+//	authz fakeidp -config fakeidp.json [-addr :9443] [-tls-cert cert.pem -tls-key key.pem]
+//	authz fakeidp gencert -dir DIR -hosts localhost,host.docker.internal
 //
 // The config file lists the issuer URL, OpenID Connect clients and SAML
 // service providers; see examples/fakeidp.json. Client secrets come from
@@ -12,7 +14,7 @@
 // gencert writes a throwaway CA (ca.pem), a TLS certificate for the hosts
 // (tls.pem, tls-key.pem) and an RSA key pair for a SAML service provider
 // (sp.pem, sp-key.pem).
-package main
+package fakeidp
 
 import (
 	"bytes"
@@ -34,22 +36,51 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/laiwf94/authz/internal/authn/fakeidp"
 )
 
-func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, os.Args[1:], os.Getenv, os.Stderr, nil); err != nil {
-		fmt.Fprintln(os.Stderr, "fakeidp:", err)
-		os.Exit(1)
+// Summary is the one-line description shown in "authz help fakeidp".
+const Summary = "run a test OpenID Connect and SAML identity provider (not for production)"
+
+const usageText = `usage: authz fakeidp -config fakeidp.json [-addr :9443] [-tls-cert cert.pem -tls-key key.pem]
+       authz fakeidp gencert -dir DIR [-hosts localhost,host.docker.internal]
+
+Runs a test identity provider speaking OpenID Connect and SAML 2.0, for tests
+and the demo; it is not for production use. The config file lists the issuer,
+OpenID Connect clients and SAML service providers (see examples/fakeidp.json);
+client secrets come from the environment variables named by secret_env.
+gencert writes a throwaway CA, a TLS certificate for the hosts and an RSA key
+pair for a SAML service provider into DIR.
+
+Logs are JSON lines on standard error. SIGINT or SIGTERM stops it. Exit codes:
+0 success, 1 when it cannot start or fails, 2 a usage error.
+`
+
+// usageError marks a command line the flag package refused, so Run can
+// exit 2 for it and 1 for everything else.
+type usageError struct{ err error }
+
+func (e usageError) Error() string { return e.err.Error() }
+func (e usageError) Unwrap() error { return e.err }
+
+// Run is the "authz fakeidp" subcommand. It takes fakeidp's arguments and
+// returns 0 on a clean stop (or -h), 1 when it cannot start or fails, and 2
+// for flags it does not define.
+func Run(ctx context.Context, args []string, getenv func(string) string, _ io.Reader, _, stderr io.Writer) int {
+	err := run(ctx, args, getenv, stderr, nil)
+	var ue usageError
+	switch {
+	case err == nil, errors.Is(err, flag.ErrHelp):
+		return 0
+	case errors.As(err, &ue):
+		return 2 // the flag package has printed the problem and the usage
 	}
+	fmt.Fprintln(stderr, "authz fakeidp:", err)
+	return 1
 }
 
 type fileConfig struct {
@@ -123,16 +154,17 @@ func readCert(path string) (*x509.Certificate, error) {
 
 func run(ctx context.Context, args []string, getenv func(string) string, logOut io.Writer, ready func(addr string)) error {
 	if len(args) > 0 && args[0] == "gencert" {
-		return gencert(args[1:])
+		return gencert(args[1:], logOut)
 	}
 	fs := flag.NewFlagSet("fakeidp", flag.ContinueOnError)
 	fs.SetOutput(logOut)
+	fs.Usage = func() { fmt.Fprint(fs.Output(), usageText) }
 	cfgPath := fs.String("config", "", "path of the JSON config file (required)")
 	addr := fs.String("addr", ":9443", "listen address")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS when set)")
 	tlsKey := fs.String("tls-key", "", "TLS key PEM")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageError{err}
 	}
 	if *cfgPath == "" {
 		return errors.New("-config is required")
@@ -181,12 +213,14 @@ func logged(log *slog.Logger, h http.Handler) http.Handler {
 	})
 }
 
-func gencert(args []string) error {
+func gencert(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("gencert", flag.ContinueOnError)
+	fs.SetOutput(out)
+	fs.Usage = func() { fmt.Fprint(fs.Output(), usageText) }
 	dir := fs.String("dir", "", "output directory (required)")
 	hosts := fs.String("hosts", "localhost", "comma-separated DNS names and IPs for the TLS certificate")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return usageError{err}
 	}
 	if *dir == "" {
 		return errors.New("gencert: -dir is required")

@@ -68,7 +68,7 @@ going through the proxy.
 Around that sit an admin API for listing and revoking sessions and reloading
 the config, an audit log line for every login, failure, logout and
 revocation, Prometheus metrics, and rate limits on the login endpoints.
-`cmd/fakeidp` is a small but strict identity provider speaking both
+`authz fakeidp` is a small but strict identity provider speaking both
 protocols, which the tests and the demo run against.
 
 ## Running the demo, then your own
@@ -93,9 +93,9 @@ All demo steps passed.
 To run it with your own config:
 
 ```console
-$ go build -o wicketd ./cmd/wicket     # from the repository root
-$ export WICKET_COOKIE_KEYS=$(./wicketd genkey) CORP_SECRET=...
-$ WICKET_CONFIG=wicket.json ./wicketd
+$ go build -o authz ./cmd/authz       # from the repository root
+$ export WICKET_COOKIE_KEYS=$(./authz gateway genkey) CORP_SECRET=...
+$ WICKET_CONFIG=wicket.json ./authz gateway
 ```
 
 Or with Docker (distroless, non-root):
@@ -106,7 +106,7 @@ $ docker run -p 4180:4180 -v $PWD/wicket.json:/etc/wicket.json:ro \
     -e WICKET_CONFIG=/etc/wicket.json -e WICKET_COOKIE_KEYS -e CORP_SECRET wicket
 ```
 
-Check a config before deploying it. `wicket check` validates the file the
+Check a config before deploying it. `authz gateway check` validates the file the
 way startup would, without starting anything, and lists every problem with
 its JSON path and position rather than stopping at the first: unknown or
 mistyped fields, provider references, hosts that overlap between apps,
@@ -116,18 +116,19 @@ keys and SAML metadata URL. It exits 1 on errors; warnings (an unused
 provider, an app nobody may use, a certificate about to expire) exit 0:
 
 ```console
-$ ./wicket check wicket.json
+$ ./authz gateway check wicket.json
 wicket.json:9:22: error: $.providers[1].sp_cert_file: other.pem is not the certificate for sp-key.pem
 wicket.json:14:5: warning: $.apps[1].allow: nobody is allowed: set any_user or list emails, email_domains or groups
 wicket.json:14:31: error: $.apps[1].hosts[0]: host "wiki.example.com:443" overlaps $.apps[0].hosts[0]: each host belongs to one app
 wicket.json: 2 errors, 1 warning (offline checks)
-$ CORP_SECRET=... ./wicket check -online wicket.json
+$ CORP_SECRET=... ./authz gateway check -online wicket.json
 wicket.json: ok, 2 providers and 1 app, 0 warnings (online checks)
 ```
 
 Settings that are not about identity providers or apps (listen addresses,
 keys, the session log, trusted proxies, the admin token) come from the
-environment and are listed in [cmd/wicket/main.go](../cmd/wicket/main.go).
+environment and are listed by `authz gateway -h` and in
+[cmd/authz/internal/gateway/gateway.go](../cmd/authz/internal/gateway/gateway.go).
 
 ## Endpoints
 
@@ -219,7 +220,7 @@ session, with idle- and absolute-expired sessions, with a forged logout token
 (which must not even clear the cookie), and with cross-origin logout.
 
 ```console
-$ go test -race ./internal/authn/... ./cmd/wicket ./cmd/fakeidp   # from the repository root
+$ go test -race ./internal/authn/... ./cmd/authz/...   # from the repository root
 $ go test -run=^$ -bench=. ./internal/authn/...
 ```
 
@@ -252,8 +253,8 @@ the threat model and what would change to run many replicas. Proxy
 configurations are in [docs/proxies.md](docs/proxies.md).
 
 ```text
-cmd/wicket                gateway entry point, environment configuration and wicket check
-cmd/fakeidp               test identity provider (OIDC + SAML) and demo certificates
+cmd/authz/internal/gateway  authz gateway: entry point, environment configuration and check
+cmd/authz/internal/fakeidp  authz fakeidp: test identity provider (OIDC + SAML) and demo certificates
 internal/authn/server     forward-auth, login, logout, admin API, rate limiting, audit
 internal/authn/oidc       OpenID Connect relying party: discovery, PKCE, ID tokens, JWKS cache
 internal/authn/saml       SAML service provider: requests, metadata, response validation, decryption
@@ -263,7 +264,7 @@ internal/authn/seal       AES-256-GCM cookie sealing with key rotation
 internal/authn/policy     per-app access rules
 internal/authn/redirect   return-URL validation
 internal/authn/config     JSON configuration: schema and semantic checks with JSON paths
-internal/authn/check      offline file checks and online provider checks behind wicket check
+internal/authn/check      offline file checks and online provider checks behind authz gateway check
 internal/authn/keyfile    SP keys, certificates and CA bundles from PEM files
 internal/authn/fakeidp    the test identity provider
 internal/authn/metrics    Prometheus text exposition

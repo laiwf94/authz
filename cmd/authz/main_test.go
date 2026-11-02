@@ -170,7 +170,7 @@ func TestRegistry(t *testing.T) {
 			t.Errorf("%s -no-such-flag: exit %d, want 2", c.name, code)
 		}
 	}
-	for _, want := range []string{"serve", "check", "ctl", "mcp", "mcpfake", "version"} {
+	for _, want := range []string{"serve", "gateway", "check", "ctl", "mcp", "fakeidp", "mcpfake", "version"} {
 		if !seen[want] {
 			t.Errorf("%s is not registered", want)
 		}
@@ -227,7 +227,11 @@ func TestCurrentBuild(t *testing.T) {
 // re-executed), so the real signal wiring is what is tested.
 func TestMain(m *testing.M) {
 	if args := os.Getenv("AUTHZ_TEST_MAIN_ARGS"); args != "" {
-		os.Args = append([]string{"authz"}, strings.Fields(args)...)
+		name := "authz"
+		if v := os.Getenv("AUTHZ_TEST_MAIN_ARGV0"); v != "" {
+			name = v // run main under another program name, as through a symlink
+		}
+		os.Args = append([]string{name}, strings.Fields(args)...)
 		main()
 		return
 	}
@@ -334,11 +338,18 @@ func TestMainExitCodes(t *testing.T) {
 		"mcp -x":          exitUsage,
 		"mcpfake":         1, // no MCPFAKE_SANDBOX
 		"mcpfake extra":   exitUsage,
+		"gateway":         1, // no WICKET_CONFIG
+		"gateway check":   exitUsage,
+		"gateway nope":    exitUsage,
+		"gateway -x":      exitUsage,
+		"fakeidp":         1, // no -config
+		"fakeidp -x":      exitUsage,
+		"fakeidp gencert": 1, // no -dir
 	}
 	for args, want := range cases {
 		cmd := exec.Command(os.Args[0], "-test.run=^$")
 		cmd.Env = append(os.Environ(), "AUTHZ_TEST_MAIN_ARGS="+args, "GRANTD_API_KEYS=", "AUTHZ_API_KEY=",
-			"TOOLGATE_ADMIN_TOKEN=", "AUTHZ_MCP_ADMIN_TOKEN=", "MCPFAKE_SANDBOX=", "AUTHZ_MCPFAKE_SANDBOX=")
+			"TOOLGATE_ADMIN_TOKEN=", "AUTHZ_MCP_ADMIN_TOKEN=", "MCPFAKE_SANDBOX=", "AUTHZ_MCPFAKE_SANDBOX=", "WICKET_CONFIG=")
 		if args == "" {
 			// An empty value would run the tests instead of main.
 			cmd.Env = append(cmd.Env, "AUTHZ_TEST_MAIN_ARGS= ")
