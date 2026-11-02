@@ -1,0 +1,32 @@
+$ toolgate audit verify toolgate-demo.jsonl
+OK toolgate-demo.jsonl: 23 records, head 69506072c64dd3d911c5528e3ff06f5fa3c8ba6f2886a44b1dce138d96f5ba95
+exit 0
+
+$ toolgate audit verify -head 69506072c64dd3d911c5528e3ff06f5fa3c8ba6f2886a44b1dce138d96f5ba95 toolgate-demo.jsonl
+OK toolgate-demo.jsonl: 23 records, head 69506072c64dd3d911c5528e3ff06f5fa3c8ba6f2886a44b1dce138d96f5ba95
+exit 0
+
+$ toolgate audit verify -head 0000000000000000000000000000000000000000000000000000000000000001 toolgate-demo.jsonl
+FAIL toolgate-demo.jsonl: chain is intact but ends at 69506072c64dd3d911c5528e3ff06f5fa3c8ba6f2886a44b1dce138d96f5ba95, not the expected head 0000000000000000000000000000000000000000000000000000000000000001 (records were removed from the end or the last one was changed)
+exit 1
+
+$ toolgate audit verify tampered.jsonl
+FAIL tampered.jsonl: line 3: record does not match the hash stored in line 4: it was modified, removed or reordered
+exit 1
+
+$ toolgate audit verify -head 69506072c64dd3d911c5528e3ff06f5fa3c8ba6f2886a44b1dce138d96f5ba95 dropped-last.jsonl
+FAIL dropped-last.jsonl: chain is intact but ends at aba7a64581bef16643b6f3bd3dc4795ec0f4f0912219e4275142ea411c2bd366, not the expected head 69506072c64dd3d911c5528e3ff06f5fa3c8ba6f2886a44b1dce138d96f5ba95 (records were removed from the end or the last one was changed)
+exit 1
+
+$ toolgate audit verify torn.jsonl
+FAIL torn.jsonl: line 23: incomplete final line (no newline)
+exit 1
+
+$ toolgate audit verify swapped.jsonl
+FAIL swapped.jsonl: line 4: record does not match the hash stored in line 5: it was modified, removed or reordered
+exit 1
+
+$ toolgate audit verify dropped-first.jsonl
+FAIL dropped-first.jsonl: line 1: first record does not start the chain (records before it were removed?)
+exit 1
+
