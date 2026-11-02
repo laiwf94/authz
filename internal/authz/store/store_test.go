@@ -435,6 +435,48 @@ func TestRecovery(t *testing.T) {
 	}
 }
 
+// A crash between writing the checkpoint file and renaming it leaves a
+// temporary file behind. Recovery must read the log, not the leftover, and the
+// next checkpoint must replace it.
+func TestStaleCheckpointFileIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	s := newStore(t, dir)
+	withSchema(t, s)
+	head := write(t, s, OpTouch, "doc:a#viewer@user:x")
+	s.Close()
+
+	stale := filepath.Join(dir, walName+".tmp")
+	if err := os.WriteFile(stale, []byte("00000000 not a record\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s2 := newStore(t, dir)
+	if s2.Head() != head || len(direct(t, s2, head, "doc", "a", "viewer")) != 1 {
+		t.Fatalf("recovery used the leftover file: head %d, want %d", s2.Head(), head)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file still present after checkpoint: %v", err)
+	}
+	next := write(t, s2, OpTouch, "doc:b#viewer@user:y")
+	s2.Close()
+	s3 := newStore(t, dir)
+	if s3.Head() != next {
+		t.Fatalf("head after another restart = %d, want %d", s3.Head(), next)
+	}
+}
+
+// Open reports a checkpoint failure instead of serving from a log it could
+// not compact.
+func TestOpenFailsWhenCheckpointCannotBeWritten(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, walName+".tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := Open(Options{Dir: dir}); err == nil {
+		s.Close()
+		t.Fatal("Open succeeded with a directory in the checkpoint file's place")
+	}
+}
+
 func TestTornTailIsDropped(t *testing.T) {
 	dir := t.TempDir()
 	s := newStore(t, dir)
