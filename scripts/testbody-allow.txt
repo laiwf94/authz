@@ -1,0 +1,13 @@
+# Changed test lines the week 1 moves had to make, checked by
+# scripts/testbody-diff.sh. Each entry is "FILE OP TEXT": FILE is the old
+# path for a removed line (-) and the new path for an added one (+), TEXT is
+# the line without its indentation. Every entry must match exactly one
+# changed line; one that matches nothing fails the check. Each is also listed
+# in the week 1 issue (#74).
+
+# toolgate's examples stayed in toolgate/examples while its tests moved two
+# directories deeper (#75, c012175 and 0bcc6e8).
+toolgate/internal/policy/cases_test.go - b, err := os.ReadFile(filepath.Join("..", "..", "examples", name))
+internal/agents/policy/cases_test.go + b, err := os.ReadFile(filepath.Join("..", "..", "..", "toolgate", "examples", name))
+toolgate/cmd/toolgate/main_test.go - pol, cases := filepath.Join("..", "..", "examples", "policy.json"), filepath.Join("..", "..", "examples", "policy_cases.json")
+cmd/authz/internal/mcp/mcp_test.go + pol, cases := filepath.Join("..", "..", "..", "..", "toolgate", "examples", "policy.json"), filepath.Join("..", "..", "..", "..", "toolgate", "examples", "policy_cases.json")

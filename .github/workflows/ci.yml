@@ -13,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The test body check compares with the pre-merge commit.
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -42,5 +45,11 @@ jobs:
         run: |
           go test -json -count=1 ./internal/authn/... ./cmd/wicket/... ./cmd/fakeidp/... ./examples/whoami/... \
             | go run scripts/suite-counts.go internal/authn/testdata/wicket-suite.txt
+      # Every _test.go file of the three pre-merge trees must have moved with
+      # only its import block and package clause changed, apart from the
+      # lines listed in scripts/testbody-allow.txt, and every package must
+      # keep its test functions.
+      - name: Test bodies
+        run: ./scripts/testbody-diff.sh
       - name: Vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
