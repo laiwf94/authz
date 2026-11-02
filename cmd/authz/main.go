@@ -14,7 +14,8 @@
 //
 // A binary invoked as "wicket" (a symlink to authz, as in the image) is the
 // sign-on gateway under its old name: "wicket check" is "authz gateway
-// check", and so on.
+// check", and so on. In the same way "toolgate" is "authz mcp" and
+// "mcpfake" is "authz mcpfake".
 //
 // The dispatcher only picks the subcommand. Everything after its name is
 // passed through untouched, so subcommands can nest their own commands
@@ -73,6 +74,8 @@ var commands = []command{
 // symlink to this binary, to the subcommand they now are.
 var legacyNames = map[string]runFunc{
 	gateway.LegacyName: gateway.Wicket,
+	mcp.LegacyName:     mcp.Toolgate,
+	mcpfake.LegacyName: mcpfake.Mcpfake,
 }
 
 // Exit codes of the dispatcher itself. Subcommands document their own.

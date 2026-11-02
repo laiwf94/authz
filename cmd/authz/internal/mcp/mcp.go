@@ -29,6 +29,10 @@
 //
 // Upstream credentials are read from the environment variables the config
 // names in credential_env, exactly as named.
+//
+// Toolgate is the same command under its old name, for a binary invoked as
+// "toolgate" (the image links /toolgate to /authz): its usage and error
+// messages say "toolgate" where they otherwise say "authz mcp".
 package mcp
 
 import (
@@ -93,41 +97,73 @@ unreadable input for "audit verify" and "policy test".
 // "mcp" and returns toolgate's exit codes, plus 0 for -h, and 2 for a flag
 // before the subcommand or conflicting environment variables.
 func Run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return runAs(ctx, progName, args, getenv, stdin, stdout, stderr)
+}
+
+// LegacyName is the command name toolgate deployments call the gateway by.
+// A binary invoked under that name (a symlink to authz, as in the image)
+// runs Toolgate.
+const LegacyName = "toolgate"
+
+// Toolgate is the gateway under its old name: "toolgate audit verify" is
+// "authz mcp audit verify", with "toolgate" in usage and error messages as
+// the toolgate binary printed them.
+func Toolgate(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return runAs(ctx, LegacyName, args, getenv, stdin, stdout, stderr)
+}
+
+// progName is the name usage and error messages give the command.
+const progName = "authz mcp"
+
+func runAs(ctx context.Context, prog string, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 && isHelp(args[0]) {
-		fmt.Fprint(stderr, usage)
+		fmt.Fprint(stderr, usageFor(prog))
 		return 0
 	}
 	if len(args) > 0 && strings.HasPrefix(args[0], "-") {
-		fmt.Fprintf(stderr, "authz mcp: flag %s is not defined; flags follow the subcommand (\"authz mcp token mint -sub ID\")\n%s", args[0], usage)
+		fmt.Fprintf(stderr, "%[1]s: flag %[2]s is not defined; flags follow the subcommand (\"%[1]s token mint -sub ID\")\n%[3]s", prog, args[0], usageFor(prog))
 		return 2
 	}
 	env, err := compatEnv(getenv, gatewayEnv)
 	if err != nil {
-		fmt.Fprintln(stderr, "authz mcp:", err)
+		fmt.Fprintln(stderr, prog+":", err)
 		return 2
 	}
-	return cli(ctx, args, env, stdin, stdout, stderr, nil)
+	return cliAs(ctx, prog, args, env, stdin, stdout, stderr, nil)
+}
+
+// usageFor is the help text with the command called prog.
+func usageFor(prog string) string {
+	if prog == progName {
+		return usage
+	}
+	return strings.ReplaceAll(usage, progName, prog)
 }
 
 func isHelp(a string) bool { return a == "-h" || a == "-help" || a == "--help" || a == "help" }
 
-// cli dispatches subcommands and returns the process exit code.
+// cli dispatches subcommands as "authz mcp" and returns the process exit code.
 func cli(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, ready func(gw, admin string)) int {
+	return cliAs(ctx, progName, args, getenv, stdin, stdout, stderr, ready)
+}
+
+// cliAs is cli with prog as the command's name in messages.
+func cliAs(ctx context.Context, prog string, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer, ready func(gw, admin string)) int {
 	var err error
 	switch {
 	case len(args) == 0 || args[0] == "serve":
 		err = run(ctx, getenv, stdout, ready)
 	case args[0] == "audit" && len(args) > 1 && args[1] == "verify":
-		return auditVerify(args[2:], stdout, stderr)
+		return auditVerify(prog, args[2:], stdout, stderr)
 	case args[0] == "policy" && len(args) > 1 && args[1] == "test":
-		return policyTest(args[2:], stdout, stderr)
+		return policyTest(prog, args[2:], stdout, stderr)
 	case args[0] == "token" && len(args) > 1:
-		err = token(args[1], args[2:], getenv, stdin, stdout)
+		err = token(prog, args[1], args[2:], getenv, stdin, stdout)
 	default:
-		err = errors.New("usage: authz mcp [serve] | audit verify [-head HASH] FILE | policy test [-v] POLICY CASES | token new|hash|mint")
+		err = errors.New("usage: " + prog + " [serve] | audit verify [-head HASH] FILE | policy test [-v] POLICY CASES | token new|hash|mint")
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "authz mcp:", err)
+		fmt.Fprintln(stderr, prog+":", err)
 		return 1
 	}
 	return 0
@@ -379,17 +415,17 @@ func newServer(h http.Handler) *http.Server {
 	}
 }
 
-func auditVerify(args []string, stdout, stderr io.Writer) int {
+func auditVerify(prog string, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	head := fs.String("head", "", "expected hash of the last record (from GET /admin/audit/head)")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: authz mcp audit verify [-head HASH] FILE")
+		fmt.Fprintln(stderr, "usage: "+prog+" audit verify [-head HASH] FILE")
 		return 2
 	}
 	f, err := os.Open(fs.Arg(0))
 	if err != nil {
-		fmt.Fprintln(stderr, "authz mcp:", err)
+		fmt.Fprintln(stderr, prog+":", err)
 		return 2
 	}
 	defer f.Close()
@@ -409,31 +445,31 @@ func auditVerify(args []string, stdout, stderr io.Writer) int {
 
 // policyTest runs a case file against a policy. It exits 0 when every case
 // passes, 1 when any fails and 2 when either file cannot be read or parsed.
-func policyTest(args []string, stdout, stderr io.Writer) int {
+func policyTest(prog string, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("policy test", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	verbose := fs.Bool("v", false, "also list the cases that pass")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 2 {
-		fmt.Fprintln(stderr, "usage: authz mcp policy test [-v] POLICY CASES")
+		fmt.Fprintln(stderr, "usage: "+prog+" policy test [-v] POLICY CASES")
 		return 2
 	}
 	src, err := readLimited(fs.Arg(0), policy.MaxBytes)
 	if err != nil {
-		fmt.Fprintln(stderr, "authz mcp:", err)
+		fmt.Fprintln(stderr, prog+":", err)
 		return 2
 	}
 	p, err := policy.Parse(src)
 	if err != nil {
-		fmt.Fprintf(stderr, "authz mcp: %s: %v\n", fs.Arg(0), err)
+		fmt.Fprintf(stderr, "%s: %s: %v\n", prog, fs.Arg(0), err)
 		return 2
 	}
 	if src, err = readLimited(fs.Arg(1), policy.MaxCaseBytes); err != nil {
-		fmt.Fprintln(stderr, "authz mcp:", err)
+		fmt.Fprintln(stderr, prog+":", err)
 		return 2
 	}
 	cs, err := policy.ParseCases(src)
 	if err != nil {
-		fmt.Fprintf(stderr, "authz mcp: %s: %v\n", fs.Arg(1), err)
+		fmt.Fprintf(stderr, "%s: %s: %v\n", prog, fs.Arg(1), err)
 		return 2
 	}
 	rep := policy.RunCases(p, cs)
@@ -461,7 +497,7 @@ func readLimited(path string, limit int) ([]byte, error) {
 	return src, nil
 }
 
-func token(sub string, args []string, getenv func(string) string, stdin io.Reader, stdout io.Writer) error {
+func token(prog, sub string, args []string, getenv func(string) string, stdin io.Reader, stdout io.Writer) error {
 	switch sub {
 	case "new":
 		t := identity.NewStaticToken()
@@ -516,6 +552,6 @@ func token(sub string, args []string, getenv func(string) string, stdin io.Reade
 		fmt.Fprintln(stdout, tok)
 		return nil
 	default:
-		return errors.New("usage: authz mcp token new | hash | mint -sub ID [-owner NAME] [-scope \"a b\"] [-ttl 15m]")
+		return errors.New("usage: " + prog + " token new | hash | mint -sub ID [-owner NAME] [-scope \"a b\"] [-ttl 15m]")
 	}
 }

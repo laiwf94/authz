@@ -10,7 +10,7 @@
 // removing or reordering any line breaks the chain at the next line, and
 // Verify names the line. The last line has no successor; to detect truncation
 // or an edit of the newest record, compare the head hash with one stored
-// elsewhere (the admin API serves it, and `toolgate audit verify -head` checks
+// elsewhere (the admin API serves it, and `authz mcp audit verify -head` checks
 // it).
 //
 // Appends are durable before they return: the line is written and the file

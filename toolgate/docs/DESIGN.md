@@ -1,5 +1,12 @@
 # toolgate design
 
+toolgate is now the `authz mcp` subcommand of the one authz binary (its
+fake upstream is `authz mcpfake`); commands below use those names. The old
+names still work: a binary invoked as `toolgate` or `mcpfake`, as the links
+in the image are, is `authz mcp` or `authz mcpfake`, and every `TOOLGATE_`
+and `MCPFAKE_` variable keeps its name. See
+[Moving from the toolgate binary](../README.md#moving-from-the-toolgate-binary).
+
 Every tool call an agent makes should pass one enforcement point that
 authenticates it, checks it against policy, limits it and records it, with no
 path around it: Saltzer and Schroeder's complete mediation and fail-safe
@@ -167,7 +174,7 @@ Replacing the file by rename avoids the noise. Every audit record carries the ha
 the policy that decided it.
 
 A policy ships with a case file of expectations, checked by
-`toolgate policy test` in CI:
+`authz mcp policy test` in CI:
 
 ```json
 {"version": 1, "cases": [
@@ -202,7 +209,7 @@ decision scans only rules that can apply. A 200-rule policy decides in about
 
 ## Identity
 
-Static keys are random strings (`toolgate token new` makes one with 260
+Static keys are random strings (`authz mcp token new` makes one with 260
 bits of entropy). The configuration stores only their SHA-256, so the config
 file is not a secret. Authentication hashes the presented key and compares it
 with every configured hash using `subtle.ConstantTimeCompare` and
@@ -294,7 +301,7 @@ Each line is one record:
 in the manner of Crosby and Wallach's tamper-evident logging [8] and
 Certificate Transparency [9]. Hashing the bytes as written, rather than a
 re-serialization, means verification never depends on JSON formatting.
-`toolgate audit verify` recomputes the chain: a modified line fails at that
+`authz mcp audit verify` recomputes the chain: a modified line fails at that
 line (its successor's `prev` no longer matches), a deleted or reordered line
 fails at the sequence or link check, and the line number is reported.
 

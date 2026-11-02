@@ -8,6 +8,12 @@ audit log before it reaches the real MCP server.
 
 Written in Go with the standard library only (no third-party dependencies).
 
+toolgate is now part of authz: the gateway is `authz mcp` and its fake
+upstream `authz mcpfake`, in the one `authz` binary. Configuration, policy
+files, endpoints and the audit format are unchanged, and the old command
+names keep working; see
+[Moving from the toolgate binary](#moving-from-the-toolgate-binary).
+
 ```json
 {
   "id": "read-workspace",
@@ -75,12 +81,12 @@ decision names the rule that made it, and the file is hot-reloaded
 atomically; an invalid file is rejected and the old policy keeps running.
 
 A policy can be tested like code. A case file lists calls and tool lists with
-the decision each should get, and `toolgate policy test POLICY CASES` checks
+the decision each should get, and `authz mcp policy test POLICY CASES` checks
 them all and prints, for each case that fails, what it expected next to what
 the policy decided:
 
 ```console
-$ toolgate policy test narrowed.json examples/policy_cases.json
+$ authz mcp policy test narrowed.json examples/policy_cases.json
 FAIL alice reads a note
      decision: want allow
                 got deny
@@ -115,7 +121,7 @@ to a byte budget, and the audit log records when that happened.
 
 The audit log is append-only JSONL. Each record carries the SHA-256 of the
 previous line and is fsynced before the call goes ahead (concurrent calls
-share an fsync). `toolgate audit verify` finds any edit, deletion or
+share an fsync). `authz mcp audit verify` finds any edit, deletion or
 reordering and names the line. Arguments are stored as an HMAC plus a redacted
 preview, never raw, and if the log can't be written the call is refused.
 
@@ -167,10 +173,12 @@ Then point any MCP client at `http://127.0.0.1:8080/mcp` with
 [examples/policy.json](examples/policy.json), with its test cases in
 [examples/policy_cases.json](examples/policy_cases.json).
 
-The Docker image holds the one `authz` binary (entry point `authz mcp`), runs as `nonroot` on distroless, and
-keeps the audit log and tool pins in `/data`. In this example the fake
-upstream runs as a second container, so the config must name it
-(`http://mcpfake:19100/mcp`):
+The Docker image holds the one `authz` binary (entry point `authz mcp`), runs
+as `nonroot` on distroless, and keeps the audit log and tool pins in `/data`.
+`/toolgate` and `/mcpfake` in it are links to `/authz`, so the old image's
+`--entrypoint /toolgate` and `--entrypoint /mcpfake` still work. In this
+example the fake upstream runs as a second container, so the config must name
+it (`http://mcpfake:19100/mcp`):
 
 ```console
 $ (cd .. && docker build -t toolgate -f toolgate/Dockerfile .)
@@ -185,6 +193,37 @@ $ docker run -d --network tgnet -p 127.0.0.1:8080:8080 -v /tmp/tg:/etc/toolgate:
     -e TOOLGATE_AUDIT_KEY=$(openssl rand -hex 32) -e TOOLGATE_ADMIN_TOKEN=$(openssl rand -hex 24) \
     -e FAKE_UPSTREAM_TOKEN=upstream-secret-0123456789 toolgate
 ```
+
+`examples/image.sh` builds the image and runs this example through the old
+entry points `/mcpfake` and `/toolgate`, with `TOOLGATE_` variables only: an
+allowed and a refused read of the sandbox, `toolgate audit verify` on the log
+the container wrote, `toolgate policy test` on the example cases, and a clean
+`docker stop`. CI runs it on every change (the "Image (agents)" step of ci.yml).
+
+## Moving from the toolgate binary
+
+Nothing in a deployment has to change on the day it moves to authz:
+
+| toolgate | authz | Notes |
+|---|---|---|
+| `toolgate [serve]` | `authz mcp [serve]` | same flags, exit codes and signals (SIGHUP reloads the policy) |
+| `toolgate audit verify [-head HASH] FILE` | `authz mcp audit verify ...` | same output; logs written by toolgate verify and are continued |
+| `toolgate policy test [-v] POLICY CASES` | `authz mcp policy test ...` | case files run unchanged |
+| `toolgate token new\|hash\|mint` | `authz mcp token ...` | |
+| `mcpfake` | `authz mcpfake` | |
+| `TOOLGATE_<NAME>` | `AUTHZ_MCP_<NAME>` | either spelling; both set to different values stops the command at start |
+| `MCPFAKE_<NAME>` | `AUTHZ_MCPFAKE_<NAME>` | the same |
+| image entry point `/toolgate` | `/authz mcp` | `/toolgate` and `/mcpfake` remain as links to `/authz` |
+
+A binary invoked as `toolgate` or `mcpfake`, through a link such as
+`ln -s authz toolgate`, runs `authz mcp` or `authz mcpfake` and names itself
+the old way in its usage and error messages, so scripts that match them keep
+working. Two things are new under both names: `-h` prints the help and exits
+0, and a flag before the subcommand is a usage error with exit status 2. The
+config `credential_env` names are read exactly as written. The recorded
+decisions in `examples/demo_decisions.jsonl` came from the toolgate binary
+and `examples/demo.sh` compares every `authz mcp` run with them, so the
+decisions and audit records are the same.
 
 ## API
 

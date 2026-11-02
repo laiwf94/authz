@@ -92,5 +92,11 @@ jobs:
       # the same: docs/proxies.md, "Moving from wicket".
       - name: Images
         run: ./scripts/image-check.sh
+      # The toolgate image keeps /toolgate and /mcpfake as links to /authz;
+      # this runs the README's two-container example through them, with
+      # TOOLGATE_ variables only: toolgate/README.md, "Moving from the
+      # toolgate binary".
+      - name: Image (agents)
+        run: ./toolgate/examples/image.sh
       - name: Vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

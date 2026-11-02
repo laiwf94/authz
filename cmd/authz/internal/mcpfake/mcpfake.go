@@ -50,10 +50,24 @@ cannot start or fails, 2 for a usage error.
 var envSuffixes = []string{"ADDR", "SANDBOX", "HTTP_ALLOW", "TOKEN", "ADMIN_TOKEN"}
 
 // Run is the "authz mcpfake" subcommand.
-func Run(ctx context.Context, args []string, getenv func(string) string, _ io.Reader, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("mcpfake", flag.ContinueOnError)
+func Run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return runAs(ctx, "authz mcpfake", args, getenv, stdout, stderr)
+}
+
+// LegacyName is the name of the old mcpfake binary. A binary invoked under
+// that name (a symlink to authz, as in the image) runs Mcpfake.
+const LegacyName = "mcpfake"
+
+// Mcpfake is the fake server under its old name, with "mcpfake" in usage and
+// error messages as the mcpfake binary printed them.
+func Mcpfake(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return runAs(ctx, LegacyName, args, getenv, stdout, stderr)
+}
+
+func runAs(ctx context.Context, prog string, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet(prog, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Usage = func() { fmt.Fprint(fs.Output(), usage) }
+	fs.Usage = func() { fmt.Fprint(fs.Output(), strings.Replace(usage, "usage: authz mcpfake", "usage: "+prog, 1)) }
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -61,16 +75,16 @@ func Run(ctx context.Context, args []string, getenv func(string) string, _ io.Re
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "authz mcpfake: unexpected argument %q; configuration comes from the environment\n", fs.Arg(0))
+		fmt.Fprintf(stderr, "%s: unexpected argument %q; configuration comes from the environment\n", prog, fs.Arg(0))
 		return 2
 	}
 	env, err := compatEnv(getenv)
 	if err != nil {
-		fmt.Fprintln(stderr, "authz mcpfake:", err)
+		fmt.Fprintln(stderr, prog+":", err)
 		return 2
 	}
 	if err := run(ctx, env, stdout, nil); err != nil {
-		fmt.Fprintln(stderr, "authz mcpfake:", err)
+		fmt.Fprintln(stderr, prog+":", err)
 		return 1
 	}
 	return 0
