@@ -87,5 +87,10 @@ jobs:
         run: go run ./cmd/authz mcp policy test toolgate/examples/policy.json toolgate/examples/policy_cases.json
       - name: Demo (agents)
         run: ./toolgate/examples/demo.sh
+      # Both images carry /wicket -> /authz, and a config served through
+      # /wicket, the gateway image and authz gateway answers byte for byte
+      # the same: docs/proxies.md, "Moving from wicket".
+      - name: Images
+        run: ./scripts/image-check.sh
       - name: Vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

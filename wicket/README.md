@@ -41,7 +41,7 @@ and `X-Auth-Token`; anyone else gets a 401 that points at the login page, or a
 403 if they are signed in but not allowed. nginx needs the 401 turned into a
 redirect itself; Traefik and Envoy can pass wicket's own redirect straight to
 the browser while API calls still get JSON. Configurations for all three are
-in [docs/proxies.md](docs/proxies.md).
+in [docs/proxies.md](../docs/proxies.md).
 
 Each app lists the identity providers it accepts and who may use it (exact
 emails, email domains, groups, or anyone from those providers). Nothing is
@@ -250,7 +250,7 @@ The reasoning behind the code is in [docs/DESIGN.md](docs/DESIGN.md): the
 request flows, the SAML verification order and why it defeats signature
 wrapping, the session store and its log, key rotation, failure modes, limits,
 the threat model and what would change to run many replicas. Proxy
-configurations are in [docs/proxies.md](docs/proxies.md).
+configurations are in [docs/proxies.md](../docs/proxies.md).
 
 ```text
 cmd/authz/internal/gateway  authz gateway: entry point, environment configuration and check

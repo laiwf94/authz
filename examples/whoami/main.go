@@ -1,12 +1,22 @@
 // Command whoami is a tiny upstream app for the demo. It shows how an app
-// behind wicket should identify users: verify the X-Auth-Token JWT against
-// wicket's published keys instead of trusting the X-Auth-* headers, which
-// anything that can reach the app directly could set.
+// behind the sign-on gateway (authz gateway, formerly wicket) should identify
+// users: verify the X-Auth-Token JWT against the gateway's published keys
+// instead of trusting the X-Auth-* headers, which anything that can reach the
+// app directly could set.
 //
 //	WHOAMI_ADDR      listen address (default "127.0.0.1:8081")
-//	WHOAMI_JWKS_URL  wicket's key set (default "http://127.0.0.1:4180/.well-known/jwks.json")
-//	WHOAMI_ISSUER    expected iss, wicket's public URL (required)
-//	WHOAMI_AUDIENCE  expected aud, the app id in wicket's config (default "whoami")
+//	WHOAMI_JWKS_URL  the gateway's key set (default "http://127.0.0.1:4180/.well-known/jwks.json")
+//	WHOAMI_ISSUER    expected iss, the gateway's public_url (required)
+//	WHOAMI_AUDIENCE  expected aud, the app id in the gateway's config (default "whoami")
+//
+// Run it next to the gateway:
+//
+//	authz gateway genkey                    # for WICKET_COOKIE_KEYS
+//	WICKET_CONFIG=wicket.json WICKET_COOKIE_KEYS=... authz gateway &
+//	WHOAMI_ISSUER=https://app.example.com/_wicket go run ./examples/whoami
+//
+// wicket/examples/demo.sh puts both behind nginx; docs/proxies.md has the
+// proxy configurations.
 package main
 
 import (
@@ -36,7 +46,7 @@ func main() {
 	}
 }
 
-// keys fetches wicket's JWKS and caches it for five minutes.
+// keys fetches the gateway's JWKS and caches it for five minutes.
 type keys struct {
 	url    string
 	client *http.Client
@@ -115,7 +125,7 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	}
 	issuer := getenv("WHOAMI_ISSUER")
 	if issuer == "" {
-		return errors.New("WHOAMI_ISSUER is required (wicket's public_url)")
+		return errors.New("WHOAMI_ISSUER is required (the gateway's public_url)")
 	}
 	audience := getenv("WHOAMI_AUDIENCE")
 	if audience == "" {

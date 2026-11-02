@@ -266,7 +266,7 @@ that can reach the app without passing through the proxy (another service
 on the same network, a misrouted path, a second proxy rule without
 forward-auth) can send `X-Auth-User: admin`. Even through the proxy, a
 configuration that forgets to strip client copies passes them on. The
-proxy configurations in [proxies.md](proxies.md) always overwrite or remove
+proxy configurations in [docs/proxies.md](../../docs/proxies.md) always overwrite or remove
 the headers. The token closes the remaining gap: an app that verifies it
 against `/.well-known/jwks.json` (signature, `iss`, its own `aud`, `exp`)
 accepts identity only from wicket. `aud` is the app id, so a token captured
