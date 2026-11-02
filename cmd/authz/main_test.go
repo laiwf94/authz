@@ -17,6 +17,9 @@ import (
 	"time"
 )
 
+// markerKey is a context key private to these tests.
+type markerKey struct{}
+
 type recorded struct {
 	args  []string
 	ctx   context.Context
@@ -48,7 +51,7 @@ func env(m map[string]string) func(string) string { return func(k string) string
 func TestDispatchPassesArgumentsThrough(t *testing.T) {
 	var rec recorded
 	cmds := fakeCommands(&rec)
-	ctx := context.WithValue(context.Background(), struct{}{}, "marker")
+	ctx := context.WithValue(context.Background(), markerKey{}, "marker")
 	stdin := strings.NewReader("in")
 	var out, errb bytes.Buffer
 	args := []string{"alpha", "check", "-online", "--", "-x", "file with spaces", ""}

@@ -1,0 +1,18 @@
+# staticcheck findings the gate accepts, checked by scripts/staticcheck.sh.
+# Each entry is "FILE CHECK TEXT": FILE is a _test.go file, CHECK the
+# staticcheck code and TEXT the flagged line without its indentation. Every
+# entry must match exactly one finding; one that matches nothing fails the
+# check. Only test files the week 1 moves froze are listed: their bodies may
+# not change (scripts/testbody-diff.sh), so the findings wait here until the
+# freeze ends. Non-test code is fixed instead.
+
+# wicket (#73). RandomToken() == RandomToken() is the point of the test: two
+# calls must differ.
+internal/authn/oidc/oidc_test.go SA4000 if len(RandomToken()) != 43 || RandomToken() == RandomToken() {
+# The outer Replace with "" and 0 is a no-op; the inner one builds the case.
+internal/authn/saml/saml_test.go SA1018 "no idp":          strings.Replace(strings.Replace(good, "md:IDPSSODescriptor", "md:SPSSODescriptor", -1), "", "", 0),
+# Responses the login steps do not need to inspect.
+internal/authn/server/server_test.go SA4006 resp, body = b.get(resp.Header.Get("Location"))
+internal/authn/server/server_test.go SA4006 resp2, body := b3.get(resp2.Header.Get("Location"))
+# secrets is filled and not read in this test.
+internal/authn/session/session_test.go SA4010 secrets = append(secrets, sec)

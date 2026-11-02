@@ -161,7 +161,7 @@ func verifyRedirectSignature(rawQuery string, q url.Values, sp *ServiceProvider)
 	signed += "&SigAlg=" + raw["SigAlg"]
 	sig, err := base64.StdEncoding.DecodeString(q.Get("Signature"))
 	if err != nil {
-		return errors.New("Signature is not base64")
+		return errors.New("the Signature parameter is not base64")
 	}
 	pub, ok := sp.RequestCert.PublicKey.(*rsa.PublicKey)
 	if !ok {

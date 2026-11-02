@@ -81,3 +81,12 @@ module graph can be verified.
 `go mod tidy` must leave `go.mod` and `go.sum` unchanged, `go list -deps
 ./...` must show no module outside the table above, and govulncheck
 runs over the whole module in CI.
+
+## Tools
+
+The gate runs two tools with `go run PKG@VERSION`, so neither is a
+requirement in `go.mod` and neither is compiled into the binary:
+golang.org/x/vuln/cmd/govulncheck v1.9.0 and
+honnef.co/go/tools/cmd/staticcheck v0.8.2 (scripts/staticcheck.sh, which
+builds it with the toolchain `go.mod` names). Both versions are pinned in
+the workflow and the script.
