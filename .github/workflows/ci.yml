@@ -75,6 +75,17 @@ jobs:
                 -map github.com/laiwf94/authz/cmd/wicket=github.com/laiwf94/authz/cmd/authz/internal/gateway \
                 -map github.com/laiwf94/authz/cmd/fakeidp=github.com/laiwf94/authz/cmd/authz/internal/fakeidp \
                 internal/authn/testdata/wicket-suite.txt
+      # Every test, subtest and fuzz seed the toolgate suite ran before the
+      # move must still pass, under the race detector:
+      # internal/agents/testdata/toolgate-suite.txt. Then the SIGKILL crash
+      # harness against authz mcp serve, three times over for more kill
+      # points (it also runs once in the Test step).
+      - name: Suite counts (agents)
+        shell: bash
+        run: |
+          go test -race -json -count=1 ./internal/agents/... ./cmd/authz/internal/mcp/... ./cmd/authz/internal/mcpfake/... \
+            | go run scripts/suite-counts.go internal/agents/testdata/toolgate-suite.txt
+          go test -race -count=3 -run '^TestMCPSurvivesSIGKILL$' ./cmd/authz
       # Every _test.go file of the three pre-merge trees must have moved with
       # only its import block and package clause changed, apart from the
       # lines listed in scripts/testbody-allow.txt, and every package must
