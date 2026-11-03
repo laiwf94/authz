@@ -90,7 +90,16 @@ jobs:
       # Both images carry /wicket -> /authz, and a config served through
       # /wicket, the gateway image and authz gateway answers byte for byte
       # the same: docs/proxies.md, "Moving from wicket".
+      # The authz image measured against the week 1 baseline and held under
+      # the roadmap's 25 MB limit (uncompressed): bench/image-baseline.json.
+      # The Images step reuses the image.
+      - name: Image size
+        run: |
+          docker build -t authz:ci .
+          go run scripts/image-size.go -baseline bench/image-baseline.json authz:ci
       - name: Images
+        env:
+          AUTHZ_IMAGE: authz:ci
         run: ./scripts/image-check.sh
       # The toolgate image keeps /toolgate and /mcpfake as links to /authz;
       # this runs the README's two-container example through them, with

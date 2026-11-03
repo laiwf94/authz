@@ -1,0 +1,11 @@
+# The build context for Dockerfile, wicket/Dockerfile and toolgate/Dockerfile.
+# The build stage has no git and builds with -buildvcs=false, so history is
+# never needed; local build and test output never belongs in an image.
+.git
+.github
+*.out
+*.test
+/authz
+/grantd
+/data/
+/vendor/

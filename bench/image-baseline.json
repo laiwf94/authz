@@ -1,0 +1,109 @@
+{
+  "limit_bytes": 25000000,
+  "baseline": {
+    "compressed_bytes": 5677373,
+    "uncompressed_bytes": 15189504,
+    "layers": [
+      {
+        "compressed_bytes": 83900,
+        "uncompressed_bytes": 327680,
+        "files": 36
+      },
+      {
+        "compressed_bytes": 12481,
+        "uncompressed_bytes": 40960,
+        "files": 8
+      },
+      {
+        "compressed_bytes": 445709,
+        "uncompressed_bytes": 2416640,
+        "files": 907
+      },
+      {
+        "compressed_bytes": 29005,
+        "uncompressed_bytes": 102400,
+        "files": 6
+      },
+      {
+        "compressed_bytes": 67,
+        "uncompressed_bytes": 1536,
+        "files": 0
+      },
+      {
+        "compressed_bytes": 188,
+        "uncompressed_bytes": 2560,
+        "files": 1
+      },
+      {
+        "compressed_bytes": 123,
+        "uncompressed_bytes": 2560,
+        "files": 0
+      },
+      {
+        "compressed_bytes": 162,
+        "uncompressed_bytes": 2560,
+        "files": 1
+      },
+      {
+        "compressed_bytes": 80,
+        "uncompressed_bytes": 1536,
+        "files": 0
+      },
+      {
+        "compressed_bytes": 351,
+        "uncompressed_bytes": 2048,
+        "files": 1
+      },
+      {
+        "compressed_bytes": 314,
+        "uncompressed_bytes": 3072,
+        "files": 1
+      },
+      {
+        "compressed_bytes": 143347,
+        "uncompressed_bytes": 276480,
+        "files": 4
+      },
+      {
+        "compressed_bytes": 4958229,
+        "uncompressed_bytes": 12007936,
+        "files": 1
+      },
+      {
+        "compressed_bytes": 98,
+        "uncompressed_bytes": 1536,
+        "files": 0
+      }
+    ],
+    "largest_files": [
+      {
+        "path": "/authz",
+        "size_bytes": 12005536
+      },
+      {
+        "path": "/etc/ssl/certs/ca-certificates.crt",
+        "size_bytes": 224449
+      },
+      {
+        "path": "/usr/share/zoneinfo/tzdata.zi",
+        "size_bytes": 114399
+      },
+      {
+        "path": "/usr/share/doc/tzdata/changelog.gz",
+        "size_bytes": 83345
+      },
+      {
+        "path": "/etc/mime.types",
+        "size_bytes": 73816
+      }
+    ]
+  },
+  "recorded": {
+    "command": "docker build -t authz:latest . && go run scripts/image-size.go -record bench/image-baseline.json -limit 25000000 authz:latest",
+    "commit": "a69f78435883-dirty",
+    "date": "2026-11-03",
+    "docker": "29.9.2",
+    "image": "authz:latest",
+    "note": "Week 1 baseline for the week 5 gate (#74, #86): the root Dockerfile, both base images pinned by digest, linux/amd64, measured with the containerd image store, which keeps layers gzip-compressed as built. The Dockerfile before this change measured 5676824 compressed and 15187968 uncompressed; the /data directory adds one 1536-byte layer. The limit is the roadmap's 25 MB image target, applied to the uncompressed size."
+  }
+}
