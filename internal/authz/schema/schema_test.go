@@ -242,3 +242,59 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+// The limits reject one past the maximum; these check that exactly the
+// maximum is still accepted, so a change from > to >= is caught.
+func TestLimitsAcceptTheMaximum(t *testing.T) {
+	var defs strings.Builder
+	for i := 0; i < MaxDefinitions; i++ {
+		defs.WriteString("definition t" + itoa(i) + " {}\n")
+	}
+	if _, err := Parse(defs.String()); err != nil {
+		t.Fatalf("%d definitions rejected: %v", MaxDefinitions, err)
+	}
+
+	var names strings.Builder
+	names.WriteString("definition a {")
+	for i := 0; i < MaxNamesPerDef; i++ {
+		names.WriteString("\n relation r" + itoa(i) + ": a")
+	}
+	names.WriteString(" }")
+	if _, err := Parse(names.String()); err != nil {
+		t.Fatalf("%d relations in one definition rejected: %v", MaxNamesPerDef, err)
+	}
+
+	var subjects strings.Builder
+	var types strings.Builder
+	for i := 0; i < MaxAllowedTypes; i++ {
+		subjects.WriteString("definition s" + itoa(i) + " {}\n")
+		if i > 0 {
+			types.WriteString(" | ")
+		}
+		types.WriteString("s" + itoa(i))
+	}
+	if _, err := Parse(subjects.String() + "definition a { relation x: " + types.String() + " }"); err != nil {
+		t.Fatalf("%d subject types rejected: %v", MaxAllowedTypes, err)
+	}
+
+	base := "definition a {}"
+	if _, err := Parse(base + strings.Repeat(" ", MaxSchemaBytes-len(base))); err != nil {
+		t.Fatalf("schema of exactly %d bytes rejected: %v", MaxSchemaBytes, err)
+	}
+
+	// Each level of "x + (...)" costs two units of depth: one for the right
+	// operand and one for the parenthesis.
+	chain := func(n int) string {
+		e := "x"
+		for i := 0; i < n; i++ {
+			e = "x + (" + e + ")"
+		}
+		return "definition a { relation x: a\n permission p = " + e + " }"
+	}
+	if _, err := Parse(chain(MaxExprDepth / 2)); err != nil {
+		t.Fatalf("nesting at the depth limit rejected: %v", err)
+	}
+	if _, err := Parse(chain(MaxExprDepth/2 + 1)); err == nil || !strings.Contains(err.Error(), "nested too deeply") {
+		t.Fatalf("nesting past the depth limit accepted: %v", err)
+	}
+}
