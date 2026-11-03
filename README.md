@@ -5,7 +5,7 @@ One identity and access platform in Go: it signs people and agents in, decides w
 | Part | Started as | Today |
 |---|---|---|
 | Authorization | grantd | Zanzibar-style relationships, a schema language, consistent snapshots and a crash-safe write-ahead log (this directory) |
-| Sign-on | wicket | OIDC and SAML single sign-on in front of any app through nginx, Traefik or Envoy forward-auth ([wicket/](wicket/)) |
+| Sign-on | wicket | OIDC and SAML single sign-on in front of any app through nginx, Traefik or Envoy forward-auth: `authz gateway` ([wicket/](wicket/), [docs/proxies.md](docs/proxies.md)) |
 | Agent gateway | toolgate | A security gateway for AI agent tool calls over MCP: default-deny policy, approvals, rate limits and a tamper-evident audit log ([toolgate/](toolgate/)) |
 
 All three keep their full history. The plan for the next year, three tracks in parallel, is in [ROADMAP.md](ROADMAP.md) and the issues labelled `roadmap`.
@@ -112,6 +112,30 @@ $ docker build -t authz .
 $ docker run -p 8080:8080 -e GRANTD_API_KEYS=local-dev-key-0123456 authz
 ```
 
+## Sign-on gateway (formerly wicket)
+
+`authz gateway` puts OIDC and SAML single sign-on in front of any app as the
+forward-auth backend of nginx, Traefik or Envoy. It is the wicket command
+moved into the one binary, and nothing changes for an operator: the same
+config file, the same `WICKET_*` variables, endpoints, cookies, session file,
+logs, SIGHUP reload and exit codes. Both images keep `/wicket` as a link to
+`/authz`, so `wicket check` and `wicket genkey` still work.
+
+```console
+$ go build -o authz ./cmd/authz
+$ export WICKET_COOKIE_KEYS=$(./authz gateway genkey)
+$ ./authz gateway check -online wicket.json    # your config: file checks, then each provider
+$ WICKET_CONFIG=wicket.json ./authz gateway     # :4180, admin API on 127.0.0.1:4181
+$ ./wicket/examples/demo.sh                     # nginx in Docker, OIDC and SAML logins, end to end
+```
+
+The end-to-end responses are pinned byte for byte in golden transcripts
+recorded from wicket before the move, and CI replays them through
+`authz gateway` started from a wicket config file. Proxy snippets and the
+move from wicket are in [docs/proxies.md](docs/proxies.md); the gateway's
+design and tests are in [wicket/README.md](wicket/README.md) and
+[wicket/docs/DESIGN.md](wicket/docs/DESIGN.md).
+
 ## HTTP API
 
 All `/v1` endpoints take `Authorization: Bearer <key>` and JSON bodies.
@@ -189,6 +213,10 @@ internal/authz/check        check engine, result cache, lookups
 internal/authz/token        signed consistency tokens
 internal/authz/api          HTTP API, auth, errors, logging, metrics wiring
 internal/metrics            Prometheus text exposition
+cmd/authz/internal/gateway  authz gateway (formerly wicket): environment, startup, check
+cmd/authz/internal/fakeidp  authz fakeidp: test OIDC and SAML identity provider
+internal/authn/...          sign-on: forward-auth server, OIDC, SAML, sessions, policy
+internal/authn/golden/e2e   the gateway's end-to-end golden transcripts
 ```
 
 ## License

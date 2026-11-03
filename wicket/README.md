@@ -166,6 +166,7 @@ details go only to the audit log.
 | What | How |
 |---|---|
 | End to end | wicket and fakeidp over real TLS listeners: OIDC and SAML logins (signed, encrypted, signed requests), forward-auth in nginx, Traefik and Envoy modes, 403, logout, admin revocation, reload, rate limiting. The demo repeats this through a real nginx in Docker. |
+| Golden transcripts | Every byte the gateway sends on those paths (status, headers, cookie attributes, pages) is pinned in [internal/authn/golden/e2e/testdata/golden](../internal/authn/golden/e2e/testdata/golden), recorded from wicket before it became `authz gateway`. CI replays them in process and through `authz gateway` started from `WICKET_*` variables and a wicket config file; any difference fails with a line diff. |
 | Attacks | Table-driven suites, one case per known attack and the exact rejection reason it must produce (listed below). |
 | SAML integrity | Property test: random structural mutations of signed responses (delete, duplicate or move any element, edit text or attributes). Many are still accepted, but never with an identity other than the one the IdP signed. |
 | Policy | Property test against an independent, deliberately naive reference evaluator on 50,000 random rules and identities. Deliberately broken evaluators fail it. |
@@ -268,6 +269,8 @@ internal/authn/check      offline file checks and online provider checks behind 
 internal/authn/keyfile    SP keys, certificates and CA bundles from PEM files
 internal/authn/fakeidp    the test identity provider
 internal/authn/metrics    Prometheus text exposition
+internal/authn/golden     normalised HTTP transcripts compared with golden files
+internal/authn/golden/e2e the end-to-end golden scenarios and their transcripts
 examples (wicket/), examples/whoami  demo script, nginx config, demo configs, a verifying upstream app
 docs (wicket/)            design notes and proxy configurations
 ```

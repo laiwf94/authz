@@ -275,6 +275,13 @@ func loadSigners(files []string) ([]*jose.Signer, error) {
 // run serves until ctx ends. ready, when set, receives the public and admin
 // addresses once both listeners are bound.
 func run(ctx context.Context, getenv func(string) string, logOut io.Writer, hup <-chan os.Signal, ready func(public, admin string)) error {
+	return serve(ctx, getenv, logOut, hup, ready, nil)
+}
+
+// serve is run with the clock the sessions and handlers read; nil is the
+// wall clock. Only the golden replay sets it, so the times in its tokens and
+// cookies are fixed offsets and the transcripts compare byte for byte.
+func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hup <-chan os.Signal, ready func(public, admin string), now func() time.Time) error {
 	st, err := loadSettings(getenv)
 	if err != nil {
 		return err
@@ -299,7 +306,7 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, hup 
 		return err
 	}
 	sessions, err := session.Open(session.Options{Path: st.sessionFile, IdleTimeout: time.Duration(cfg.Session.IdleTimeout),
-		AbsoluteTimeout: time.Duration(cfg.Session.AbsoluteTimeout)})
+		AbsoluteTimeout: time.Duration(cfg.Session.AbsoluteTimeout), Now: now})
 	if err != nil {
 		return err
 	}
@@ -315,7 +322,7 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, hup 
 			return config.Load(st.configPath, getenv)
 		},
 		Sessions: sessions, Keys: keys, Signers: signers, Logger: log, Metrics: metrics.New(),
-		AdminToken: st.adminToken, TrustedProxies: st.trusted, LoginRate: st.loginRate,
+		AdminToken: st.adminToken, TrustedProxies: st.trusted, LoginRate: st.loginRate, Now: now,
 	})
 	if err != nil {
 		return err

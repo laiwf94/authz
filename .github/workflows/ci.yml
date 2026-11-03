@@ -81,6 +81,15 @@ jobs:
       # keep its test functions.
       - name: Test bodies
         run: ./scripts/testbody-diff.sh
+      # The end-to-end golden transcripts recorded from wicket before the
+      # move, replayed through `authz gateway` from WICKET_* variables and a
+      # wicket config file (OIDC, SAML, nginx, Traefik and Envoy modes, the
+      # forbidden page and the admin API), then the nginx demo in Docker
+      # through the same binary: internal/authn/golden/e2e.
+      - name: Golden replay and demo (authn)
+        run: |
+          go test -count=1 -v -run '^TestGoldenGateway$' ./cmd/authz/internal/gateway
+          ./wicket/examples/demo.sh
       # toolgate's policy cases and its demo, which compares every decision
       # with a recording made by the old binary.
       - name: Policy cases (agents)

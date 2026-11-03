@@ -195,3 +195,53 @@ as Leopard does, would make deep nesting cost one lookup instead of a walk.
 For storage beyond memory, the map store can be swapped for an LSM or a SQL
 table keyed by `(type, id, relation, subject, created_revision)`. The `Reader`
 interface the engine depends on is a single method.
+
+## Sign-on gateway (authn)
+
+The sign-on side, `authz gateway`, is the wicket command moved into the one
+binary in week 1. Its internals (request flows, the SAML verification order,
+the session log, key rotation, the threat model) are in
+[wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md), and the proxy snippets and
+the move from wicket in [proxies.md](proxies.md). This section records what
+the move had to keep and how that is checked.
+
+**Layout.** Go's internal rule stopped the root binary from importing
+`wicket/internal`, so the packages moved to `internal/authn/*` with
+`scripts/rewrite-imports.go`, which changes import specs and nothing else, and
+`cmd/wicket` and `cmd/fakeidp` became `cmd/authz/internal/gateway` and
+`cmd/authz/internal/fakeidp`. Each old main package exports `Run`, and
+`cmd/authz/main.go` lists it as a subcommand. When the binary is run as
+`wicket` (the `/wicket -> /authz` link in both images), it behaves as
+`authz gateway`.
+
+**The contract.** An operator changes nothing: the same config file, the same
+`WICKET_*` variables, endpoints, `__Host-wicket` cookies (so users stay
+signed in across the upgrade), session file, JSON logs, SIGHUP reload and exit
+codes. The one change is in `authz fakeidp`, a test tool: an undefined flag
+now exits 2, as every subcommand does.
+
+**How it is checked.** Four gates in `ci.yml` hold the contract:
+
+- *Golden transcripts* (`internal/authn/golden/e2e`). Five transcripts
+  recorded from the wicket code before the move pin every byte the gateway
+  sends on the end-to-end paths: OIDC and SAML logins (with and without signed
+  requests), forward-auth in nginx, Traefik and Envoy modes, the forbidden
+  page, logout and the admin API. Only values that are random by construction
+  (ports, sealed cookies, state, nonce, CSRF tokens, signatures, session IDs)
+  become numbered placeholders, and times are written relative to the clock.
+  The same scenarios replay in process against `server.New` and through
+  `authz gateway`'s startup path: settings from `WICKET_*` variables, a
+  wicket config file, key files, a session file and the gateway's own plain
+  HTTP listeners behind a TLS-terminating client. The clock is the only thing
+  injected, because the transcripts write times relative to it. A single
+  changed header fails both with a line diff.
+- *Test bodies* (`scripts/testbody-diff.sh`). Every wicket test file moved
+  with only its import block and package clause changed.
+- *Suite counts* (`scripts/suite-counts.go`). The 338 tests, subtests and
+  fuzz seeds wicket ran before the move (73 attack, 6 property, 25 fuzz, 234
+  unit) must all still run and pass.
+- *The demo and the images.* `wicket/examples/demo.sh` runs a real nginx in
+  Docker in front of the whoami app through `authz gateway` and
+  `authz fakeidp`. `scripts/image-check.sh` serves one config through
+  `/wicket`, the gateway image's entrypoint and `authz gateway`, and compares
+  the responses.

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end demo: nginx (in Docker) in front of a tiny "whoami" app, with
-# wicket as the auth_request backend and fakeidp as both an OpenID Connect
-# provider and a SAML identity provider. curl plays the browser, keeping a
-# cookie jar and posting the login forms.
+# `authz gateway` (formerly wicket) as the auth_request backend and
+# `authz fakeidp` as both an OpenID Connect provider and a SAML identity
+# provider. curl plays the browser, keeping a cookie jar and posting the login
+# forms. CI runs it after replaying the golden transcripts through the same
+# binary (cmd/authz/internal/gateway, TestGoldenGateway).
 #
 # Needs: go, docker, curl, python3. Uses ports 4180, 4181, 8081, 8443, 9443.
 set -euo pipefail
@@ -72,7 +74,7 @@ chmod 644 "$WORK/certs/tls.pem" "$WORK/certs/tls-key.pem" # readable by nginx in
 cp "$ROOT/examples/wicket.json" "$ROOT/examples/fakeidp.json" "$WORK/"
 ok "binaries in $WORK/bin"
 
-step "Start fakeidp (OIDC + SAML), whoami, wicket, and nginx in Docker"
+step "Start fakeidp (OIDC + SAML), whoami, authz gateway, and nginx in Docker"
 cd "$WORK"
 "$WORK/bin/authz" fakeidp -config fakeidp.json -addr 127.0.0.1:9443 -tls-cert certs/tls.pem -tls-key certs/tls-key.pem 2>"$WORK/fakeidp.log" &
 PIDS+=($!)
@@ -90,9 +92,9 @@ wait_for http://127.0.0.1:4180/healthz
 docker run -d --name wicket-demo-nginx --add-host host.docker.internal:host-gateway -p 8443:8443 \
   -v "$ROOT/examples/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$WORK/certs:/etc/nginx/certs:ro" "$NGINX_IMAGE" >/dev/null
 wait_for "$APP/_wicket/healthz"
-ok "nginx on $APP, wicket on :4180 (admin on 127.0.0.1:4181), fakeidp on :9443"
+ok "nginx on $APP, the gateway on :4180 (admin on 127.0.0.1:4181), fakeidp on :9443"
 
-step "1. Anonymous request: nginx asks wicket, gets 401, redirects to the login page"
+step "1. Anonymous request: nginx asks the gateway, gets 401, redirects to the login page"
 loc=$(location_of alice "$APP/hello?x=1")
 [[ "$loc" == "$APP/_wicket/login?app=whoami&rd="* ]] || fail "expected a login redirect, got '$loc'"
 ok "302 -> $loc"
@@ -111,7 +113,7 @@ ok "callback set the session cookie and returned to $back"
 body=$(browse alice "$APP/hello?x=1")
 echo "   whoami says: $body"
 echo "$body" | grep -q '"sub":"alice"' || fail "whoami did not verify alice's token"
-ok "the upstream verified wicket's ES256 token (not just the headers)"
+ok "the upstream verified the gateway's ES256 token (not just the headers)"
 
 step "3. Spoofed identity headers get nowhere"
 code=$(status_of mallory -H 'X-Auth-User: alice' -H 'X-Auth-Groups: eng' "$APP/hello")
@@ -154,7 +156,7 @@ code=$(status_of carol "$APP/")
 [[ "$code" == 302 ]] || fail "revoked session got $code"
 ok "carol's next request is sent back to login ($code)"
 
-step "7. Sessions survive a crash: kill -9 wicket and start it again"
+step "7. Sessions survive a crash: kill -9 the gateway and start it again"
 { kill -9 "${PIDS[2]}" && wait "${PIDS[2]}"; } 2>/dev/null || true
 WICKET_CONFIG=wicket.json WICKET_COOKIE_KEYS="$COOKIE_KEY" WICKET_ADDR=0.0.0.0:4180 \
   WICKET_SESSION_FILE="$WORK/sessions.log" WICKET_SIGNING_KEYS="$WORK/signing.pem" \
@@ -173,11 +175,11 @@ data=$(IFS='&'; echo "${f[*]:1}")
 idp_logout=$(browse alice -o /dev/null -w '%{redirect_url}' -X POST --data "$data" "${f[0]}")
 [[ "$idp_logout" == https://localhost:9443/logout?* ]] || fail "expected the IdP end_session_endpoint, got $idp_logout"
 final=$(location_of alice "$idp_logout")
-ok "wicket -> IdP end-session -> $final"
+ok "gateway -> IdP end-session -> $final"
 [[ "$(status_of alice "$APP/")" == 302 ]] || fail "alice still signed in"
 ok "alice's next request is sent back to login"
 
-step "Audit log (from wicket)"
+step "Audit log (from the gateway)"
 grep '"audit":true' "$WORK/wicket.log" | python3 -c '
 import json, sys
 for line in sys.stdin:
