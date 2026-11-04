@@ -60,3 +60,32 @@ link the roadmap issue they come from.
   test, subtest and fuzz seed must still pass (338 cases); moved test files
   may change only their imports and package clause; and the nginx demo runs
   through the new binary.
+
+### Agent gateway (agents)
+
+- **toolgate is now `authz mcp`** ([#75](https://github.com/laiwf94/authz/issues/75)).
+  The toolgate packages live at `internal/agents/*` in the root module, and
+  `cmd/toolgate` and `cmd/mcpfake` are the `authz mcp` and `authz mcpfake`
+  subcommands. The config and policy files, the `TOOLGATE_*` and `MCPFAKE_*`
+  variables, both listeners and their endpoints, the audit record format,
+  the tool pins, SIGHUP reload and the exit codes are unchanged. Audit logs
+  written by toolgate verify under `authz mcp audit verify` and are
+  continued on start.
+- Every `TOOLGATE_*` variable may also be spelled `AUTHZ_MCP_*`, and every
+  `MCPFAKE_*` one `AUTHZ_MCPFAKE_*`. Setting both spellings of one variable
+  to different values stops the command at start with exit 2.
+- A binary run as `toolgate` or `mcpfake` is `authz mcp` or
+  `authz mcpfake` and names itself the old way in its messages. The toolgate
+  image ships `/toolgate` and `/mcpfake` as links to `/authz`, and its
+  entrypoint is `/authz mcp`.
+- `authz mcp -h` and `authz mcpfake -h` print help and exit 0; a flag before
+  the subcommand is a usage error with exit 2.
+- A "Moving from the toolgate binary" guide is in
+  [toolgate/README.md](toolgate/README.md#moving-from-the-toolgate-binary).
+- CI holds the move to the old behaviour: the demo's 23 decisions, recorded
+  from toolgate before the move, must come out identical through
+  `authz mcp`; every toolgate test, subtest and fuzz seed must still pass
+  under the race detector (133 cases); moved test files may change only
+  their imports and package clause; `authz mcp serve` is killed with SIGKILL
+  under load and must lose no acknowledged audit record; and the README's
+  two-container example runs through the image's old entry points.

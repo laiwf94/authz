@@ -295,3 +295,68 @@ now exits 2, as every subcommand does.
   `authz fakeidp`. `scripts/image-check.sh` serves one config through
   `/wicket`, the gateway image's entrypoint and `authz gateway`, and compares
   the responses.
+
+## Agent gateway (agents)
+
+The agent side, `authz mcp`, is the toolgate command moved into the one
+binary in week 1. Its internals (the path of one call, the policy language,
+approvals, tool pinning, the audit chain, both MCP eras, failures and
+limits) are in [toolgate/docs/DESIGN.md](../toolgate/docs/DESIGN.md), and
+the move from the toolgate binary in
+[toolgate/README.md](../toolgate/README.md#moving-from-the-toolgate-binary).
+This section records what the move had to keep and how that is checked.
+
+**Layout.** The packages moved from `toolgate/internal/*` to
+`internal/agents/*` with `scripts/rewrite-imports.go`, and `cmd/toolgate`
+and `cmd/mcpfake` became `cmd/authz/internal/mcp` and
+`cmd/authz/internal/mcpfake`, each exporting `Run` for `cmd/authz/main.go`.
+`authz mcpfake` is a hidden subcommand: it runs, but `authz help` leaves it
+out. A binary run as `toolgate` or `mcpfake` (the links in the toolgate
+image) is `authz mcp` or `authz mcpfake`, and names itself the old way in
+its usage and error messages.
+
+**The contract.** An operator changes nothing: the same config and policy
+files, `TOOLGATE_*` and `MCPFAKE_*` variables, endpoints on both listeners,
+audit record format, pin store, SIGHUP and file-change reload, and exit
+codes. Each variable may also be spelled `AUTHZ_MCP_*` or `AUTHZ_MCPFAKE_*`;
+setting both spellings to different values stops the command at start
+rather than picking one. Two things are new: `-h` prints help and exits 0,
+and a flag before the subcommand is a usage error with exit 2.
+
+**How it is checked.** Six gates in `ci.yml` hold the contract:
+
+- *Recorded decisions* (`scripts/recorded-decisions.go`,
+  `gateway.RecordDecisions`). `toolgate/examples/demo_decisions.jsonl` holds
+  the 23 decisions of every demo scenario (allow, argument and deny-rule
+  refusals, redaction, rate limit, approval and its single use, rug-pull
+  quarantine), recorded from the toolgate binary before the move. Times,
+  latencies and per-run identifiers become placeholders, numbered so that
+  records sharing a request, an approval or the same arguments still show
+  it; every other field (decision, rule, reason, outcome, preview,
+  redactions, policy and tool hashes) is compared exactly. `demo.sh` runs
+  every scenario through `authz mcpfake` and `authz mcp` and fails on any
+  difference.
+- *Old audit chains* (`internal/agents/audit/testdata`). A log written by
+  the toolgate binary verifies under the new code with the same head, is
+  opened and extended the way `authz mcp serve` does at start, and fails at
+  the right line when a record is changed. `authz mcp audit verify` prints,
+  for the log and seven damaged copies of it, exactly what the toolgate
+  binary printed, with the same exit status.
+- *Test bodies* (`scripts/testbody-diff.sh`). Every toolgate test file moved
+  with only its import block and package clause changed, apart from two
+  relative fixture paths the deeper directories force (listed in
+  `scripts/testbody-allow.txt`).
+- *Suite counts* (`scripts/suite-counts.go`). The 133 tests, subtests and
+  fuzz seeds toolgate ran before the move must all run and pass under the
+  race detector (`internal/agents/testdata/toolgate-suite.txt`).
+- *Crash harness* (`TestMCPSurvivesSIGKILL`). The real `authz mcp serve`
+  runs as a child process under load from six agents and is killed with
+  SIGKILL at random points, eight times on one audit log and state
+  directory, with a torn half-record left once. Every call the upstream saw
+  must have a durable `started` record, every answered call its records,
+  each restart must cut the torn tail and verify, and the pins must survive.
+  It runs three more times in the "Suite counts (agents)" step.
+- *Policy cases, the demo and the image.* `authz mcp policy test` runs the
+  17 example cases unchanged, and `toolgate/examples/image.sh` runs the
+  two-container example in the README through the image's `/mcpfake` and
+  `/toolgate` links with `TOOLGATE_*` variables only.

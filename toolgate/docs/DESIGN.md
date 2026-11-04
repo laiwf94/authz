@@ -390,6 +390,7 @@ interactive request the agent never agreed to.
 | Audit log write or fsync fails | Calls refused with 503 `-31010`; `/healthz` 503; restart required |
 | Audit log tampered while stopped | Startup refuses with the line number |
 | Crash mid-append | Torn last line removed on start; it was never acknowledged |
+| Gateway killed (SIGKILL) under load | Every call the upstream saw has a durable `started` record and every answered call its records; the restart cuts a torn tail, verifies the log and keeps the pins. `TestMCPSurvivesSIGKILL` kills `authz mcp serve` at random points eight times per run |
 | Pin store cannot be written | New tools not trusted; quarantines still enforced in memory |
 | Upstream down | Its last good tool list is still used (pins still checked); a never-reached upstream lists nothing; calls get 502 `-31007` |
 | Upstream slow | Call cancelled at `timeout_ms`, 504 `-31008` |

@@ -6,7 +6,7 @@ One identity and access platform in Go: it signs people and agents in, decides w
 |---|---|---|
 | Authorization | grantd | Zanzibar-style relationships, a schema language, consistent snapshots and a crash-safe write-ahead log (this directory) |
 | Sign-on | wicket | OIDC and SAML single sign-on in front of any app through nginx, Traefik or Envoy forward-auth: `authz gateway` ([wicket/](wicket/), [docs/proxies.md](docs/proxies.md)) |
-| Agent gateway | toolgate | A security gateway for AI agent tool calls over MCP: default-deny policy, approvals, rate limits and a tamper-evident audit log ([toolgate/](toolgate/)) |
+| Agent gateway | toolgate | A security gateway for AI agent tool calls over MCP: default-deny policy, approvals, rate limits and a tamper-evident audit log: `authz mcp` ([toolgate/](toolgate/)) |
 
 All three keep their full history. The plan for the next year, three tracks in parallel, is in [ROADMAP.md](ROADMAP.md) and the issues labelled `roadmap`.
 
@@ -152,9 +152,37 @@ move from wicket are in [docs/proxies.md](docs/proxies.md); the gateway's
 design and tests are in [wicket/README.md](wicket/README.md) and
 [wicket/docs/DESIGN.md](wicket/docs/DESIGN.md).
 
+## Agent gateway (formerly toolgate)
+
+`authz mcp` sits between AI agents and the MCP servers whose tools they
+call. Every call is authenticated, checked against a default-deny policy,
+rate limited, optionally held for a human's approval and written to a
+hash-chained audit log before it reaches the upstream. It is the toolgate
+command moved into the one binary, and a deployment changes nothing: the same
+config and policy files, the same `TOOLGATE_*` variables (each may also be
+spelled `AUTHZ_MCP_*`), endpoints, audit format, tool pins, SIGHUP reload and
+exit codes. Audit logs written by toolgate verify under `authz mcp` and are
+continued. The toolgate image keeps `/toolgate` and `/mcpfake` as links to
+`/authz`.
+
+```console
+$ go build -o authz ./cmd/authz
+$ ./authz mcp policy test toolgate/examples/policy.json toolgate/examples/policy_cases.json
+PASS 17 cases: 17 passed, 0 failed
+$ ./authz mcp audit verify audit.jsonl          # names the first line that was changed, removed or reordered
+$ ./toolgate/examples/demo.sh                   # authz mcpfake and authz mcp, every scenario end to end
+```
+
+The demo's decisions and audit records are pinned in
+`toolgate/examples/demo_decisions.jsonl`, recorded from the toolgate binary
+before the move, and every run through `authz mcp` must match them. The
+policy language, approvals, pinning, both MCP eras and the move from the
+toolgate binary are in [toolgate/README.md](toolgate/README.md) and
+[toolgate/docs/DESIGN.md](toolgate/docs/DESIGN.md).
+
 ## HTTP API
 
-All `/v1` endpoints take `Authorization: Bearer <key>` and JSON bodies.
+The authorization API (`authz serve`). All `/v1` endpoints take `Authorization: Bearer <key>` and JSON bodies.
 
 | Endpoint | Purpose |
 |---|---|
@@ -235,6 +263,9 @@ cmd/authz/internal/gateway  authz gateway (formerly wicket): environment, startu
 cmd/authz/internal/fakeidp  authz fakeidp: test OIDC and SAML identity provider
 internal/authn/...          sign-on: forward-auth server, OIDC, SAML, sessions, policy
 internal/authn/golden/e2e   the gateway's end-to-end golden transcripts
+cmd/authz/internal/mcp      authz mcp (formerly toolgate): config, serve, audit verify, policy test, tokens
+cmd/authz/internal/mcpfake  authz mcpfake: a small MCP server with a file sandbox, to try the gateway
+internal/agents/...         agent traffic: MCP and JSON-RPC, policy, approvals, pins, limits, audit chain
 ```
 
 ## License
