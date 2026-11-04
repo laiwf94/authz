@@ -1,0 +1,11 @@
+1. Write the schema
+2. Write relationships
+3. Check, at least as fresh as that write
+   doc:design   edit  user:alice   -> true
+   doc:design   view  user:carol   -> true
+   doc:design   edit  user:carol   -> false
+4. Ban carol, then check with the new token (no new-enemy window)
+   doc:design   view  user:carol   -> false
+5. Which docs can alice view?
+{"cursor":"","looked_up_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ","resource_ids":["design"]}
+

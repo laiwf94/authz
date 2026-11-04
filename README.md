@@ -46,8 +46,8 @@ definition doc {
 
 ```console
 $ curl -s localhost:8080/v1/check -H "$AUTH" -H 'Content-Type: application/json' \
-    -d '{"resource":"doc:plan","permission":"view","subject":"user:alice"}'
-{"allowed":true,"checked_at":"AQAAAAAAAAAC..."}
+    -d '{"resource":"doc:design","permission":"view","subject":"user:alice"}'
+{"allowed":true,"checked_at":"AQAAAAAAAAAD..."}
 ```
 
 ## Checking a permission
@@ -104,6 +104,22 @@ $ authz ctl lookup doc view user:alice
 `check` exits 0 when allowed and 3 when denied; every subcommand exits 2 for
 a usage error. `authz check -relationships file -schema file` validates a
 file of relationships against a schema before you load it.
+
+Nothing changes for an existing grantd deployment: the same variables, data
+directory (`grantd.wal`), tokens, endpoints, error codes, metric names and
+logs. CI holds that to a recording made from the grantd binary before the
+move: every request of the demo above plus every endpoint and error code,
+then a restart on the same data directory, must produce the same status,
+headers, body and startup log byte for byte through `authz serve`, and
+`authz serve` must start on a data directory grantd wrote
+([internal/authz/golden](internal/authz/golden)):
+
+```console
+$ go build -o /tmp/authz ./cmd/authz
+$ go run scripts/serve-golden.go -- /tmp/authz serve
+internal/authz/golden/testdata/serve.golden: matches (28701 bytes)
+internal/authz/golden/testdata/demo.golden: matches (448 bytes)
+```
 
 Or with Docker:
 
@@ -175,6 +191,7 @@ with stable codes: `invalid_argument` 400, `unauthenticated` 401, `already_exist
 | Parsers | Go fuzzing of the schema and relationship parsers: anything that parses must round-trip through its canonical form. |
 | API | Every endpoint and error code over real HTTP, including read-your-writes under concurrent writers, auth, body limits and the watch long-poll. |
 | Concurrency | The whole suite runs under the race detector in CI. |
+| Compatibility | `authz serve` replays grantd's recorded end-to-end transcript and restarts on grantd's data directory; every grantd test moved with only its imports and package clause changed (`scripts/testbody-diff.sh`). |
 
 ```console
 $ go test -race ./...                 # full suite
@@ -213,6 +230,7 @@ internal/authz/check        check engine, result cache, lookups
 internal/authz/token        signed consistency tokens
 internal/authz/api          HTTP API, auth, errors, logging, metrics wiring
 internal/metrics            Prometheus text exposition
+internal/authz/golden       end-to-end transcript of the API, recorded from grantd
 cmd/authz/internal/gateway  authz gateway (formerly wicket): environment, startup, check
 cmd/authz/internal/fakeidp  authz fakeidp: test OIDC and SAML identity provider
 internal/authn/...          sign-on: forward-auth server, OIDC, SAML, sessions, policy

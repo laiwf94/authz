@@ -1,0 +1,589 @@
+# phase fresh
+## 01 health without a key
+> GET /healthz
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-01
+{"revision":"0","status":"ok"}
+## 02 readiness
+> GET /readyz
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-02
+{"revision":"0","status":"ok"}
+## 03 schema without a key
+> GET /v1/schema
+< 401
+< Cache-Control: no-store
+< Content-Type: application/json
+< Www-Authenticate: Bearer realm="grantd"
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-03
+{"error":{"code":"unauthenticated","message":"missing or invalid API key","request_id":"golden-03"}}
+## 04 schema before one is written
+> GET /v1/schema
+< 424
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-04
+{"error":{"code":"no_schema","message":"write a schema first (PUT /v1/schema)","request_id":"golden-04"}}
+## 05 check before a schema
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:alice","consistency":{"mode":"fully_consistent"}}
+< 424
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-05
+{"error":{"code":"no_schema","message":"write a schema first (PUT /v1/schema)","request_id":"golden-05"}}
+## 06 write before a schema
+> POST /v1/relationships/write
+> {"updates":[{"op":"touch","relationship":"group:eng#member@user:alice"}]}
+< 424
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-06
+{"error":{"code":"no_schema","message":"write a schema first (PUT /v1/schema)","request_id":"golden-06"}}
+## 07 schema as text/plain
+> PUT /v1/schema
+> {"schema":"definition user {}"}
+< 415
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-07
+{"error":{"code":"invalid_argument","message":"Content-Type must be application/json","request_id":"golden-07"}}
+## 08 schema that does not parse
+> PUT /v1/schema
+> {"schema":"definition doc {\n  relation owner: nobody\n}\n"}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-08
+{"error":{"code":"invalid_argument","message":"invalid argument: schema: doc#owner allows unknown type \"nobody\"","request_id":"golden-08"}}
+## 09 schema that refers to itself
+> PUT /v1/schema
+> {"schema":"definition user {}\ndefinition doc {\n  permission view = view\n}\n"}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-09
+{"error":{"code":"invalid_argument","message":"invalid argument: schema: permissions in \"doc\" depend on themselves: view -\u003e view","request_id":"golden-09"}}
+## 10 empty schema
+> PUT /v1/schema
+> {"schema":"  "}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-10
+{"error":{"code":"invalid_argument","message":"schema is empty","request_id":"golden-10"}}
+## 11 unknown field
+> PUT /v1/schema
+> {"schema":"definition user {}","extra":1}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-11
+{"error":{"code":"invalid_argument","message":"invalid JSON body: json: unknown field \"extra\"","request_id":"golden-11"}}
+## 12 README schema (demo step 1)
+> PUT /v1/schema
+> {"schema":"definition user {}\n\ndefinition group {\n  relation member: user | group#member\n}\n\ndefinition folder {\n  relation parent: folder\n  relation viewer: user | user:* | group#member\n  permission view = viewer + parent-\u003eview\n}\n\ndefinition doc {\n  relation parent: folder\n  relation owner: user\n  relation editor: user | group#member\n  relation banned: user\n  permission edit = owner + editor\n  permission view = (edit + parent-\u003eview) - banned\n}\n"}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-12
+{"schema":"definition user {}\n\ndefinition group {\n  relation member: user | group#member\n}\n\ndefinition folder {\n  relation parent: folder\n  relation viewer: user | user:* | group#member\n  permission view = viewer + parent-\u003eview\n}\n\ndefinition doc {\n  relation parent: folder\n  relation owner: user\n  relation editor: user | group#member\n  relation banned: user\n  permission edit = owner + editor\n  permission view = (edit + parent-\u003eview) - banned\n}\n","written_at":"AQAAAAAAAAAB_IylAxEeI3spQXYjQmDnAw"}
+## 13 schema in canonical form
+> GET /v1/schema
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-13
+{"schema":"definition user {}\n\ndefinition group {\n  relation member: user | group#member\n}\n\ndefinition folder {\n  relation parent: folder\n  relation viewer: user | user:* | group#member\n  permission view = viewer + parent-\u003eview\n}\n\ndefinition doc {\n  relation parent: folder\n  relation owner: user\n  relation editor: user | group#member\n  relation banned: user\n  permission edit = owner + editor\n  permission view = (edit + parent-\u003eview) - banned\n}\n"}
+## 14 README relationships (demo step 2)
+> POST /v1/relationships/write
+> {"updates":[{"op":"touch","relationship":"group:eng#member@user:alice"},{"op":"touch","relationship":"group:staff#member@group:eng#member"},{"op":"touch","relationship":"group:staff#member@user:carol"},{"op":"touch","relationship":"folder:root#viewer@group:staff#member"},{"op":"touch","relationship":"folder:specs#parent@folder:root"},{"op":"touch","relationship":"doc:design#parent@folder:specs"},{"op":"touch","relationship":"doc:design#editor@group:eng#member"}]}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-14
+{"written_at":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA"}
+## 15 alice can edit (demo step 3)
+> POST /v1/check
+> {"resource":"doc:design","permission":"edit","subject":"user:alice","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-15
+{"allowed":true,"checked_at":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA"}
+## 16 carol can view (demo step 3)
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:carol","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-16
+{"allowed":true,"checked_at":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA"}
+## 17 carol cannot edit (demo step 3)
+> POST /v1/check
+> {"resource":"doc:design","permission":"edit","subject":"user:carol","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-17
+{"allowed":false,"checked_at":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA"}
+## 18 ban carol (demo step 4)
+> POST /v1/relationships/write
+> {"updates":[{"op":"touch","relationship":"doc:design#banned@user:carol"}]}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-18
+{"written_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ"}
+## 19 carol cannot view at the ban's token (demo step 4)
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:carol","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-19
+{"allowed":false,"checked_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ"}
+## 20 carol could view just before the ban
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:carol","consistency":{"mode":"at_exact_snapshot","token":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-20
+{"allowed":true,"checked_at":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA"}
+## 21 docs alice can view (demo step 5)
+> POST /v1/lookup/resources
+> {"resource_type":"doc","permission":"view","subject":"user:alice","consistency":{"mode":"fully_consistent"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-21
+{"cursor":"","looked_up_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ","resource_ids":["design"]}
+## 22 the README's curl: alice can view doc:design
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:alice","consistency":{"mode":"fully_consistent"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-22
+{"allowed":true,"checked_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ"}
+## 23 nobody wrote doc:plan
+> POST /v1/check
+> {"resource":"doc:plan","permission":"view","subject":"user:alice","consistency":{"mode":"fully_consistent"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-23
+{"allowed":false,"checked_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ"}
+## 24 bulk check at one snapshot
+> POST /v1/check/bulk
+> {"items":[{"resource":"doc:design","permission":"view","subject":"user:alice"},{"resource":"folder:root","permission":"view","subject":"group:eng#member"},{"resource":"doc:design","permission":"nope","subject":"user:alice"},{"resource":"doc:design","permission":"view","subject":"user:carol"}],"consistency":{"mode":"at_exact_snapshot","token":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-24
+{"checked_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ","results":[{"allowed":true},{"allowed":true},{"allowed":false,"error":"unknown relation or permission: \"doc\" has no relation or permission \"nope\""},{"allowed":false}]}
+## 25 read groups, first page
+> POST /v1/relationships/read
+> {"filter":{"resource_type":"group"},"limit":2,"consistency":{"mode":"at_exact_snapshot","token":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-25
+{"cursor":"group:staff#member@group:eng#member","read_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ","relationships":["group:eng#member@user:alice","group:staff#member@group:eng#member"]}
+## 26 read groups, next page
+> POST /v1/relationships/read
+> {"filter":{"resource_type":"group"},"limit":2,"cursor":"group:staff#member@group:eng#member","consistency":{"mode":"at_exact_snapshot","token":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-26
+{"cursor":"","read_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ","relationships":["group:staff#member@user:carol"]}
+## 27 read by subject
+> POST /v1/relationships/read
+> {"filter":{"resource_type":"group","subject_type":"group","subject_id":"eng","subject_relation":"member"},"consistency":{"mode":"fully_consistent"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-27
+{"cursor":"","read_at":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ","relationships":["group:staff#member@group:eng#member"]}
+## 28 read without a type
+> POST /v1/relationships/read
+> {"filter":{},"consistency":{"mode":"fully_consistent"}}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-28
+{"error":{"code":"invalid_argument","message":"invalid argument: filter needs a valid resource_type","request_id":"golden-28"}}
+## 29 read limit too large
+> POST /v1/relationships/read
+> {"filter":{"resource_type":"doc"},"limit":100000}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-29
+{"error":{"code":"invalid_argument","message":"limit must be between 0 and 1000 (0 uses the default of 100)","request_id":"golden-29"}}
+## 30 create one that exists
+> POST /v1/relationships/write
+> {"updates":[{"op":"create","relationship":"group:eng#member@user:alice"}]}
+< 409
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-30
+{"error":{"code":"already_exists","message":"conflict: group:eng#member@user:alice already exists","request_id":"golden-30"}}
+## 31 precondition that fails
+> POST /v1/relationships/write
+> {"updates":[{"op":"touch","relationship":"doc:design#owner@user:bob"}],"preconditions":[{"must_exist":false,"filter":{"resource_type":"doc","resource_id":"design","relation":"banned"}}]}
+< 412
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-31
+{"error":{"code":"failed_precondition","message":"precondition failed: precondition 0: matching relationships must not exist","request_id":"golden-31"}}
+## 32 relationship the schema forbids
+> POST /v1/relationships/write
+> {"updates":[{"op":"touch","relationship":"doc:design#banned@group:eng#member"}]}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-32
+{"error":{"code":"invalid_argument","message":"update 0: invalid argument: doc#banned does not allow group#member (allowed: user)","request_id":"golden-32"}}
+## 33 relationship that does not parse
+> POST /v1/relationships/write
+> {"updates":[{"op":"touch","relationship":"doc:design"}]}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-33
+{"error":{"code":"invalid_argument","message":"updates[0]: invalid argument: relationship \"doc:design\" has no '@'","request_id":"golden-33"}}
+## 34 unknown op
+> POST /v1/relationships/write
+> {"updates":[{"op":"upsert","relationship":"doc:design#owner@user:bob"}]}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-34
+{"error":{"code":"invalid_argument","message":"invalid argument: update 0: op must be touch, create or delete","request_id":"golden-34"}}
+## 35 public folder and an owner, with a precondition that holds
+> POST /v1/relationships/write
+> {"updates":[{"op":"create","relationship":"folder:pub#viewer@user:*"},{"op":"touch","relationship":"doc:notes#parent@folder:pub"},{"op":"touch","relationship":"doc:notes#owner@user:bob"}],"preconditions":[{"must_exist":true,"filter":{"resource_type":"doc","resource_id":"design","relation":"banned"}}]}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-35
+{"written_at":"AQAAAAAAAAAEhY7FyvYL3PM03cQJNukIdw"}
+## 36 anyone can view a public doc
+> POST /v1/check
+> {"resource":"doc:notes","permission":"view","subject":"user:zed","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAAEhY7FyvYL3PM03cQJNukIdw"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-36
+{"allowed":true,"checked_at":"AQAAAAAAAAAEhY7FyvYL3PM03cQJNukIdw"}
+## 37 lift the ban
+> POST /v1/relationships/write
+> {"updates":[{"op":"delete","relationship":"doc:design#banned@user:carol"}]}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-37
+{"written_at":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}
+## 38 carol can view again
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:carol","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-38
+{"allowed":true,"checked_at":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}
+## 39 docs carol can view, one per page
+> POST /v1/lookup/resources
+> {"resource_type":"doc","permission":"view","subject":"user:carol","limit":1,"consistency":{"mode":"at_exact_snapshot","token":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-39
+{"cursor":"design","looked_up_at":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ","resource_ids":["design"]}
+## 40 docs carol can view, next page
+> POST /v1/lookup/resources
+> {"resource_type":"doc","permission":"view","subject":"user:carol","limit":1,"cursor":"design","consistency":{"mode":"at_exact_snapshot","token":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-40
+{"cursor":"","looked_up_at":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ","resource_ids":["notes"]}
+## 41 check an unknown permission
+> POST /v1/check
+> {"resource":"doc:design","permission":"nope","subject":"user:alice","consistency":{"mode":"fully_consistent"}}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-41
+{"error":{"code":"invalid_argument","message":"unknown relation or permission: \"doc\" has no relation or permission \"nope\"","request_id":"golden-41"}}
+## 42 check an unknown type
+> POST /v1/check
+> {"resource":"page:design","permission":"view","subject":"user:alice","consistency":{"mode":"fully_consistent"}}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-42
+{"error":{"code":"invalid_argument","message":"unknown type \"page\"","request_id":"golden-42"}}
+## 43 check a forged token
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:alice","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAAJAAAAAAAAAAAAAAAAAAAAAA"}}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-43
+{"error":{"code":"invalid_argument","message":"invalid consistency token","request_id":"golden-43"}}
+## 44 check an unknown mode
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:alice","consistency":{"mode":"eventually"}}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-44
+{"error":{"code":"invalid_argument","message":"unknown consistency mode \"eventually\"","request_id":"golden-44"}}
+## 45 check without a token
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:alice","consistency":{"mode":"at_least_as_fresh"}}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-45
+{"error":{"code":"invalid_argument","message":"consistency mode at_least_as_fresh needs a token","request_id":"golden-45"}}
+## 46 two JSON objects
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:alice","consistency":{"mode":"fully_consistent"}}{"resource":"doc:design","permission":"view","subject":"user:alice","consistency":{"mode":"fully_consistent"}}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-46
+{"error":{"code":"invalid_argument","message":"request body must be a single JSON object","request_id":"golden-46"}}
+## 47 watch from the start
+> POST /v1/watch
+> {"after":"AQAAAAAAAAAB_IylAxEeI3spQXYjQmDnAw"}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-47
+{"changes":[{"revision":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA","op":"touch","relationship":"group:eng#member@user:alice"},{"revision":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA","op":"touch","relationship":"group:staff#member@group:eng#member"},{"revision":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA","op":"touch","relationship":"group:staff#member@user:carol"},{"revision":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA","op":"touch","relationship":"folder:root#viewer@group:staff#member"},{"revision":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA","op":"touch","relationship":"folder:specs#parent@folder:root"},{"revision":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA","op":"touch","relationship":"doc:design#parent@folder:specs"},{"revision":"AQAAAAAAAAACVIsn7hbd5ONinrQhKsnBfA","op":"touch","relationship":"doc:design#editor@group:eng#member"},{"revision":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ","op":"touch","relationship":"doc:design#banned@user:carol"},{"revision":"AQAAAAAAAAAEhY7FyvYL3PM03cQJNukIdw","op":"touch","relationship":"folder:pub#viewer@user:*"},{"revision":"AQAAAAAAAAAEhY7FyvYL3PM03cQJNukIdw","op":"touch","relationship":"doc:notes#parent@folder:pub"},{"revision":"AQAAAAAAAAAEhY7FyvYL3PM03cQJNukIdw","op":"touch","relationship":"doc:notes#owner@user:bob"},{"revision":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ","op":"delete","relationship":"doc:design#banned@user:carol"}],"next":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}
+## 48 watch from the head
+> POST /v1/watch
+> {"after":""}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-48
+{"changes":[],"next":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}
+## 49 watch from the last write, no wait
+> POST /v1/watch
+> {"after":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-49
+{"changes":[],"next":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}
+## 50 watch too long
+> POST /v1/watch
+> {"after":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ","wait_seconds":3600}
+< 400
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-50
+{"error":{"code":"invalid_argument","message":"wait_seconds must be between 0 and 30","request_id":"golden-50"}}
+## 51 schema change that would orphan data
+> PUT /v1/schema
+> {"schema":"definition user {}\ndefinition group {\n  relation member: user | group#member\n}\ndefinition folder {\n  relation parent: folder\n  relation viewer: user | group#member\n  permission view = viewer + parent->view\n}\ndefinition doc {\n  relation parent: folder\n  relation owner: user\n  relation editor: user | group#member\n  relation banned: user\n  permission edit = owner + editor\n  permission view = (edit + parent->view) - banned\n}\n"}
+< 412
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-51
+{"error":{"code":"failed_precondition","message":"precondition failed: existing relationship folder:pub#viewer@user:* would no longer be valid: invalid argument: folder#viewer does not allow user:* (allowed: user, group#member)","request_id":"golden-51"}}
+## 52 metric names
+> GET /metrics
+< 200
+< Cache-Control: no-store
+< Content-Type: text/plain; version=0.0.4
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-52
+# TYPE grantd_check_cache_hits_total counter
+# TYPE grantd_check_dispatches_total counter
+# TYPE grantd_check_duration_seconds histogram
+# TYPE grantd_head_revision gauge
+# TYPE grantd_http_request_duration_seconds histogram
+# TYPE grantd_http_requests_total counter
+## 53 metrics without a key
+> GET /metrics
+< 401
+< Cache-Control: no-store
+< Content-Type: application/json
+< Www-Authenticate: Bearer realm="grantd"
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-53
+{"error":{"code":"unauthenticated","message":"missing or invalid API key","request_id":"golden-53"}}
+## 54 unknown path
+> GET /v1/nope
+< 404
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-54
+{"error":{"code":"not_found","message":"no such endpoint","request_id":"golden-54"}}
+## 55 wrong method
+> GET /v1/check
+< 404
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-55
+{"error":{"code":"not_found","message":"no such endpoint","request_id":"golden-55"}}
+# log
+{"addr":"\u003caddr\u003e","level":"INFO","msg":"listening","persistent":true,"revision":0}
+{"level":"INFO","msg":"shutting down"}
+# phase restart
+## 01 health after restart
+> GET /healthz
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-01
+{"revision":"5","status":"ok"}
+## 02 a token from before the restart still verifies
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:carol","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-02
+{"allowed":true,"checked_at":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}
+## 03 watch from the head token of before the restart
+> POST /v1/watch
+> {"after":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-03
+{"changes":[],"next":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ"}
+## 04 schema survived
+> GET /v1/schema
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-04
+{"schema":"definition user {}\n\ndefinition group {\n  relation member: user | group#member\n}\n\ndefinition folder {\n  relation parent: folder\n  relation viewer: user | user:* | group#member\n  permission view = viewer + parent-\u003eview\n}\n\ndefinition doc {\n  relation parent: folder\n  relation owner: user\n  relation editor: user | group#member\n  relation banned: user\n  permission edit = owner + editor\n  permission view = (edit + parent-\u003eview) - banned\n}\n"}
+## 05 every relationship survived
+> POST /v1/relationships/read
+> {"filter":{"resource_type":"doc"},"consistency":{"mode":"fully_consistent"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-05
+{"cursor":"","read_at":"AQAAAAAAAAAFs1ReST4Fc9SW3jc8dVWfeQ","relationships":["doc:design#editor@group:eng#member","doc:design#parent@folder:specs","doc:notes#owner@user:bob","doc:notes#parent@folder:pub"]}
+## 06 history before the restart is compacted away
+> POST /v1/check
+> {"resource":"doc:design","permission":"view","subject":"user:carol","consistency":{"mode":"at_exact_snapshot","token":"AQAAAAAAAAAEhY7FyvYL3PM03cQJNukIdw"}}
+< 410
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-06
+{"error":{"code":"snapshot_expired","message":"snapshot expired: revision 4 is older than the oldest kept revision 5","request_id":"golden-06"}}
+## 07 watch from before the restart
+> POST /v1/watch
+> {"after":"AQAAAAAAAAADZ9Kq9BdDaoGAllFS3CxsoQ"}
+< 410
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-07
+{"error":{"code":"snapshot_expired","message":"snapshot expired: changes before revision 5 are no longer kept","request_id":"golden-07"}}
+## 08 write after restart
+> POST /v1/relationships/write
+> {"updates":[{"op":"touch","relationship":"group:eng#member@user:dana"}]}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-08
+{"written_at":"AQAAAAAAAAAGe8FrQ1cfryAcIhgaFYTn-A"}
+## 09 dana can edit
+> POST /v1/check
+> {"resource":"doc:design","permission":"edit","subject":"user:dana","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAAGe8FrQ1cfryAcIhgaFYTn-A"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-09
+{"allowed":true,"checked_at":"AQAAAAAAAAAGe8FrQ1cfryAcIhgaFYTn-A"}
+## 10 docs dana can view
+> POST /v1/lookup/resources
+> {"resource_type":"doc","permission":"view","subject":"user:dana","consistency":{"mode":"at_least_as_fresh","token":"AQAAAAAAAAAGe8FrQ1cfryAcIhgaFYTn-A"}}
+< 200
+< Cache-Control: no-store
+< Content-Type: application/json
+< X-Content-Type-Options: nosniff
+< X-Request-Id: golden-10
+{"cursor":"","looked_up_at":"AQAAAAAAAAAGe8FrQ1cfryAcIhgaFYTn-A","resource_ids":["design","notes"]}
+# log
+{"addr":"\u003caddr\u003e","level":"INFO","msg":"listening","persistent":true,"revision":5}
+{"level":"INFO","msg":"shutting down"}

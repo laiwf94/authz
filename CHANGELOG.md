@@ -5,6 +5,38 @@ link the roadmap issue they come from.
 
 ## Unreleased
 
+### Authorization (authz)
+
+- **One module and one binary** ([#74](https://github.com/laiwf94/authz/issues/74)).
+  The module is `github.com/laiwf94/authz` (it was `github.com/laiwf94/grantd`),
+  and wicket's and toolgate's modules are folded into it. `authz` is the one
+  binary, with a subcommand per part: `serve`, `check`, `ctl`, `gateway`,
+  `mcp` and `version` (`authz help` lists them). Each subcommand has its own
+  `-h`, and a usage error exits 2.
+- **grantd is now `authz serve`.** Its packages live at `internal/authz/*`.
+  The `GRANTD_*` variables, the data directory and its `grantd.wal`, issued
+  consistency tokens, endpoints, headers, error codes and messages, `grantd_*`
+  metric names and log lines are unchanged, so an existing deployment
+  upgrades in place. The one difference is that `authz serve` rejects
+  command-line arguments (exit 2) where grantd ignored them.
+- `authz check [-serve] [-schema file] [-relationships file]` validates the
+  serve environment, a schema file and a relationships file against that
+  schema, and reports every problem with `file:line:col`.
+- `authz ctl` is a client for a running server: `schema read|write`,
+  `rel touch|create|delete|read`, `check` (exits 3 when denied) and
+  `lookup`, with the key in `AUTHZ_API_KEY` and the address in `AUTHZ_URL`.
+- `authz version [-json]` prints the stamped version, or the module and VCS
+  build information.
+- The image is built from base images pinned by digest, runs as nonroot,
+  has a `/data` directory for `GRANTD_DATA_DIR`, and takes
+  `--build-arg VERSION=`. It is 15.19 MB uncompressed (5.68 MB compressed),
+  and CI fails above 25 MB (`bench/image-baseline.json`).
+- One CI workflow for the whole module: build, gofmt, vet, staticcheck,
+  race tests with a 93.5% coverage floor, every fuzz target, the test-body
+  and test-count checks of the move, govulncheck, and a golden replay of
+  grantd's recorded end-to-end transcript and README demo through
+  `authz serve`, including a restart on a data directory grantd wrote.
+
 ### Sign-on (authn)
 
 - **wicket is now `authz gateway`** ([#73](https://github.com/laiwf94/authz/issues/73)).

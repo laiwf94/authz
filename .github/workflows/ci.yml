@@ -92,6 +92,16 @@ jobs:
       # keep its test functions.
       - name: Test bodies
         run: ./scripts/testbody-diff.sh
+      # The authorization API's end-to-end transcript and the README demo
+      # (examples/demo.sh), recorded from the grantd binary at 41d9bf0, played
+      # through a built `authz serve` across a restart on its data directory:
+      # every status, header, body and startup log line must match byte for
+      # byte. internal/authz/golden; the in-process replay and the restart on
+      # grantd's own data directory run in the Test step.
+      - name: Golden replay and demo (authz)
+        run: |
+          go build -o "$RUNNER_TEMP/authz" ./cmd/authz
+          go run scripts/serve-golden.go -- "$RUNNER_TEMP/authz" serve
       # The end-to-end golden transcripts recorded from wicket before the
       # move, replayed through `authz gateway` from WICKET_* variables and a
       # wicket config file (OIDC, SAML, nginx, Traefik and Envoy modes, the

@@ -1,4 +1,8 @@
-# grantd design
+# authz design
+
+The authorization core described first was the grantd service; since week 1
+it is `authz serve` in the one binary. The sections after it cover how it and
+the sign-on gateway moved in.
 
 A check has to return exactly what the schema and the stored relationships
 say, at a well-defined snapshot. It also has to avoid the new enemy problem:
@@ -195,6 +199,52 @@ as Leopard does, would make deep nesting cost one lookup instead of a walk.
 For storage beyond memory, the map store can be swapped for an LSM or a SQL
 table keyed by `(type, id, relation, subject, created_revision)`. The `Reader`
 interface the engine depends on is a single method.
+
+## One binary (authz serve)
+
+grantd's packages moved to `internal/authz/{api,check,schema,store,token}`
+and its command to `cmd/authz/internal/serve`, which exports `Run`;
+`cmd/authz/main.go` dispatches `authz serve` to it. Every old main package
+became its own package under `cmd/authz/internal` because grantd, wicket,
+fakeidp, toolgate and mcpfake each define `run`, `env` or `loadConfig`, and
+their test bodies call those names unqualified. `internal/metrics` stays
+where it was until the shared registry in week 2.
+
+**The contract.** An operator changes nothing: the `GRANTD_*` variables, the
+data directory and its `grantd.wal`, the token key and so every issued token,
+the endpoints, headers, error codes and messages, the `grantd_*` metric names,
+the JSON log lines, and exit status 1 when it cannot start. The image's
+default command is `serve`, so `docker run` with the old arguments starts
+the same server. The one difference is at the command line: grantd ignored
+arguments, while `authz serve` answers `-h` with its environment reference
+and exits 2 for anything else.
+
+**How it is checked.**
+
+- *Golden transcript* (`internal/authz/golden`). The scenario is the README
+  walk-through (`examples/demo.sh`) followed by every endpoint and error code
+  one node can produce, then a restart on the same data directory. It runs
+  with a fixed API key and token key, a request ID per request and an explicit
+  consistency mode on every read, so nothing in it is random and nothing is
+  replaced by a placeholder. The transcript keeps the status, every header but
+  Date and Content-Length, the body, the `# TYPE` lines of `/metrics` and the
+  non-request log lines without their time and address.
+  `scripts/serve-golden.go` recorded it, and the demo's own output, from the
+  grantd binary built at 41d9bf0, the last commit before the move. CI replays
+  both through a built `authz serve`, and the Test step replays the
+  transcript in process through serve's startup path.
+- *Grantd's data directory.* The recording kept the `grantd.wal` that grantd
+  wrote in the fresh phase. A test restarts `authz serve` on a copy and wants
+  grantd's restart phase back, and another wants the log that `authz serve`
+  writes in the same phase to equal grantd's byte for byte.
+- *Test bodies and counts* (`scripts/testbody-diff.sh`). grantd's test files
+  moved with only their import blocks and package clauses changed, and every
+  package kept its tests: api 12, check 27, schema 9, store 19, token 3,
+  metrics 2 and the command's 4, now in `cmd/authz/internal/serve`.
+
+The restart phase also records a behaviour worth knowing: the log is
+compacted into a checkpoint at the head on start, so tokens for the head stay
+valid across a restart while older snapshots answer `snapshot_expired`.
 
 ## Sign-on gateway (authn)
 
