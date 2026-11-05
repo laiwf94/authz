@@ -1,8 +1,17 @@
-// Package audit writes a tamper-evident, append-only log of what agents did.
+// Package audit writes the platform's tamper-evident, append-only log: what
+// grantd (authz serve), wicket (authz gateway) and toolgate (authz mcp) did,
+// in one hash chain.
 //
 // Each line is one JSON record:
 //
 //	{"seq":7,"time":"…","prev":"<sha256 of line 6>","event":"tool_call","data":{…}}
+//
+// A record may also carry the event envelope between "event" and "data":
+// tenant, actor, subject, action, decision and correlation_id (see Envelope).
+// Records written by Append, and every record of a toolgate log, have none, so
+// those logs keep their exact bytes. "data" is the event's payload; each event
+// type has a payload schema (see Schemas and the typed payloads in
+// payloads.go), which Write and VerifyWith enforce.
 //
 // "prev" is the SHA-256 of the previous line's exact bytes (64 zeros for the
 // first), so the records form a hash chain in the manner of Crosby and
@@ -30,8 +39,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/laiwf94/authz/internal/agents/jsonrpc"
 )
 
 // MaxLineBytes bounds one record.
@@ -46,11 +53,12 @@ var ErrBroken = errors.New("audit: log is unusable after a failed write; restart
 
 // Record is one parsed line.
 type Record struct {
-	Seq   uint64          `json:"seq"`
-	Time  string          `json:"time"`
-	Prev  string          `json:"prev"`
-	Event string          `json:"event"`
-	Data  json.RawMessage `json:"data"`
+	Seq   uint64 `json:"seq"`
+	Time  string `json:"time"`
+	Prev  string `json:"prev"`
+	Event string `json:"event"`
+	Envelope
+	Data json.RawMessage `json:"data"`
 }
 
 type record struct {
@@ -58,7 +66,8 @@ type record struct {
 	Time  string `json:"time"`
 	Prev  string `json:"prev"`
 	Event string `json:"event"`
-	Data  any    `json:"data"`
+	Envelope
+	Data any `json:"data"`
 }
 
 // file is the part of *os.File the log uses; tests substitute failing ones.
@@ -79,15 +88,33 @@ type Log struct {
 	size   int64
 	broken bool
 	now    func() time.Time
+	sch    *Schemas // nil: payloads are not checked
 
 	syncMu sync.Mutex // serializes fsyncs
 	synced int64      // file size known durable; guarded by syncMu
+}
+
+// Options configures OpenWith.
+type Options struct {
+	// Now stamps records; nil means time.Now.
+	Now func() time.Time
+	// Schemas, if set, is enforced on every append: the event type must be
+	// registered and its envelope and payload must match. The records
+	// already in the file are checked by the chain only; VerifyWith checks
+	// their payloads.
+	Schemas *Schemas
 }
 
 // Open opens or creates the log at path. An existing log is verified first; a
 // torn final line (a write that was never acknowledged) is cut off, and any
 // other damage stops the open with the line number.
 func Open(path string, now func() time.Time) (*Log, error) {
+	return OpenWith(path, Options{Now: now})
+}
+
+// OpenWith is Open with options.
+func OpenWith(path string, o Options) (*Log, error) {
+	now := o.Now
 	if now == nil {
 		now = time.Now
 	}
@@ -95,7 +122,7 @@ func Open(path string, now func() time.Time) (*Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: %w", err)
 	}
-	res, err := verify(f, true)
+	res, err := verify(f, true, nil)
 	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("audit: %s failed verification: %w", path, err)
@@ -114,18 +141,49 @@ func Open(path string, now func() time.Time) (*Log, error) {
 		f.Close()
 		return nil, fmt.Errorf("audit: %w", err)
 	}
-	return &Log{f: f, seq: res.Records, head: res.Head, size: res.Size, synced: res.Size, now: now}, nil
+	return &Log{f: f, seq: res.Records, head: res.Head, size: res.Size, synced: res.Size, now: now, sch: o.Schemas}, nil
 }
 
-// Append writes one record and returns once it is on disk.
+// Append writes one record without an envelope and returns once it is on
+// disk. It is how toolgate wrote every record, byte for byte.
 func (l *Log) Append(event string, data any) error {
+	return l.AppendWith(event, Envelope{}, data)
+}
+
+// Write appends a typed payload under its event type with an envelope.
+func (l *Log) Write(env Envelope, p Payload) error {
+	if p == nil {
+		return errors.New("audit: nil payload")
+	}
+	return l.AppendWith(p.AuditEvent(), env, p)
+}
+
+// AppendWith writes one record with an envelope and returns once it is on
+// disk. The event type and envelope are checked, and with Options.Schemas
+// so is the payload, before anything is written.
+func (l *Log) AppendWith(event string, env Envelope, data any) error {
+	if err := checkEvent(event); err != nil {
+		return err
+	}
+	if err := env.Check(); err != nil {
+		return err
+	}
+	if l.sch != nil {
+		raw, err := marshal(data)
+		if err != nil {
+			return fmt.Errorf("audit: encoding %s payload: %w", event, err)
+		}
+		if err := l.sch.Check(event, env, raw); err != nil {
+			return err
+		}
+	}
 	l.mu.Lock()
 	if l.broken {
 		l.mu.Unlock()
 		return ErrBroken
 	}
-	line, err := jsonrpc.Marshal(record{Seq: l.seq + 1, Time: l.now().UTC().Format(time.RFC3339Nano),
-		Prev: l.head, Event: event, Data: data})
+	line, err := marshal(record{Seq: l.seq + 1, Time: l.now().UTC().Format(time.RFC3339Nano),
+		Prev: l.head, Event: event, Envelope: env, Data: data})
 	if err != nil {
 		l.mu.Unlock()
 		return fmt.Errorf("audit: encoding record: %w", err)
@@ -215,9 +273,19 @@ type LineError struct {
 func (e *LineError) Error() string { return fmt.Sprintf("line %d: %s", e.Line, e.Msg) }
 
 // Verify reads a whole log and checks every link of the chain.
-func Verify(r io.Reader) (Result, error) { return verify(r, false) }
+func Verify(r io.Reader) (Result, error) { return verify(r, false, nil) }
 
-func verify(r io.Reader, allowTorn bool) (Result, error) {
+// VerifyWith is Verify that also checks every record's envelope and payload
+// against s: an unregistered event type or a payload that does not match its
+// schema fails on that record's line.
+func VerifyWith(r io.Reader, s *Schemas) (Result, error) {
+	if s == nil {
+		return Result{}, errors.New("audit: VerifyWith needs schemas")
+	}
+	return verify(r, false, s)
+}
+
+func verify(r io.Reader, allowTorn bool, s *Schemas) (Result, error) {
 	br := bufio.NewReaderSize(r, 64<<10)
 	res := Result{Head: Genesis}
 	for n := 1; ; n++ {
@@ -249,6 +317,11 @@ func verify(r io.Reader, allowTorn bool) (Result, error) {
 		}
 		if rec.Seq != res.Records+1 {
 			return res, &LineError{n, fmt.Sprintf("sequence %d, expected %d: records were removed or reordered", rec.Seq, res.Records+1)}
+		}
+		if s != nil {
+			if err := s.Check(rec.Event, rec.Envelope, rec.Data); err != nil {
+				return res, &LineError{n, err.Error()}
+			}
 		}
 		sum := sha256.Sum256(line)
 		res.Head = hex.EncodeToString(sum[:])
@@ -283,4 +356,16 @@ func readLine(br *bufio.Reader) ([]byte, error) {
 			return nil, err
 		}
 	}
+}
+
+// marshal encodes v as compact JSON without HTML escaping, the encoding
+// toolgate's records were written with.
+func marshal(v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }

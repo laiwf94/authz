@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laiwf94/authz/internal/agents/audit"
 	"github.com/laiwf94/authz/internal/agents/fakeserver"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // The crash harness: `authz mcp serve` is killed with SIGKILL while agents

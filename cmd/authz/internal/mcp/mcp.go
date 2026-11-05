@@ -53,12 +53,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/laiwf94/authz/internal/agents/audit"
 	"github.com/laiwf94/authz/internal/agents/gateway"
 	"github.com/laiwf94/authz/internal/agents/identity"
 	"github.com/laiwf94/authz/internal/agents/metrics"
 	"github.com/laiwf94/authz/internal/agents/pins"
 	"github.com/laiwf94/authz/internal/agents/policy"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // Summary is the one-line description shown in "authz help".

@@ -9,8 +9,8 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/laiwf94/authz/internal/agents/audit"
 	"github.com/laiwf94/authz/internal/agents/jsonrpc"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // Recorded decisions are an audit log with everything that changes from one

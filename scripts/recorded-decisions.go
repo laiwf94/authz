@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/laiwf94/authz/internal/agents/audit"
 	"github.com/laiwf94/authz/internal/agents/gateway"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 func main() {

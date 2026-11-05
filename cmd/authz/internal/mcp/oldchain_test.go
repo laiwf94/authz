@@ -14,7 +14,7 @@ import (
 // oldChainDir holds an audit log written by the toolgate binary before it
 // became `authz mcp`, and what that binary's `audit verify` printed for it
 // and for damaged copies (see its README.md).
-const oldChainDir = "../../../../internal/agents/audit/testdata"
+const oldChainDir = "../../../../internal/platform/audit/testdata"
 
 // verifyCase is one command from toolgate-demo-verify.txt.
 type verifyCase struct {

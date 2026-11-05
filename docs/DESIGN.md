@@ -336,7 +336,7 @@ and a flag before the subcommand is a usage error with exit 2.
   redactions, policy and tool hashes) is compared exactly. `demo.sh` runs
   every scenario through `authz mcpfake` and `authz mcp` and fails on any
   difference.
-- *Old audit chains* (`internal/agents/audit/testdata`). A log written by
+- *Old audit chains* (`internal/platform/audit/testdata`). A log written by
   the toolgate binary verifies under the new code with the same head, is
   opened and extended the way `authz mcp serve` does at start, and fails at
   the right line when a record is changed. `authz mcp audit verify` prints,
@@ -360,3 +360,26 @@ and a flag before the subcommand is a usage error with exit 2.
   17 example cases unchanged, and `toolgate/examples/image.sh` runs the
   two-container example in the README through the image's `/mcpfake` and
   `/toolgate` links with `TOOLGATE_*` variables only.
+
+## One audit log (internal/platform/audit)
+
+toolgate's hash-chained writer moved to `internal/platform/audit` in week 2
+(#78) so that all three parts append to one chain. The line format is
+toolgate's, with an optional envelope between `event` and `data`:
+
+    {"seq":3,"time":"…","prev":"<sha256 of line 2>","event":"authz.check_decided",
+     "tenant":"acme","actor":"gateway","subject":"document:readme","action":"view",
+     "decision":"allow","correlation_id":"4bf92f35…","data":{"principal":"user:alice",…}}
+
+Every envelope field is optional in the format, and `Append` writes none, so
+a log written by the toolgate binary keeps its exact bytes and head and is
+extended in place. Each event type has a typed payload (`payloads.go`): its
+json fields are the schema, a field without `omitempty` is required, and the
+definition says which envelope fields the type needs (a check decision needs
+subject, action and decision). `OpenWith(..., Options{Schemas: Default()})`
+refuses a record that does not match before anything is written, and
+`VerifyWith` checks every record of a log against the schemas as well as the
+chain. authz and authn event types are prefixed with their track
+(`authz.relationships_written`, `authn.login_succeeded`); the agents track
+keeps toolgate's names (`tool_call`, `approval_decided`, …), and the old
+binary's log and every record the gateway writes match them.

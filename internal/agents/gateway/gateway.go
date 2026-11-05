@@ -38,7 +38,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/laiwf94/authz/internal/agents/approval"
-	"github.com/laiwf94/authz/internal/agents/audit"
 	"github.com/laiwf94/authz/internal/agents/guard"
 	"github.com/laiwf94/authz/internal/agents/httpx"
 	"github.com/laiwf94/authz/internal/agents/identity"
@@ -48,6 +47,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/pins"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/agents/ratelimit"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // Version is reported as serverInfo.version.

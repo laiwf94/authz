@@ -8,10 +8,10 @@ import (
 
 // TestOldBinaryLogMatchesDemoRecording records the audit log that the
 // toolgate binary wrote for the demo before the move (see
-// internal/agents/audit/testdata/README.md) and requires the checked-in demo
+// internal/platform/audit/testdata/README.md) and requires the checked-in demo
 // recording, which demo.sh compares every `authz mcp` run with.
 func TestOldBinaryLogMatchesDemoRecording(t *testing.T) {
-	log, err := os.ReadFile("../audit/testdata/toolgate-demo.jsonl")
+	log, err := os.ReadFile("../../platform/audit/testdata/toolgate-demo.jsonl")
 	if err != nil {
 		t.Fatal(err)
 	}

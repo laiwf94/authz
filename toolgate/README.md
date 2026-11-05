@@ -320,7 +320,7 @@ internal/agents/ratelimit      GCRA buckets, daily quotas, upstream concurrency
 internal/agents/approval       human approval requests and single-use grants
 internal/agents/pins           tool definition pinning and quarantine
 internal/agents/guard          output redaction, truncation and audit previews
-internal/agents/audit          hash-chained audit log and verification
+internal/platform/audit        the platform's hash-chained audit log (shared)
 internal/agents/fakeserver     the tools behind `authz mcpfake`
 internal/agents/httpx          request IDs, logging, metrics, errors
 internal/agents/metrics        Prometheus text exposition

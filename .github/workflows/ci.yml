@@ -65,7 +65,7 @@ jobs:
           go test ./internal/agents/policy -run=^$ -fuzz=FuzzParse -fuzztime=20s
           go test ./internal/agents/policy -run=^$ -fuzz=FuzzCases -fuzztime=20s
           go test ./internal/agents/identity -run=^$ -fuzz=FuzzAuthenticate -fuzztime=20s
-          go test ./internal/agents/audit -run=^$ -fuzz=FuzzVerify -fuzztime=20s
+          go test ./internal/platform/audit -run=^$ -fuzz=FuzzVerify -fuzztime=20s
       # Every test, subtest and fuzz seed the wicket suite ran before the
       # move must still pass: internal/authn/testdata/wicket-suite.txt.
       # cmd/wicket and cmd/fakeidp are now authz gateway and authz fakeidp,
@@ -82,14 +82,17 @@ jobs:
                 internal/authn/testdata/wicket-suite.txt
       # Every test, subtest and fuzz seed the toolgate suite ran before the
       # move must still pass, under the race detector:
-      # internal/agents/testdata/toolgate-suite.txt. Then the SIGKILL crash
+      # internal/agents/testdata/toolgate-suite.txt. The audit package became
+      # internal/platform/audit in week 2 (#78). Then the SIGKILL crash
       # harness against authz mcp serve, three times over for more kill
       # points (it also runs once in the Test step).
       - name: Suite counts (agents)
         shell: bash
         run: |
-          go test -race -json -count=1 ./internal/agents/... ./cmd/authz/internal/mcp/... ./cmd/authz/internal/mcpfake/... \
-            | go run scripts/suite-counts.go internal/agents/testdata/toolgate-suite.txt
+          go test -race -json -count=1 ./internal/agents/... ./internal/platform/audit/... ./cmd/authz/internal/mcp/... ./cmd/authz/internal/mcpfake/... \
+            | go run scripts/suite-counts.go \
+                -map github.com/laiwf94/authz/internal/agents/audit=github.com/laiwf94/authz/internal/platform/audit \
+                internal/agents/testdata/toolgate-suite.txt
           go test -race -count=3 -run '^TestMCPSurvivesSIGKILL$' ./cmd/authz
       # Every _test.go file of the three pre-merge trees must have moved with
       # only its import block and package clause changed, apart from the
