@@ -141,7 +141,7 @@ type Store struct {
 	schema    *schema.Schema
 	schemaSrc string
 	retention Revision
-	wal       *wal
+	wal       *walLog
 	notify    chan struct{} // closed and replaced after every commit
 }
 

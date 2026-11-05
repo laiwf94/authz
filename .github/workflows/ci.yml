@@ -51,6 +51,7 @@ jobs:
         run: |
           go test ./internal/authz/schema -run=^$ -fuzz=FuzzParse -fuzztime=30s
           go test ./internal/authz/store -run=^$ -fuzz=FuzzParseRelationship -fuzztime=30s
+          go test ./internal/platform/storage/wal -run=^$ -fuzz=FuzzScan -fuzztime=20s
           go test ./internal/platform/jose -run=^$ -fuzz=FuzzParse$ -fuzztime=20s
           go test ./internal/platform/jose -run=^$ -fuzz=FuzzParseKeySet -fuzztime=20s
           go test ./internal/platform/jose -run=^$ -fuzz=FuzzVerifyHMAC -fuzztime=20s
