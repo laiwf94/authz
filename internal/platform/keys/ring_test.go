@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laiwf94/authz/internal/authn/jose"
+	"github.com/laiwf94/authz/internal/platform/jose"
 )
 
 var hourly = Policy{RotateEvery: time.Hour, Overlap: 2 * time.Hour}

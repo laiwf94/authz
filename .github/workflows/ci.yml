@@ -44,16 +44,17 @@ jobs:
           go tool cover -func=coverage.out | tail -1
           m=github.com/laiwf94/authz
           go run scripts/coverage-floor.go -min 93.5 -rest authz \
-            -group authn=$m/internal/authn,$m/cmd/authz/internal/gateway,$m/cmd/authz/internal/fakeidp,$m/examples/whoami \
+            -group authn=$m/internal/authn,$m/internal/platform/jose,$m/internal/platform/seal,$m/cmd/authz/internal/gateway,$m/cmd/authz/internal/fakeidp,$m/examples/whoami \
             -group agents=$m/internal/agents,$m/cmd/authz/internal/mcp,$m/cmd/authz/internal/mcpfake \
             coverage.out
       - name: Fuzz (short)
         run: |
           go test ./internal/authz/schema -run=^$ -fuzz=FuzzParse -fuzztime=30s
           go test ./internal/authz/store -run=^$ -fuzz=FuzzParseRelationship -fuzztime=30s
-          go test ./internal/authn/jose -run=^$ -fuzz=FuzzParse$ -fuzztime=20s
-          go test ./internal/authn/jose -run=^$ -fuzz=FuzzParseKeySet -fuzztime=20s
-          go test ./internal/authn/seal -run=^$ -fuzz=FuzzOpen -fuzztime=20s
+          go test ./internal/platform/jose -run=^$ -fuzz=FuzzParse$ -fuzztime=20s
+          go test ./internal/platform/jose -run=^$ -fuzz=FuzzParseKeySet -fuzztime=20s
+          go test ./internal/platform/jose -run=^$ -fuzz=FuzzVerifyHMAC -fuzztime=20s
+          go test ./internal/platform/seal -run=^$ -fuzz=FuzzOpen -fuzztime=20s
           go test ./internal/authn/redirect -run=^$ -fuzz=FuzzValidate -fuzztime=20s
           go test ./internal/authn/saml -run=^$ -fuzz=FuzzParseResponse -fuzztime=30s
           go test ./internal/authn/saml -run=^$ -fuzz=FuzzParseMetadata -fuzztime=20s
@@ -66,12 +67,15 @@ jobs:
           go test ./internal/agents/audit -run=^$ -fuzz=FuzzVerify -fuzztime=20s
       # Every test, subtest and fuzz seed the wicket suite ran before the
       # move must still pass: internal/authn/testdata/wicket-suite.txt.
-      # cmd/wicket and cmd/fakeidp are now authz gateway and authz fakeidp.
+      # cmd/wicket and cmd/fakeidp are now authz gateway and authz fakeidp,
+      # and jose and seal moved on to internal/platform in week 2 (#76).
       - name: Suite counts (authn)
         shell: bash
         run: |
-          go test -json -count=1 ./internal/authn/... ./cmd/authz/internal/gateway/... ./cmd/authz/internal/fakeidp/... ./examples/whoami/... \
+          go test -json -count=1 ./internal/authn/... ./internal/platform/jose/... ./internal/platform/seal/... ./cmd/authz/internal/gateway/... ./cmd/authz/internal/fakeidp/... ./examples/whoami/... \
             | go run scripts/suite-counts.go \
+                -map github.com/laiwf94/authz/internal/authn/jose=github.com/laiwf94/authz/internal/platform/jose \
+                -map github.com/laiwf94/authz/internal/authn/seal=github.com/laiwf94/authz/internal/platform/seal \
                 -map github.com/laiwf94/authz/cmd/wicket=github.com/laiwf94/authz/cmd/authz/internal/gateway \
                 -map github.com/laiwf94/authz/cmd/fakeidp=github.com/laiwf94/authz/cmd/authz/internal/fakeidp \
                 internal/authn/testdata/wicket-suite.txt

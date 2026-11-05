@@ -9,11 +9,12 @@
 //     iss, aud, sub, owner, scope, iat, nbf, exp. Keys are named by "kid" so
 //     they can rotate: verify with every configured key, sign with the newest.
 //     Only HS256 is accepted; the header cannot choose a weaker algorithm.
+//     Tokens are parsed, signed and verified by the platform JOSE library
+//     (internal/platform/jose), which the sign-on gateway uses too.
 package identity
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/internal/agents/policy"
+	"github.com/laiwf94/authz/internal/platform/jose"
 )
 
 // Limits and defaults.
@@ -183,12 +185,6 @@ func (a *Authenticator) Authenticate(token string) (Identity, error) {
 	return Identity{AgentID: ag.ID, Owner: ag.Owner, Scopes: ag.Scopes, Method: "static"}, nil
 }
 
-type header struct {
-	Alg string `json:"alg"`
-	Typ string `json:"typ,omitempty"`
-	Kid string `json:"kid"`
-}
-
 // Claims are the claims of a signed token.
 type Claims struct {
 	Issuer    string `json:"iss"`
@@ -202,6 +198,8 @@ type Claims struct {
 	ID        string `json:"jti,omitempty"`
 }
 
+// b64 is the strict unpadded base64url of every token part (RFC 7515
+// section 2), as jose decodes it; the tests build tokens with it.
 var b64 = base64.RawURLEncoding.Strict()
 
 func strictJSON(data []byte, v any) error {
@@ -217,31 +215,26 @@ func strictJSON(data []byte, v any) error {
 }
 
 func (a *Authenticator) verifySigned(token string) (Identity, error) {
-	parts := strings.Split(token, ".")
-	hb, err1 := b64.DecodeString(parts[0])
-	cb, err2 := b64.DecodeString(parts[1])
-	sig, err3 := b64.DecodeString(parts[2])
-	if err1 != nil || err2 != nil || err3 != nil {
-		return Identity{}, unauthenticated("token is not base64url")
+	t, err := jose.Parse(token)
+	if err != nil {
+		return Identity{}, unauthenticated("%v", err)
 	}
-	var h header
-	if err := strictJSON(hb, &h); err != nil {
+	if err := t.StrictHeader(); err != nil {
 		return Identity{}, unauthenticated("bad header: %v", err)
 	}
-	if h.Alg != "HS256" || h.Typ != "" && h.Typ != "JWT" {
+	h := t.Header
+	if h.Alg != jose.HS256 || h.Typ != "" && h.Typ != "JWT" {
 		return Identity{}, unauthenticated("unsupported algorithm %q", h.Alg)
 	}
 	key, ok := a.cfg.Keys[h.Kid]
 	if !ok {
 		return Identity{}, unauthenticated("unknown key id")
 	}
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(parts[0] + "." + parts[1]))
-	if !hmac.Equal(sig, mac.Sum(nil)) {
+	if err := t.VerifyHMAC(key); err != nil {
 		return Identity{}, unauthenticated("bad signature")
 	}
 	var c Claims
-	if err := strictJSON(cb, &c); err != nil {
+	if err := strictJSON(t.Payload, &c); err != nil {
 		return Identity{}, unauthenticated("bad claims: %v", err)
 	}
 	now := a.cfg.Now()
@@ -298,10 +291,5 @@ func (a *Authenticator) Mint(subject, owner string, scopes []string, ttl time.Du
 	c := Claims{Issuer: a.cfg.Issuer, Audience: a.cfg.Audience, Subject: subject, Owner: owner,
 		Scope: strings.Join(scopes, " "), IssuedAt: now, NotBefore: now,
 		ExpiresAt: now + int64(ttl/time.Second), ID: hex.EncodeToString(jti[:])}
-	hb, _ := json.Marshal(header{Alg: "HS256", Typ: "JWT", Kid: a.cfg.ActiveKey})
-	cb, _ := json.Marshal(c)
-	signing := b64.EncodeToString(hb) + "." + b64.EncodeToString(cb)
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(signing))
-	return signing + "." + b64.EncodeToString(mac.Sum(nil)), nil
+	return jose.SignHMAC(a.cfg.ActiveKey, key, c)
 }

@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laiwf94/authz/internal/authn/jose"
+	"github.com/laiwf94/authz/internal/platform/jose"
 )
 
 var t0 = time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC)

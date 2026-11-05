@@ -51,11 +51,11 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/internal/authn/config"
-	"github.com/laiwf94/authz/internal/authn/jose"
 	"github.com/laiwf94/authz/internal/authn/metrics"
-	"github.com/laiwf94/authz/internal/authn/seal"
 	"github.com/laiwf94/authz/internal/authn/server"
 	"github.com/laiwf94/authz/internal/authn/session"
+	"github.com/laiwf94/authz/internal/platform/jose"
+	"github.com/laiwf94/authz/internal/platform/seal"
 )
 
 // Summary is the one-line description shown in "authz help".

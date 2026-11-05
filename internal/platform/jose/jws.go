@@ -51,6 +51,7 @@ type Header struct {
 type Token struct {
 	Header       Header
 	Payload      []byte
+	extraHeader  bool // the header has members Header does not model
 	signingInput []byte
 	signature    []byte
 }
@@ -77,9 +78,16 @@ func Parse(s string) (*Token, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: signature: %v", ErrMalformed, err)
 	}
-	t := &Token{Payload: payload, signature: sig, signingInput: []byte(parts[0] + "." + parts[1])}
-	if err := strictUnmarshal(hb, &t.Header); err != nil {
-		return nil, fmt.Errorf("%w: header: %v", ErrMalformed, err)
+	t := &Token{Payload: payload, signature: sig, signingInput: []byte(s[:len(parts[0])+1+len(parts[1])])}
+	if err := strictUnmarshal(hb, &t.Header, true); err != nil {
+		// Decode again, leniently: members this package doesn't model are
+		// ignored here and refused by StrictHeader. Almost every header
+		// decodes on the first, exact pass.
+		t.Header = Header{}
+		if err := strictUnmarshal(hb, &t.Header, false); err != nil {
+			return nil, fmt.Errorf("%w: header: %v", ErrMalformed, err)
+		}
+		t.extraHeader = true
 	}
 	if t.Header.Alg == "" {
 		return nil, fmt.Errorf("%w: header has no alg", ErrMalformed)
@@ -96,11 +104,15 @@ func b64(s string) ([]byte, error) {
 	return base64.RawURLEncoding.Strict().DecodeString(s)
 }
 
-// strictUnmarshal decodes one JSON object. Header members it doesn't model
-// (jku, jwk, x5u, x5c...) are ignored on purpose: keys always come from the
-// configured key set, never from the token (RFC 8725 section 3.10).
-func strictUnmarshal(b []byte, v any) error {
+// strictUnmarshal decodes one JSON object. Unless exact is set, header
+// members it doesn't model (jku, jwk, x5u, x5c...) are ignored on purpose:
+// keys always come from the configured key set, never from the token
+// (RFC 8725 section 3.10).
+func strictUnmarshal(b []byte, v any, exact bool) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
+	if exact {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(v); err != nil {
 		return err
 	}

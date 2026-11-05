@@ -3,6 +3,11 @@
 // relying party and a token issuer need, following the JWT best current
 // practices of RFC 8725: an explicit algorithm allow-list, keys bound to one
 // algorithm family, no "none", no keys taken from the token itself.
+//
+// It is the platform's one JOSE library: the sign-on gateway verifies ID
+// tokens and signs upstream JWTs with it, and the agent gateway signs and
+// verifies its HS256 agent tokens through VerifyHMAC and SignHMAC, which
+// are kept apart from the asymmetric Verify.
 package jose
 
 import (

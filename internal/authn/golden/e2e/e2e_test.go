@@ -14,11 +14,11 @@ import (
 	"testing"
 
 	"github.com/laiwf94/authz/internal/authn/config"
-	"github.com/laiwf94/authz/internal/authn/jose"
 	"github.com/laiwf94/authz/internal/authn/metrics"
-	"github.com/laiwf94/authz/internal/authn/seal"
 	"github.com/laiwf94/authz/internal/authn/server"
 	"github.com/laiwf94/authz/internal/authn/session"
+	"github.com/laiwf94/authz/internal/platform/jose"
+	"github.com/laiwf94/authz/internal/platform/seal"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite testdata/golden from the current responses")

@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/laiwf94/authz/internal/authn/jose"
 	"github.com/laiwf94/authz/internal/authn/policy"
+	"github.com/laiwf94/authz/internal/platform/jose"
 )
 
 // Defaults.

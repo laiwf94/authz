@@ -259,9 +259,9 @@ cmd/authz/internal/fakeidp  authz fakeidp: test identity provider (OIDC + SAML) 
 internal/authn/server     forward-auth, login, logout, admin API, rate limiting, audit
 internal/authn/oidc       OpenID Connect relying party: discovery, PKCE, ID tokens, JWKS cache
 internal/authn/saml       SAML service provider: requests, metadata, response validation, decryption
-internal/authn/jose       JWS/JWK/JWT verification and ES256 signing
+internal/platform/jose    JWS/JWK/JWT verification and ES256 signing (shared with authz mcp)
 internal/authn/session    server-side sessions and their append-only log
-internal/authn/seal       AES-256-GCM cookie sealing with key rotation
+internal/platform/seal    AES-256-GCM cookie sealing with key rotation
 internal/authn/policy     per-app access rules
 internal/authn/redirect   return-URL validation
 internal/authn/config     JSON configuration: schema and semantic checks with JSON paths

@@ -266,6 +266,9 @@ internal/authn/golden/e2e   the gateway's end-to-end golden transcripts
 cmd/authz/internal/mcp      authz mcp (formerly toolgate): config, serve, audit verify, policy test, tokens
 cmd/authz/internal/mcpfake  authz mcpfake: a small MCP server with a file sandbox, to try the gateway
 internal/agents/...         agent traffic: MCP and JSON-RPC, policy, approvals, pins, limits, audit chain
+internal/platform/keys      key rings with rotation, JWKS and the old key files
+internal/platform/jose      JWS/JWK/JWT: verification, ES256 signing, HS256 agent tokens
+internal/platform/seal      AES-256-GCM cookie sealing with key rotation
 ```
 
 ## License

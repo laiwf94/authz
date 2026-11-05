@@ -102,10 +102,10 @@ type Claims struct {
 // ParseClaims decodes a JWT payload.
 func ParseClaims(payload []byte) (*Claims, error) {
 	c := &Claims{}
-	if err := strictUnmarshal(payload, c); err != nil {
+	if err := strictUnmarshal(payload, c, false); err != nil {
 		return nil, claimErr(ReasonMalformed, "claims: %v", err)
 	}
-	if err := strictUnmarshal(payload, &c.Raw); err != nil {
+	if err := strictUnmarshal(payload, &c.Raw, false); err != nil {
 		return nil, claimErr(ReasonMalformed, "claims: %v", err)
 	}
 	return c, nil

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/laiwf94/authz/internal/authn/jose"
+	"github.com/laiwf94/authz/internal/platform/jose"
 )
 
 func TestWhoami(t *testing.T) {
