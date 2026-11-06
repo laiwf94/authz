@@ -60,6 +60,14 @@ link the roadmap issue they come from.
   test, subtest and fuzz seed must still pass (338 cases); moved test files
   may change only their imports and package clause; and the nginx demo runs
   through the new binary.
+- **Consistency token keys rotate** ([#76](https://github.com/laiwf94/authz/issues/76)).
+  `GRANTD_TOKEN_KEY` takes a comma-separated list, newest first: the first
+  key signs new tokens and the rest still verify, so a restart with a new key
+  in front keeps every outstanding token valid until its key leaves the list.
+  The token format and a single key's tokens are unchanged. The keys sit on
+  an HS256 ring from `internal/platform/keys`, and pooled HMAC states make
+  issuing and verifying a token about twice as fast (Encode 790 to 330 ns,
+  Decode 730 to 310 ns, 9 and 7 allocations down to 4 and 2).
 
 ### Agent gateway (agents)
 

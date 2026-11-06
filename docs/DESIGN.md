@@ -173,7 +173,12 @@ the watch stream, like Zanzibar's Leopard index for nested groups.
   against every configured key, so timing does not reveal which key or prefix
   matched. Keys must be at least 16 characters.
 - `GRANTD_TOKEN_KEY` is required when data is persisted, so tokens stay valid
-  across restarts and can't be minted by clients.
+  across restarts and can't be minted by clients. It may list several keys,
+  newest first: the keys form an HS256 ring (`internal/platform/keys`), the
+  first MACs new tokens and every key verifies, so rotating means putting a
+  new key in front and removing the old one once its tokens no longer
+  matter. Tokens carry no key id; a token is checked against the current key
+  first, then the others, so a forged token costs at most one MAC per key.
 - Strict JSON: unknown fields and trailing data are rejected; the body size is
   capped before decoding.
 - Internal errors return a generic message and request ID. The details go to

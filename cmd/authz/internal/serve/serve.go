@@ -5,7 +5,8 @@
 //	GRANTD_ADDR        listen address (default ":8080")
 //	GRANTD_DATA_DIR    directory for the write-ahead log; empty keeps data in memory only
 //	GRANTD_API_KEYS    comma-separated bearer keys, each at least 16 characters (required)
-//	GRANTD_TOKEN_KEY   64 hex characters used to sign consistency tokens; required with GRANTD_DATA_DIR
+//	GRANTD_TOKEN_KEY   64 hex characters used to sign consistency tokens; required with GRANTD_DATA_DIR.
+//	                   A comma-separated list rotates: the first key signs, the rest still verify
 //	GRANTD_CACHE_SIZE  check results kept across requests (default 100000; 0 disables)
 //	GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
 //	GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
@@ -43,7 +44,8 @@ It takes no flags; configuration comes from the environment, as grantd's did:
   GRANTD_ADDR        listen address (default ":8080")
   GRANTD_DATA_DIR    directory for the write-ahead log; empty keeps data in memory only
   GRANTD_API_KEYS    comma-separated bearer keys, each at least 16 characters (required)
-  GRANTD_TOKEN_KEY   64 hex characters used to sign consistency tokens; required with GRANTD_DATA_DIR
+  GRANTD_TOKEN_KEY   64 hex characters used to sign consistency tokens; required with GRANTD_DATA_DIR.
+                     A comma-separated list rotates: the first key signs, the rest still verify
   GRANTD_CACHE_SIZE  check results kept across requests (default 100000; 0 disables)
   GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
   GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
@@ -108,7 +110,8 @@ type config struct {
 	addr      string
 	dataDir   string
 	apiKeys   []string
-	tokenKey  []byte
+	tokenKey  []byte   // signs consistency tokens
+	oldTokens [][]byte // the rest of GRANTD_TOKEN_KEY: verify only
 	cacheSize int
 	retention store.Revision
 	logLevel  slog.Level
@@ -129,11 +132,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return c, errors.New("GRANTD_API_KEYS is required (comma-separated, each at least 16 characters)")
 	}
 	if v := getenv("GRANTD_TOKEN_KEY"); v != "" {
-		k, err := hex.DecodeString(v)
-		if err != nil || len(k) != token.KeySize {
-			return c, errors.New("GRANTD_TOKEN_KEY must be 64 hex characters")
+		ks, err := parseTokenKeys(v)
+		if err != nil {
+			return c, err
 		}
-		c.tokenKey = k
+		c.tokenKey, c.oldTokens = ks[0], ks[1:]
 	} else if c.dataDir != "" {
 		return c, errors.New("GRANTD_TOKEN_KEY is required with GRANTD_DATA_DIR, so tokens stay valid across restarts")
 	}
@@ -159,6 +162,30 @@ func loadConfig(getenv func(string) string) (config, error) {
 	return c, nil
 }
 
+// parseTokenKeys reads GRANTD_TOKEN_KEY: one key, or a comma-separated
+// list newest first, each 64 hex characters. To rotate, an operator puts a
+// new key first and restarts; tokens signed with the old keys keep
+// verifying until those keys are removed from the list.
+func parseTokenKeys(v string) ([][]byte, error) {
+	var out [][]byte
+	seen := map[string]bool{}
+	for i, part := range strings.Split(v, ",") {
+		k, err := hex.DecodeString(strings.TrimSpace(part))
+		if err != nil || len(k) != token.KeySize {
+			if i == 0 && !strings.Contains(v, ",") {
+				return nil, errors.New("GRANTD_TOKEN_KEY must be 64 hex characters")
+			}
+			return nil, fmt.Errorf("GRANTD_TOKEN_KEY must be 64 hex characters, or a comma-separated list of them; entry %d is not", i+1)
+		}
+		if seen[string(k)] {
+			return nil, fmt.Errorf("GRANTD_TOKEN_KEY: entry %d repeats an earlier key", i+1)
+		}
+		seen[string(k)] = true
+		out = append(out, k)
+	}
+	return out, nil
+}
+
 // run serves until ctx ends. ready, when set, receives the bound address.
 func run(ctx context.Context, getenv func(string) string, logOut io.Writer, ready func(addr string)) error {
 	cfg, err := loadConfig(getenv)
@@ -172,7 +199,7 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 			return err
 		}
 	}
-	tokens, err := token.NewIssuer(cfg.tokenKey)
+	tokens, err := token.NewIssuerKeys(cfg.tokenKey, cfg.oldTokens...)
 	if err != nil {
 		return err
 	}
