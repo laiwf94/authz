@@ -59,7 +59,11 @@ The main image (the root `Dockerfile`) contains the same binary, so
   `WICKET_CONFIG`, `WICKET_COOKIE_KEYS`, `WICKET_SIGNING_KEYS`,
   `WICKET_SESSION_FILE`, `WICKET_ADDR`, `WICKET_ADMIN_ADDR`,
   `WICKET_ADMIN_TOKEN`, `WICKET_TRUSTED_PROXIES`, `WICKET_LOGIN_RATE` and
-  `WICKET_LOG_LEVEL`. `authz gateway -h` describes each one.
+  `WICKET_LOG_LEVEL`. `authz gateway -h` describes each one. One variable
+  is new and optional: `WICKET_AUDIT_LOG` names a file for the platform's
+  hash-chained audit log, which then also receives every audit event as a
+  typed record (see "One audit log" in docs/DESIGN.md). Without it the
+  gateway behaves exactly as wicket did.
 - **The endpoints, cookies and headers** are the same. That includes the
   `__Host-wicket` cookie, so signed-in users stay signed in across the
   upgrade, and sessions in an existing `WICKET_SESSION_FILE` are kept.

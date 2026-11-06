@@ -10,6 +10,8 @@
 //	GRANTD_CACHE_SIZE  check results kept across requests (default 100000; 0 disables)
 //	GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
 //	GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
+//	GRANTD_AUDIT_LOG   the platform's hash-chained audit log for schema changes and
+//	                   relationship writes; empty keeps no audit log
 package serve
 
 import (
@@ -31,6 +33,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/metrics"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // Summary is the one-line description shown in "authz help".
@@ -49,6 +52,8 @@ It takes no flags; configuration comes from the environment, as grantd's did:
   GRANTD_CACHE_SIZE  check results kept across requests (default 100000; 0 disables)
   GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
   GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
+  GRANTD_AUDIT_LOG   hash-chained audit log of schema changes and relationship writes;
+                     empty keeps none
 
 Logs are JSON lines on standard output. SIGINT or SIGTERM drains requests
 and stops. "authz check -serve" validates this environment without starting.
@@ -115,6 +120,7 @@ type config struct {
 	cacheSize int
 	retention store.Revision
 	logLevel  slog.Level
+	auditLog  string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -123,6 +129,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		c.addr = v
 	}
 	c.dataDir = getenv("GRANTD_DATA_DIR")
+	c.auditLog = getenv("GRANTD_AUDIT_LOG")
 	for _, k := range strings.Split(getenv("GRANTD_API_KEYS"), ",") {
 		if k = strings.TrimSpace(k); k != "" {
 			c.apiKeys = append(c.apiKeys, k)
@@ -208,9 +215,16 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 		return fmt.Errorf("opening store: %w", err)
 	}
 	defer st.Close()
+	var auditLog *audit.Log
+	if cfg.auditLog != "" {
+		if auditLog, err = audit.OpenWith(cfg.auditLog, audit.Options{Schemas: audit.Default()}); err != nil {
+			return fmt.Errorf("GRANTD_AUDIT_LOG: %w", err)
+		}
+		defer auditLog.Close()
+	}
 
 	srv, err := api.New(api.Config{Store: st, Tokens: tokens, APIKeys: cfg.apiKeys, Logger: log,
-		Metrics: metrics.New(), CacheSize: cfg.cacheSize})
+		Metrics: metrics.New(), CacheSize: cfg.cacheSize, Audit: auditLog})
 	if err != nil {
 		return err
 	}

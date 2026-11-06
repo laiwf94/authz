@@ -24,6 +24,8 @@
 //	WICKET_TRUSTED_PROXIES  CIDRs whose X-Forwarded-For is believed (default loopback)
 //	WICKET_LOGIN_RATE       login requests per minute per client address (default 30)
 //	WICKET_LOG_LEVEL        debug, info, warn or error (default info)
+//	WICKET_AUDIT_LOG        the platform's hash-chained audit log; empty writes audit
+//	                        events to the JSON log only
 //
 // The configuration is reloaded on SIGHUP or POST /admin/reload.
 package gateway
@@ -54,6 +56,7 @@ import (
 	"github.com/laiwf94/authz/internal/authn/metrics"
 	"github.com/laiwf94/authz/internal/authn/server"
 	"github.com/laiwf94/authz/internal/authn/session"
+	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/jose"
 	"github.com/laiwf94/authz/internal/platform/seal"
 )
@@ -86,6 +89,7 @@ else comes from the environment:
   WICKET_TRUSTED_PROXIES  CIDRs whose X-Forwarded-For is believed (default loopback)
   WICKET_LOGIN_RATE       login requests per minute per client address (default 30)
   WICKET_LOG_LEVEL        debug, info, warn or error (default info)
+  WICKET_AUDIT_LOG        hash-chained audit log file; empty writes audit events to the log only
 
 Logs are JSON lines on standard output. SIGHUP or POST /admin/reload reloads
 the configuration; SIGINT or SIGTERM drains requests and stops. Exit codes:
@@ -162,6 +166,7 @@ type settings struct {
 	adminToken  string
 	cookieKeys  [][]byte
 	sessionFile string
+	auditLog    string
 	signingKeys []string
 	trusted     []netip.Prefix
 	loginRate   int
@@ -200,6 +205,7 @@ func loadSettings(getenv func(string) string) (settings, error) {
 		return s, errors.New("WICKET_COOKIE_KEYS is required (run: authz gateway genkey)")
 	}
 	s.sessionFile = getenv("WICKET_SESSION_FILE")
+	s.auditLog = getenv("WICKET_AUDIT_LOG")
 	for _, f := range strings.Split(getenv("WICKET_SIGNING_KEYS"), ",") {
 		if f = strings.TrimSpace(f); f != "" {
 			s.signingKeys = append(s.signingKeys, f)
@@ -311,6 +317,13 @@ func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hu
 		return err
 	}
 	defer sessions.Close()
+	var auditLog *audit.Log
+	if st.auditLog != "" {
+		if auditLog, err = audit.OpenWith(st.auditLog, audit.Options{Now: now, Schemas: audit.Default()}); err != nil {
+			return fmt.Errorf("WICKET_AUDIT_LOG: %w", err)
+		}
+		defer auditLog.Close()
+	}
 
 	first := true
 	srv, err := server.New(server.Options{
@@ -323,6 +336,7 @@ func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hu
 		},
 		Sessions: sessions, Keys: keys, Signers: signers, Logger: log, Metrics: metrics.New(),
 		AdminToken: st.adminToken, TrustedProxies: st.trusted, LoginRate: st.loginRate, Now: now,
+		Audit: auditLog,
 	})
 	if err != nil {
 		return err

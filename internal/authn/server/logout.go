@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/laiwf94/authz/internal/authn/config"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // handleLogoutPage shows a confirmation with a POST form. Logging out only
@@ -61,7 +62,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// POST can't even sign the browser out.
 	tok, err := s.keys.Open(purposeLogout, r.PostForm.Get("csrf"))
 	if err != nil || subtle.ConstantTimeCompare(tok, []byte(sess.ID)) != 1 {
-		s.audit(r.Context(), "logout_rejected", slog.String("reason", "csrf_token_invalid"), slog.String("session", sess.ID))
+		s.audit(r.Context(), audit.Envelope{Subject: "session:" + sess.ID, Action: "logout", Decision: audit.Deny},
+			audit.LogoutRejected{Reason: "csrf_token_invalid", Session: sess.ID},
+			slog.String("reason", "csrf_token_invalid"), slog.String("session", sess.ID))
 		writeError(w, r, http.StatusForbidden, "permission_denied", "invalid logout token; use the sign-out page")
 		return
 	}
@@ -69,7 +72,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.sessions.Revoke(sess.ID); err != nil {
 		s.log.Error("persisting logout", "request_id", requestIDFrom(r.Context()), "error", err.Error())
 	}
-	s.audit(r.Context(), "logout", slog.String("provider", sess.Identity.Provider), slog.String("sub", sess.Identity.Subject),
+	s.audit(r.Context(), audit.Envelope{Actor: sess.Identity.Subject, Subject: "session:" + sess.ID, Action: "logout"},
+		audit.Logout{Provider: sess.Identity.Provider, Session: sess.ID},
+		slog.String("provider", sess.Identity.Provider), slog.String("sub", sess.Identity.Subject),
 		slog.String("session", sess.ID))
 	if p := rt.providers[sess.Identity.Provider]; p != nil && p.kind == config.ProviderOIDC {
 		if u := p.oidc.EndSessionURL(r.Context(), p.postLogout); u != "" {

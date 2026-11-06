@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -49,7 +51,9 @@ func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "not_found", "no such live session")
 		return
 	}
-	s.audit(r.Context(), "session_revoked", slog.String("session", id), slog.String("by", "admin"))
+	s.audit(r.Context(), audit.Envelope{Actor: "admin", Subject: "session:" + id, Action: "session.revoke"},
+		audit.SessionRevoked{Session: id, Count: 1, By: "admin"},
+		slog.String("session", id), slog.String("by", "admin"))
 	if err != nil {
 		s.log.Error("persisting revocation", "request_id", requestIDFrom(r.Context()), "error", err.Error())
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "revoked now, but not saved; it may come back after a restart")
@@ -74,7 +78,9 @@ func (s *Server) handleRevokeSubject(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.sessions.RevokeSubject(req.Provider, req.Subject)
 	if n > 0 {
-		s.audit(r.Context(), "session_revoked", slog.String("sub", req.Subject), slog.String("provider", req.Provider),
+		s.audit(r.Context(), audit.Envelope{Actor: "admin", Subject: req.Subject, Action: "session.revoke"},
+			audit.SessionRevoked{Provider: req.Provider, Count: n, By: "admin"},
+			slog.String("sub", req.Subject), slog.String("provider", req.Provider),
 			slog.Int("count", n), slog.String("by", "admin"))
 	}
 	if err != nil {

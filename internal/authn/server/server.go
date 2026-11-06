@@ -26,6 +26,7 @@ import (
 	"github.com/laiwf94/authz/internal/authn/metrics"
 	"github.com/laiwf94/authz/internal/authn/saml"
 	"github.com/laiwf94/authz/internal/authn/session"
+	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/jose"
 	"github.com/laiwf94/authz/internal/platform/seal"
 )
@@ -59,6 +60,10 @@ type Options struct {
 	// LoginRate is login, callback and logout requests per minute per
 	// client address (0 means DefaultLoginRate).
 	LoginRate int
+	// Audit, when set, receives every audit event as a typed record in the
+	// platform's hash chain, besides the "audit" log line. It should be
+	// opened with audit.Default() schemas. The server does not close it.
+	Audit *audit.Log
 
 	// For tests.
 	HTTPClient func(p *config.Provider) (*http.Client, error)
@@ -68,6 +73,7 @@ type Options struct {
 // Server holds the gateway state. It is safe for concurrent use.
 type Server struct {
 	rt       atomic.Pointer[runtime]
+	auditLog atomic.Pointer[audit.Log] // Options.Audit; nil: log lines only
 	opts     Options
 	sessions *session.Store
 	keys     *seal.Keyring
@@ -116,6 +122,7 @@ func New(opts Options) (*Server, error) {
 	s := &Server{opts: opts, sessions: opts.Sessions, keys: opts.Keys, signers: opts.Signers, log: opts.Logger,
 		m: opts.Metrics, now: opts.Now, replay: saml.NewReplayCache(0, opts.Now), used: saml.NewReplayCache(0, opts.Now),
 		limiter: newRateLimiter(opts.LoginRate, opts.Now), tokens: map[string]cachedToken{}}
+	s.auditLog.Store(opts.Audit)
 	if opts.AdminToken != "" {
 		s.admin = sha256.Sum256([]byte(opts.AdminToken))
 	}
@@ -144,11 +151,14 @@ func (s *Server) Reload(ctx context.Context) error {
 		if rt, err = buildRuntime(ctx, cfg, buildOptions{httpClient: s.opts.HTTPClient, now: s.now, replay: s.replay}); err == nil {
 			s.sessions.SetTimeouts(time.Duration(cfg.Session.IdleTimeout), time.Duration(cfg.Session.AbsoluteTimeout))
 			s.rt.Store(rt)
-			s.audit(ctx, "config_loaded", slog.Int("providers", len(rt.providers)), slog.Int("apps", len(rt.apps)))
+			s.audit(ctx, audit.Envelope{Action: "config.load"},
+				audit.ConfigLoaded{Providers: len(rt.providers), Apps: len(rt.apps)},
+				slog.Int("providers", len(rt.providers)), slog.Int("apps", len(rt.apps)))
 			return nil
 		}
 	}
-	s.audit(ctx, "config_load_failed", slog.String("error", err.Error()))
+	s.audit(ctx, audit.Envelope{Action: "config.load", Decision: audit.Deny}, audit.ConfigLoadFailed{Error: err.Error()},
+		slog.String("error", err.Error()))
 	return err
 }
 
@@ -317,10 +327,29 @@ func (s *Server) limited(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) audit(ctx context.Context, event string, attrs ...slog.Attr) {
+// audit records one event: an "audit" log line with attrs, as wicket wrote
+// it, and, with Options.Audit, a typed record in the hash chain carrying the
+// request ID as its correlation ID. A record that can't be written is
+// counted and logged; the request it describes has already happened.
+func (s *Server) audit(ctx context.Context, env audit.Envelope, p audit.Payload, attrs ...slog.Attr) {
+	event := strings.TrimPrefix(p.AuditEvent(), "authn.")
+	rid := requestIDFrom(ctx)
 	attrs = append([]slog.Attr{slog.Bool("audit", true), slog.String("event", event),
-		slog.String("request_id", requestIDFrom(ctx))}, attrs...)
+		slog.String("request_id", rid)}, attrs...)
 	s.log.LogAttrs(ctx, slog.LevelInfo, "audit", attrs...)
+	al := s.auditLog.Load()
+	if al == nil {
+		return
+	}
+	env.Actor = audit.Clean(env.Actor, audit.MaxEnvelopeBytes)
+	env.Subject = audit.Clean(env.Subject, audit.MaxEnvelopeBytes)
+	env.CorrelationID = rid
+	if err := al.Write(env, p); err != nil {
+		s.m.Counter("wicket_audit_failures_total", "", "Audit records that could not be written.").Inc()
+		s.log.Error("audit write failed", "event", event, "request_id", rid, "error", err.Error())
+		return
+	}
+	s.m.Counter("wicket_audit_records_total", `event="`+event+`"`, "Audit records written.").Inc()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -335,6 +364,10 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, msg st
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if al := s.auditLog.Load(); al != nil && !al.Healthy() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "audit log unavailable"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

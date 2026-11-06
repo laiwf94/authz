@@ -388,3 +388,24 @@ chain. authz and authn event types are prefixed with their track
 (`authz.relationships_written`, `authn.login_succeeded`); the agents track
 keeps toolgate's names (`tool_call`, `approval_decided`, …), and the old
 binary's log and every record the gateway writes match them.
+
+`authz serve` and `authz gateway` write to it when `GRANTD_AUDIT_LOG` or
+`WICKET_AUDIT_LOG` names a file; it is opened with the default schemas, so
+every record is checked before it is written. serve records
+`authz.schema_written` (the schema's SHA-256 and size, never its text) and
+`authz.relationships_written` (counts of touches, creates, deletes and
+preconditions) with the zed token of the write. The actor is the API key's
+`api_key:` ID, the first 8 hex characters of a domain-separated SHA-256 of
+the key, so keys can be told apart without being recorded. The gateway
+records each event it already logged with `"audit":true` (logins, login
+failures and rejections, logouts, admin revocations, forward-auth denials,
+config loads) as its typed `authn.` event, and keeps the log line as wicket
+wrote it. The user's subject is the actor and `app:<id>`, `session:<id>` or
+`host:<host>` is the subject. Values from outside, such as an identity
+provider's subject, go through `audit.Clean`, so a control character or an
+oversized name can't cause a record to be refused. The request ID is the
+correlation ID. Both servers have already committed what a record describes,
+so a failed append is counted (`grantd_audit_failures_total`,
+`wicket_audit_failures_total`) and logged instead of failing the request.
+After that, `/healthz` answers 503 until the process restarts, the way
+`authz mcp`'s does.

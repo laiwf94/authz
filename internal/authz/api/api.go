@@ -24,6 +24,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/metrics"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // Request limits.
@@ -54,6 +55,12 @@ type Config struct {
 	// shared for this long so the cache can serve repeated checks.
 	Quantum time.Duration
 	Timeout time.Duration
+	// Audit, when set, receives a typed record in the platform's hash chain
+	// for every schema change and relationship write, with the API key's
+	// fingerprint as the actor and the request ID as the correlation ID. It
+	// should be opened with audit.Default() schemas. The server does not
+	// close it.
+	Audit *audit.Log
 }
 
 // Server is the HTTP API.
@@ -62,6 +69,8 @@ type Server struct {
 	eng     *check.Engine
 	tokens  *token.Issuer
 	keys    [][sha256.Size]byte
+	keyIDs  []string // fingerprints of keys, for audit actors
+	audit   *audit.Log
 	log     *slog.Logger
 	m       *metrics.Registry
 	quantum time.Duration
@@ -82,12 +91,14 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("api: at least one API key is required")
 	}
 	s := &Server{st: cfg.Store, tokens: cfg.Tokens, log: cfg.Logger, m: cfg.Metrics,
-		quantum: cfg.Quantum, timeout: cfg.Timeout}
+		quantum: cfg.Quantum, timeout: cfg.Timeout, audit: cfg.Audit}
 	for _, k := range cfg.APIKeys {
 		if len(k) < MinKeyLength {
 			return nil, fmt.Errorf("api: API keys must be at least %d characters", MinKeyLength)
 		}
-		s.keys = append(s.keys, sha256.Sum256([]byte(k)))
+		sum := sha256.Sum256([]byte(k))
+		s.keys = append(s.keys, sum)
+		s.keyIDs = append(s.keyIDs, KeyID(k))
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -129,7 +140,18 @@ type handler func(w http.ResponseWriter, r *http.Request) error
 
 type ctxKey int
 
-const requestIDKey ctxKey = 0
+const (
+	requestIDKey ctxKey = iota
+	actorKey
+)
+
+// KeyID is the name an API key goes by in audit records: "api_key:" and
+// the first 8 hex characters of a domain-separated SHA-256 of the key. It
+// tells the keys of a deployment apart without the record revealing them.
+func KeyID(key string) string {
+	sum := sha256.Sum256([]byte("authz api key id\x00" + key))
+	return "api_key:" + hex.EncodeToString(sum[:4])
+}
 
 var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
@@ -194,10 +216,14 @@ func (s *Server) route(pattern string, h handler, auth bool) {
 			s.log.Log(ctx, lvl, "request", "request_id", id, "method", r.Method, "route", path,
 				"status", code, "duration_ms", float64(time.Since(start).Microseconds())/1000)
 		}()
-		if auth && !s.authorized(r) {
-			sw.Header().Set("WWW-Authenticate", `Bearer realm="grantd"`)
-			writeError(sw, r, http.StatusUnauthorized, "unauthenticated", "missing or invalid API key")
-			return
+		if auth {
+			k := s.authorized(r)
+			if k < 0 {
+				sw.Header().Set("WWW-Authenticate", `Bearer realm="grantd"`)
+				writeError(sw, r, http.StatusUnauthorized, "unauthenticated", "missing or invalid API key")
+				return
+			}
+			r = r.WithContext(context.WithValue(r.Context(), actorKey, s.keyIDs[k]))
 		}
 		if path != "/" && (r.Method == http.MethodPost || r.Method == http.MethodPut) {
 			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
@@ -212,19 +238,37 @@ func (s *Server) route(pattern string, h handler, auth bool) {
 	})
 }
 
-// authorized compares the bearer token against every key in constant time.
-func (s *Server) authorized(r *http.Request) bool {
+// authorized compares the bearer token against every key in constant time
+// and returns the index of the one it matches, or -1.
+func (s *Server) authorized(r *http.Request) int {
 	h := r.Header.Get("Authorization")
 	tok, ok := strings.CutPrefix(h, "Bearer ")
 	if !ok || tok == "" {
-		return false
+		return -1
 	}
 	sum := sha256.Sum256([]byte(tok))
-	match := 0
-	for _, k := range s.keys {
-		match |= subtle.ConstantTimeCompare(sum[:], k[:])
+	match := -1
+	for i, k := range s.keys {
+		match = subtle.ConstantTimeSelect(subtle.ConstantTimeCompare(sum[:], k[:]), i, match)
 	}
-	return match == 1
+	return match
+}
+
+// record appends one typed audit record, when an audit log is configured.
+// The write it describes has committed, so a failure is counted and logged
+// rather than returned; /healthz then reports the log unavailable.
+func (s *Server) record(ctx context.Context, env audit.Envelope, p audit.Payload) {
+	if s.audit == nil {
+		return
+	}
+	env.Actor, _ = ctx.Value(actorKey).(string)
+	env.CorrelationID, _ = ctx.Value(requestIDKey).(string)
+	if err := s.audit.Write(env, p); err != nil {
+		s.m.Counter("grantd_audit_failures_total", "", "Audit records that could not be written.").Inc()
+		s.log.Error("audit write failed", "event", p.AuditEvent(), "request_id", env.CorrelationID, "error", err.Error())
+		return
+	}
+	s.m.Counter("grantd_audit_records_total", fmt.Sprintf("event=%q", p.AuditEvent()), "Audit records written.").Inc()
 }
 
 // apiError carries an HTTP status and stable code.
@@ -363,6 +407,11 @@ func (s *Server) resolve(c Consistency) (store.Revision, error) {
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) error {
+	if s.audit != nil && !s.audit.Healthy() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "audit log unavailable",
+			"revision": strconv.FormatUint(uint64(s.st.Head()), 10)})
+		return nil
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "revision": strconv.FormatUint(uint64(s.st.Head()), 10)})
 	return nil
 }
@@ -396,7 +445,11 @@ func (s *Server) putSchema(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	_, src := s.st.Schema()
-	writeJSON(w, http.StatusOK, map[string]string{"schema": src, "written_at": s.tokens.Encode(rev)})
+	at := s.tokens.Encode(rev)
+	sum := sha256.Sum256([]byte(src))
+	s.record(r.Context(), audit.Envelope{Action: "schema.write"},
+		audit.SchemaWritten{Revision: at, SHA256: hex.EncodeToString(sum[:]), Bytes: len(src)})
+	writeJSON(w, http.StatusOK, map[string]string{"schema": src, "written_at": at})
 	return nil
 }
 
@@ -425,7 +478,20 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"written_at": s.tokens.Encode(rev)})
+	at := s.tokens.Encode(rev)
+	p := audit.RelationshipsWritten{Revision: at, Preconditions: len(body.Preconditions)}
+	for _, u := range updates {
+		switch u.Op {
+		case store.OpTouch:
+			p.Touch++
+		case store.OpCreate:
+			p.Create++
+		case store.OpDelete:
+			p.Delete++
+		}
+	}
+	s.record(r.Context(), audit.Envelope{Action: "relationships.write"}, p)
+	writeJSON(w, http.StatusOK, map[string]string{"written_at": at})
 	return nil
 }
 

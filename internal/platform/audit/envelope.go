@@ -126,3 +126,34 @@ func truncate(s string) string {
 	}
 	return s
 }
+
+// Clean makes v fit an envelope field of at most max bytes: invalid UTF-8
+// and control characters become U+FFFD and the result is cut on a character
+// boundary. Values that come from outside (an identity provider's subject,
+// a request's host) go through it, so a record is never refused, and the
+// event lost, for a malformed name.
+func Clean(v string, max int) string {
+	ok := len(v) <= max && utf8.ValidString(v)
+	if ok {
+		for _, r := range v {
+			if unicode.IsControl(r) {
+				ok = false
+				break
+			}
+		}
+	}
+	if ok {
+		return v
+	}
+	b := make([]byte, 0, min(len(v), max))
+	for _, r := range v { // invalid bytes arrive as utf8.RuneError
+		if unicode.IsControl(r) {
+			r = utf8.RuneError
+		}
+		if len(b)+utf8.RuneLen(r) > max {
+			break
+		}
+		b = utf8.AppendRune(b, r)
+	}
+	return string(b)
+}

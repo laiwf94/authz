@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/internal/authn/session"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // Identity headers sent to the proxy on success. The proxy copies them to
@@ -102,7 +103,10 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 	if a == nil {
 		// Misconfiguration or a probe: deny by default.
 		s.decision("forbidden")
-		s.audit(r.Context(), "access_denied", slog.String("reason", "unknown_app"), slog.String("host", printableASCII(host, 128)))
+		h := printableASCII(host, 128)
+		s.audit(r.Context(), audit.Envelope{Subject: "host:" + h, Action: "access", Decision: audit.Deny},
+			audit.AccessDenied{Reason: "unknown_app", Host: h},
+			slog.String("reason", "unknown_app"), slog.String("host", h))
 		writeError(w, r, http.StatusForbidden, "permission_denied", "no application is configured for this host")
 		return
 	}
@@ -125,7 +129,9 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 	}
 	if ok, reason := a.policy.Evaluate(sess.Identity); !ok {
 		s.decision("forbidden")
-		s.audit(r.Context(), "access_denied", slog.String("reason", reason), slog.String("app", a.id),
+		s.audit(r.Context(), audit.Envelope{Actor: sess.Identity.Subject, Subject: "app:" + a.id, Action: "access", Decision: audit.Deny},
+			audit.AccessDenied{Reason: reason, App: a.id, Provider: sess.Identity.Provider, Session: sess.ID},
+			slog.String("reason", reason), slog.String("app", a.id),
 			slog.String("provider", sess.Identity.Provider), slog.String("sub", sess.Identity.Subject),
 			slog.String("session", sess.ID))
 		if isNavigation(r) {

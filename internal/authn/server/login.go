@@ -19,6 +19,7 @@ import (
 	"github.com/laiwf94/authz/internal/authn/policy"
 	"github.com/laiwf94/authz/internal/authn/saml"
 	"github.com/laiwf94/authz/internal/authn/session"
+	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // callbackTimeout bounds all back-channel calls of one callback (discovery,
@@ -140,7 +141,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("rd"); v != "" {
 		var err error
 		if rd, err = rt.redirects.Validate(v); err != nil {
-			s.audit(r.Context(), "login_rejected", slog.String("reason", "return_url_not_allowed"), slog.String("app", a.id))
+			s.audit(r.Context(), audit.Envelope{Subject: "app:" + a.id, Action: "login", Decision: audit.Deny},
+				audit.LoginRejected{Reason: "return_url_not_allowed", App: a.id},
+				slog.String("reason", "return_url_not_allowed"), slog.String("app", a.id))
 			s.errorPage(w, r, http.StatusBadRequest, "Return address not allowed", "The page asked to send you to an address this gateway does not protect.", "")
 			return
 		}
@@ -226,12 +229,19 @@ func reasonOf(err error) string {
 // loginFailed audits a failed login and shows a page with a fresh start.
 // The detailed error goes to the log, never to the browser.
 func (s *Server) loginFailed(w http.ResponseWriter, r *http.Request, rt *runtime, providerID, appID, reason string, err error) {
+	ip := clientIP(r, s.opts.TrustedProxies)
 	attrs := []slog.Attr{slog.String("reason", reason), slog.String("provider", providerID), slog.String("app", appID),
-		slog.String("client_ip", clientIP(r, s.opts.TrustedProxies))}
+		slog.String("client_ip", ip)}
+	p := audit.LoginFailed{Reason: reason, Provider: providerID, App: appID, ClientIP: ip}
 	if err != nil {
 		attrs = append(attrs, slog.String("error", err.Error()))
+		p.Error = err.Error()
 	}
-	s.audit(r.Context(), "login_failed", attrs...)
+	env := audit.Envelope{Action: "login", Decision: audit.Deny}
+	if appID != "" {
+		env.Subject = "app:" + appID
+	}
+	s.audit(r.Context(), env, p, attrs...)
 	s.m.Counter("wicket_logins_total", `result="failure",reason="`+reason+`"`, "Completed logins by result.").Inc()
 	retry := ""
 	if a := rt.apps[appID]; a != nil {
@@ -327,9 +337,12 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName(rt), Value: s.keys.Seal(purposeSession, []byte(secret)),
 		Path: "/", Domain: rt.cfg.CookieDomain, Expires: sess.ExpiresAt, Secure: true, HttpOnly: true,
 		SameSite: http.SameSiteLaxMode})
-	s.audit(r.Context(), "login_succeeded", slog.String("provider", id.Provider), slog.String("app", st.App),
+	ip := clientIP(r, s.opts.TrustedProxies)
+	s.audit(r.Context(), audit.Envelope{Actor: id.Subject, Subject: "app:" + st.App, Action: "login", Decision: audit.Allow},
+		audit.LoginSucceeded{Provider: id.Provider, App: st.App, Session: sess.ID, Email: id.Email, ClientIP: ip},
+		slog.String("provider", id.Provider), slog.String("app", st.App),
 		slog.String("sub", id.Subject), slog.String("email", id.Email), slog.String("session", sess.ID),
-		slog.String("client_ip", clientIP(r, s.opts.TrustedProxies)))
+		slog.String("client_ip", ip))
 	s.m.Counter("wicket_logins_total", `result="success",reason="ok"`, "Completed logins by result.").Inc()
 	http.Redirect(w, r, st.Return, status)
 }
