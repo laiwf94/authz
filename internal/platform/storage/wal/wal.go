@@ -138,6 +138,13 @@ type Options[T any] struct {
 	// counts as damage: dropped when it is the last line, ErrCorrupt
 	// anywhere else. Errors from the apply function are always ErrCorrupt.
 	Validate func(T) error
+	// OpenFile opens the stream's file (at Open) and the snapshot's
+	// temporary file (at Replace); nil opens them with os.OpenFile and mode
+	// 0600. A caller that wraps the files sees every handle the stream
+	// uses: after Replace renames the snapshot into place it closes the
+	// previous file and appends go to the snapshot's handle, and a Replace
+	// that fails closes the snapshot's handle instead.
+	OpenFile func(path string, flag int) (File, error)
 }
 
 func (o Options[T]) codec() Codec[T] {
@@ -147,6 +154,13 @@ func (o Options[T]) codec() Codec[T] {
 	return o.Codec
 }
 
+func (o Options[T]) openFile(path string, flag int) (File, error) {
+	if o.OpenFile == nil {
+		return openFile(path, flag)
+	}
+	return o.OpenFile(path, flag)
+}
+
 func (o Options[T]) maxRecord() int {
 	if o.MaxRecord <= 0 {
 		return DefaultMaxRecord
@@ -154,8 +168,8 @@ func (o Options[T]) maxRecord() int {
 	return o.MaxRecord
 }
 
-// file is the part of *os.File a stream uses, so tests can inject faults.
-type file interface {
+// File is the part of *os.File a stream uses.
+type File interface {
 	io.Reader
 	io.Writer
 	io.Seeker
@@ -166,7 +180,7 @@ type file interface {
 
 // Hooks for fault injection in tests.
 var (
-	openFile = func(path string, flag int) (file, error) { return os.OpenFile(path, flag, 0o600) }
+	openFile = func(path string, flag int) (File, error) { return os.OpenFile(path, flag, 0o600) }
 	rename   = os.Rename
 	syncDir  = func(dir string) error {
 		d, err := os.Open(dir)
@@ -186,7 +200,7 @@ type Stream[T any] struct {
 	max   int
 
 	mu      sync.Mutex
-	f       file
+	f       File
 	size    int64
 	records int
 	dirty   bool  // appended since the last fsync
@@ -202,7 +216,7 @@ type Stream[T any] struct {
 // the file for appending, creating it when missing. A nil apply only
 // validates.
 func Open[T any](path string, opts Options[T], apply func(T) error) (*Stream[T], error) {
-	f, err := openFile(path, os.O_RDWR|os.O_CREATE)
+	f, err := opts.openFile(path, os.O_RDWR|os.O_CREATE)
 	if err != nil {
 		return nil, err
 	}
@@ -358,6 +372,20 @@ func Decode[T any](codec Codec[T], line []byte) (T, error) {
 // returns. Nothing is written if any record fails to encode, and a failed
 // write leaves the file as it was.
 func (s *Stream[T]) Append(recs ...T) error {
+	return s.append(s.opts.Sync == SyncAlways, recs)
+}
+
+// AppendSync is Append under SyncAlways whatever the stream's policy: recs
+// are on disk when it returns, and a failed write or fsync leaves the file
+// as it was. It lets one stream mix records that must be durable with
+// records that may be lost in a power cut (SyncNever or SyncInterval).
+// Records appended earlier without an fsync are covered by its fsync when it
+// succeeds; when it fails they keep the promise of their own policy.
+func (s *Stream[T]) AppendSync(recs ...T) error {
+	return s.append(true, recs)
+}
+
+func (s *Stream[T]) append(durable bool, recs []T) error {
 	if len(recs) == 0 {
 		return nil
 	}
@@ -373,10 +401,11 @@ func (s *Stream[T]) Append(recs ...T) error {
 	if _, err := s.f.Write(b); err != nil {
 		return s.rollback(err)
 	}
-	if s.opts.Sync == SyncAlways {
+	if durable {
 		if err := s.f.Sync(); err != nil {
 			return s.rollback(err)
 		}
+		s.dirty = false
 	} else {
 		s.dirty = true
 	}
@@ -466,7 +495,7 @@ func (s *Stream[T]) Replace(recs []T) error {
 		return ErrClosed
 	}
 	tmpPath := s.path + ".tmp"
-	tmp, err := openFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
+	tmp, err := s.opts.openFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return err
 	}

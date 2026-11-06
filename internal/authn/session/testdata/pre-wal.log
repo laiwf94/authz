@@ -1,0 +1,8 @@
+b9aab8e4 {"op":"create","session":{"id":"c8b7f69aba169c560f17740a0c07a786","identity":{"provider":"corp","sub":"alice","email":"alice@example.org","groups":["eng"]},"created_at":"2026-11-01T09:00:00Z","last_seen_at":"2026-11-01T09:00:00Z","expires_at":"2026-11-01T17:00:00Z"}}
+094ca7df {"op":"create","session":{"id":"08d80ec45d648c5f99e495e365c4fc8f","identity":{"provider":"corp","sub":"bob","groups":["ops"]},"created_at":"2026-11-01T09:00:00Z","last_seen_at":"2026-11-01T09:00:00Z","expires_at":"2026-11-01T17:00:00Z"}}
+2316100c {"op":"touch","id":"c8b7f69aba169c560f17740a0c07a786","t":"2026-11-01T09:02:00Z"}
+7f6e17dc {"op":"revoke","id":"08d80ec45d648c5f99e495e365c4fc8f"}
+5835eebb {"op":"create","session":{"id":"bfbc779d9a55079750b6eddc1f4b1744","identity":{"provider":"corp","sub":"alice","email":"alice@example.org","groups":["eng"]},"created_at":"2026-11-01T09:03:00Z","last_seen_at":"2026-11-01T09:03:00Z","expires_at":"2026-11-01T17:03:00Z"}}
+27ced5bb {"op":"create","session":{"id":"9e747c07adfa35aaf9ea3c6ba7df7756","identity":{"provider":"corp","sub":"alice","email":"alice@example.org","groups":["eng"]},"created_at":"2026-11-01T09:04:00Z","last_seen_at":"2026-11-01T09:04:00Z","expires_at":"2026-11-01T17:04:00Z"}}
+8d4a4094 {"op":"revoke","id":"c8b7f69aba169c560f17740a0c07a786"}
+e8a9eade {"op":"create","session":{"id":"b93f24bcd28dfca21dee2f703a6fd615","identity":{"provider":"partner","sub":"carol","email":"carol@example.org"},"created_at":"2026-11-01T09:04:00Z","last_seen_at":"2026-11-01T09:04:00Z","expires_at":"2026-11-01T12:00:00Z"}}

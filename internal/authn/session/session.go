@@ -329,7 +329,7 @@ func (s *Store) Sweep() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(s.opts.Now())
-	if s.log != nil && s.log.records > 2*len(s.byID)+compactSlack {
+	if s.log != nil && s.log.records() > 2*len(s.byID)+compactSlack {
 		return s.log.compact(s.snapshot())
 	}
 	return nil

@@ -539,7 +539,7 @@ func (f *faultFile) Seek(off int64, whence int) (int64, error) {
 // set (nil for plain files).
 func inject(t testing.TB, set func(*faultFile)) {
 	t.Helper()
-	openFile = func(path string, flag int) (file, error) {
+	openFile = func(path string, flag int) (File, error) {
 		f, err := os.OpenFile(path, flag, 0o600)
 		if err != nil {
 			return nil, err
@@ -551,7 +551,7 @@ func inject(t testing.TB, set func(*faultFile)) {
 		return ff, nil
 	}
 	t.Cleanup(func() {
-		openFile = func(path string, flag int) (file, error) { return os.OpenFile(path, flag, 0o600) }
+		openFile = func(path string, flag int) (File, error) { return os.OpenFile(path, flag, 0o600) }
 	})
 }
 
@@ -815,6 +815,133 @@ func TestFailedSyncStopsAppends(t *testing.T) {
 	if err := s3.Close(); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Close with a failed fsync: %v", err)
 	}
+}
+
+// AppendSync makes its records durable on a stream that otherwise does not
+// fsync, covers the unsynced records before it, and rolls back on failure
+// without stopping the stream.
+func TestAppendSync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.wal")
+	var n atomic.Int64
+	inject(t, func(f *faultFile) { f.syncs = &n })
+	s, err := Open(path, Options[event]{Sync: SyncNever}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inject(t, nil)
+	ff := s.f.(*faultFile)
+	if err := s.Append(event{Kind: "touch"}); err != nil || n.Load() != 0 {
+		t.Fatalf("append: %v, %d fsyncs", err, n.Load())
+	}
+	if err := s.AppendSync(event{Kind: "create"}, event{Kind: "revoke"}); err != nil || n.Load() != 1 {
+		t.Fatalf("AppendSync: %v, %d fsyncs", err, n.Load())
+	}
+	if err := s.Sync(); err != nil || n.Load() != 1 {
+		t.Fatal("AppendSync left the earlier append unsynced")
+	}
+	keep := s.Size()
+	for _, c := range []struct {
+		name string
+		set  func()
+	}{
+		{"short write", func() { ff.writeErr, ff.shortWrite = io.ErrShortWrite, 3 }},
+		{"fsync error", func() { ff.syncErr = syscall.EIO }},
+	} {
+		c.set()
+		if err := s.AppendSync(event{Kind: "lost"}); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		ff.writeErr, ff.shortWrite, ff.syncErr = nil, 0, nil
+		if fi, _ := os.Stat(path); fi.Size() != keep || s.Records() != 3 || s.Err() != nil {
+			t.Fatalf("%s: %d bytes, %d records, %v", c.name, fi.Size(), s.Records(), s.Err())
+		}
+	}
+	// One fsync for the good AppendSync, one for the failed one.
+	if err := s.AppendSync(); err != nil || n.Load() != 2 {
+		t.Fatalf("empty AppendSync: %v, %d fsyncs", err, n.Load())
+	}
+	if err := s.Close(); err != nil || n.Load() != 2 {
+		t.Fatalf("Close: %v, %d fsyncs", err, n.Load())
+	}
+	if err := s.AppendSync(event{}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("AppendSync after close: %v", err)
+	}
+	_, got := open(t, path, Options[event]{})
+	if len(got) != 3 || got[0].Kind != "touch" || got[2].Kind != "revoke" {
+		t.Fatalf("recovered %+v", got)
+	}
+}
+
+// Options.OpenFile sees every handle the stream uses, in the order the
+// documentation gives: the stream's file at Open, the snapshot's at
+// Replace, the old file closed once the snapshot is in place and the
+// snapshot closed when Replace fails.
+func TestOpenFileOption(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.wal")
+	var events []string
+	opts := Options[event]{OpenFile: func(p string, flag int) (File, error) {
+		f, err := os.OpenFile(p, flag, 0o600)
+		if err != nil {
+			events = append(events, "fail "+filepath.Base(p))
+			return nil, err
+		}
+		events = append(events, "open "+filepath.Base(p))
+		return &closeLog{faultFile: &faultFile{File: f}, name: filepath.Base(p), events: &events}, nil
+	}}
+	s, err := Open(path, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(event{Kind: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Replace([]event{{Kind: "snap"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(event{Kind: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	s.f.(*closeLog).name = "s.wal (was s.wal.tmp)"
+	// A Replace whose snapshot can't be written closes the snapshot.
+	failing := opts
+	failing.OpenFile = func(p string, flag int) (File, error) {
+		f, err := opts.OpenFile(p, flag)
+		if err == nil && strings.HasSuffix(p, ".tmp") {
+			f.(*closeLog).writeErr = syscall.ENOSPC
+		}
+		return f, err
+	}
+	s.opts = failing
+	if err := s.Replace([]event{{Kind: "x"}}); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("failed replace: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"open s.wal", "open s.wal.tmp", "close s.wal", "open s.wal.tmp", "close s.wal.tmp", "close s.wal (was s.wal.tmp)"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("handle events %q, want %q", events, want)
+	}
+	_, got := open(t, path, Options[event]{})
+	if len(got) != 2 || got[0].Kind != "snap" || got[1].Kind != "b" {
+		t.Fatalf("recovered %+v", got)
+	}
+	if _, err := Open(filepath.Join(dir, "missing", "s.wal"), opts, nil); err == nil || events[len(events)-1] != "fail s.wal" {
+		t.Fatalf("open through a failing OpenFile: %v", err)
+	}
+}
+
+// closeLog records when the stream closes a handle.
+type closeLog struct {
+	*faultFile
+	name   string
+	events *[]string
+}
+
+func (c *closeLog) Close() error {
+	*c.events = append(*c.events, "close "+c.name)
+	return c.faultFile.Close()
 }
 
 func TestClosed(t *testing.T) {
