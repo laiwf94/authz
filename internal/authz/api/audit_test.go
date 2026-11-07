@@ -17,8 +17,8 @@ import (
 
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
-	"github.com/laiwf94/authz/internal/metrics"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
 const secondKey = "second-key-0123456789"

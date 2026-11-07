@@ -23,8 +23,8 @@ import (
 	"github.com/laiwf94/authz/internal/authz/schema"
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
-	"github.com/laiwf94/authz/internal/metrics"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
 // Request limits.
@@ -417,7 +417,7 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) error {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	w.Header().Set("Content-Type", metrics.ContentType)
 	return s.m.Write(w)
 }
 

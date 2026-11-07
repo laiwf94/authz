@@ -18,10 +18,11 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/laiwf94/authz/internal/agents/metrics"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
 // HeaderRequestID carries the request ID in both directions.
@@ -95,7 +96,7 @@ type Server struct {
 // and request metrics around next. route is the metric label.
 func (s *Server) Wrap(route string, next http.HandlerFunc) http.Handler {
 	latency := s.Metrics.Histogram(s.Prefix+"_http_request_duration_seconds",
-		fmt.Sprintf(`server=%q,route=%q`, s.Name, route), "HTTP request latency.")
+		metrics.Labels("server", s.Name, "route", route), "HTTP request latency.")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		id := newRequestID()
@@ -120,7 +121,7 @@ func (s *Server) Wrap(route string, next http.HandlerFunc) http.Handler {
 			}
 			latency.Observe(time.Since(start))
 			s.Metrics.Counter(s.Prefix+"_http_requests_total",
-				fmt.Sprintf(`server=%q,route=%q,code="%d"`, s.Name, route, code), "HTTP requests.").Inc()
+				metrics.Labels("server", s.Name, "route", route, "code", strconv.Itoa(code)), "HTTP requests.").Inc()
 			lvl := slog.LevelInfo
 			if code >= 500 {
 				lvl = slog.LevelError

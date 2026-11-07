@@ -1,0 +1,277 @@
+# HELP grantd_audit_failures_total Audit records that could not be written.
+# TYPE grantd_audit_failures_total counter
+grantd_audit_failures_total 0
+# HELP grantd_audit_records_total Audit records written.
+# TYPE grantd_audit_records_total counter
+grantd_audit_records_total{event="relationships.write"} 3
+# HELP grantd_check_cache_hits_total Check sub-results served from the cache.
+# TYPE grantd_check_cache_hits_total counter
+grantd_check_cache_hits_total 5
+# HELP grantd_check_dispatches_total object#relation evaluations across all checks.
+# TYPE grantd_check_dispatches_total counter
+grantd_check_dispatches_total 17
+# HELP grantd_http_requests_total HTTP requests.
+# TYPE grantd_http_requests_total counter
+grantd_http_requests_total{route="/metrics",code="200"} 30
+grantd_http_requests_total{route="/v1/check",code="200"} 10
+grantd_http_requests_total{route="/v1/check",code="400"} 1
+grantd_http_requests_total{route="/v1/relationships/write",code="200"} 20
+# HELP mcpfake_http_requests_total HTTP requests.
+# TYPE mcpfake_http_requests_total counter
+mcpfake_http_requests_total{server="mcpfake",route="/mcp",code="200"} 1
+# HELP toolgate_audit_failures_total Audit records that could not be written.
+# TYPE toolgate_audit_failures_total counter
+toolgate_audit_failures_total 0
+# HELP toolgate_audit_records_total Audit records written.
+# TYPE toolgate_audit_records_total counter
+toolgate_audit_records_total{event="tool.call"} 6
+# HELP toolgate_auth_failures_total Requests with a missing or invalid credential.
+# TYPE toolgate_auth_failures_total counter
+toolgate_auth_failures_total 1
+# HELP toolgate_http_requests_total HTTP requests.
+# TYPE toolgate_http_requests_total counter
+toolgate_http_requests_total{server="admin",route="/metrics",code="200"} 1
+toolgate_http_requests_total{server="gateway",route="/mcp",code="200"} 1
+# HELP toolgate_policy_reloads_total Policy reload attempts.
+# TYPE toolgate_policy_reloads_total counter
+toolgate_policy_reloads_total{result="applied"} 1
+toolgate_policy_reloads_total{result="rejected"} 0
+# HELP toolgate_rate_limited_total Requests refused by a rate limit.
+# TYPE toolgate_rate_limited_total counter
+toolgate_rate_limited_total{scope="agent"} 1
+toolgate_rate_limited_total{scope="tool"} 1
+# HELP toolgate_redactions_total Secrets redacted from tool results.
+# TYPE toolgate_redactions_total counter
+toolgate_redactions_total 1
+# HELP toolgate_tool_calls_total Tool calls by outcome.
+# TYPE toolgate_tool_calls_total counter
+toolgate_tool_calls_total{upstream="",tool="",outcome="unknown_tool"} 1
+toolgate_tool_calls_total{upstream="files",tool="read",outcome="allowed"} 11
+# HELP toolgate_tools_quarantined_total Tool definitions quarantined after a change.
+# TYPE toolgate_tools_quarantined_total counter
+toolgate_tools_quarantined_total 1
+# HELP toolgate_upstream_errors_total Failed upstream requests.
+# TYPE toolgate_upstream_errors_total counter
+toolgate_upstream_errors_total{upstream="files",op="tools/call"} 1
+toolgate_upstream_errors_total{upstream="files",op="tools/list"} 1
+# HELP wicket_audit_failures_total Audit records that could not be written.
+# TYPE wicket_audit_failures_total counter
+wicket_audit_failures_total 0
+# HELP wicket_audit_records_total Audit records written.
+# TYPE wicket_audit_records_total counter
+wicket_audit_records_total{event="login"} 4
+# HELP wicket_auth_decisions_total Forward-auth decisions.
+# TYPE wicket_auth_decisions_total counter
+wicket_auth_decisions_total{decision="allow"} 1
+wicket_auth_decisions_total{decision="deny"} 1
+wicket_auth_decisions_total{decision="login"} 1
+# HELP wicket_http_requests_total HTTP requests.
+# TYPE wicket_http_requests_total counter
+wicket_http_requests_total{route="/auth",code="302"} 1
+wicket_http_requests_total{route="/callback",code="302"} 1
+wicket_http_requests_total{route="/login",code="302"} 1
+# HELP wicket_logins_total Completed logins by result.
+# TYPE wicket_logins_total counter
+wicket_logins_total{result="failure",reason="bad_state"} 1
+wicket_logins_total{result="success",reason="ok"} 9
+# HELP wicket_rate_limited_total Requests refused by the login rate limit.
+# TYPE wicket_rate_limited_total counter
+wicket_rate_limited_total 2
+# HELP grantd_head_revision Newest committed revision.
+# TYPE grantd_head_revision gauge
+grantd_head_revision 42
+# HELP toolgate_approvals_pending Approval requests awaiting a decision.
+# TYPE toolgate_approvals_pending gauge
+toolgate_approvals_pending 1
+# HELP toolgate_audit_records Records in the audit log.
+# TYPE toolgate_audit_records gauge
+toolgate_audit_records 128
+# HELP toolgate_sessions_open Open legacy MCP sessions.
+# TYPE toolgate_sessions_open gauge
+toolgate_sessions_open 2
+# HELP toolgate_tools_quarantined Tools whose definition changed and awaits review.
+# TYPE toolgate_tools_quarantined gauge
+toolgate_tools_quarantined 0
+# HELP wicket_sessions Sessions held in memory.
+# TYPE wicket_sessions gauge
+wicket_sessions 7
+# HELP grantd_check_duration_seconds Time to evaluate one check.
+# TYPE grantd_check_duration_seconds histogram
+grantd_check_duration_seconds_bucket{le="0.00005"} 1
+grantd_check_duration_seconds_bucket{le="0.0001"} 1
+grantd_check_duration_seconds_bucket{le="0.00025"} 2
+grantd_check_duration_seconds_bucket{le="0.0005"} 2
+grantd_check_duration_seconds_bucket{le="0.001"} 2
+grantd_check_duration_seconds_bucket{le="0.0025"} 3
+grantd_check_duration_seconds_bucket{le="0.005"} 3
+grantd_check_duration_seconds_bucket{le="0.01"} 3
+grantd_check_duration_seconds_bucket{le="0.025"} 3
+grantd_check_duration_seconds_bucket{le="0.05"} 3
+grantd_check_duration_seconds_bucket{le="0.1"} 3
+grantd_check_duration_seconds_bucket{le="0.25"} 3
+grantd_check_duration_seconds_bucket{le="1"} 3
+grantd_check_duration_seconds_bucket{le="2.5"} 3
+grantd_check_duration_seconds_bucket{le="+Inf"} 4
+grantd_check_duration_seconds_sum 3.00216
+grantd_check_duration_seconds_count 4
+# HELP grantd_http_request_duration_seconds HTTP request latency.
+# TYPE grantd_http_request_duration_seconds histogram
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.00005"} 0
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.0001"} 0
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.00025"} 0
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.0005"} 0
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.001"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.0025"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.005"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.01"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.025"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.05"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.1"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="0.25"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="1"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="2.5"} 1
+grantd_http_request_duration_seconds_bucket{route="/metrics",le="+Inf"} 1
+grantd_http_request_duration_seconds_sum{route="/metrics"} 0.0009
+grantd_http_request_duration_seconds_count{route="/metrics"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.00005"} 0
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.0001"} 0
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.00025"} 0
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.0005"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.001"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.0025"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.005"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.01"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.025"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.05"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.1"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="0.25"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="1"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="2.5"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/check",le="+Inf"} 1
+grantd_http_request_duration_seconds_sum{route="/v1/check"} 0.0003
+grantd_http_request_duration_seconds_count{route="/v1/check"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.00005"} 0
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.0001"} 0
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.00025"} 0
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.0005"} 0
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.001"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.0025"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.005"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.01"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.025"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.05"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.1"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="0.25"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="1"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="2.5"} 1
+grantd_http_request_duration_seconds_bucket{route="/v1/relationships/write",le="+Inf"} 1
+grantd_http_request_duration_seconds_sum{route="/v1/relationships/write"} 0.0006
+grantd_http_request_duration_seconds_count{route="/v1/relationships/write"} 1
+# HELP mcpfake_http_request_duration_seconds HTTP request latency.
+# TYPE mcpfake_http_request_duration_seconds histogram
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.00005"} 0
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.0001"} 0
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.00025"} 0
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.0005"} 0
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.001"} 0
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.0025"} 0
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.005"} 1
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.01"} 1
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.025"} 1
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.05"} 1
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.1"} 1
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="0.25"} 1
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="1"} 1
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="2.5"} 1
+mcpfake_http_request_duration_seconds_bucket{server="mcpfake",route="/mcp",le="+Inf"} 1
+mcpfake_http_request_duration_seconds_sum{server="mcpfake",route="/mcp"} 0.005
+mcpfake_http_request_duration_seconds_count{server="mcpfake",route="/mcp"} 1
+# HELP toolgate_http_request_duration_seconds HTTP request latency.
+# TYPE toolgate_http_request_duration_seconds histogram
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.00005"} 0
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.0001"} 0
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.00025"} 0
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.0005"} 0
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.001"} 0
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.0025"} 0
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.005"} 1
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.01"} 1
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.025"} 1
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.05"} 1
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.1"} 1
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="0.25"} 1
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="1"} 1
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="2.5"} 1
+toolgate_http_request_duration_seconds_bucket{server="admin",route="/metrics",le="+Inf"} 1
+toolgate_http_request_duration_seconds_sum{server="admin",route="/metrics"} 0.005
+toolgate_http_request_duration_seconds_count{server="admin",route="/metrics"} 1
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.00005"} 0
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.0001"} 0
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.00025"} 0
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.0005"} 0
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.001"} 0
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.0025"} 0
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.005"} 1
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.01"} 1
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.025"} 1
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.05"} 1
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.1"} 1
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="0.25"} 1
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="1"} 1
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="2.5"} 1
+toolgate_http_request_duration_seconds_bucket{server="gateway",route="/mcp",le="+Inf"} 1
+toolgate_http_request_duration_seconds_sum{server="gateway",route="/mcp"} 0.005
+toolgate_http_request_duration_seconds_count{server="gateway",route="/mcp"} 1
+# HELP wicket_http_request_duration_seconds HTTP request latency.
+# TYPE wicket_http_request_duration_seconds histogram
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.00005"} 0
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.0001"} 0
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.00025"} 0
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.0005"} 0
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.001"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.0025"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.005"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.01"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.025"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.05"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.1"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="0.25"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="1"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="2.5"} 1
+wicket_http_request_duration_seconds_bucket{route="/auth",le="+Inf"} 1
+wicket_http_request_duration_seconds_sum{route="/auth"} 0.001
+wicket_http_request_duration_seconds_count{route="/auth"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.00005"} 0
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.0001"} 0
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.00025"} 0
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.0005"} 0
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.001"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.0025"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.005"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.01"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.025"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.05"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.1"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="0.25"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="1"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="2.5"} 1
+wicket_http_request_duration_seconds_bucket{route="/callback",le="+Inf"} 1
+wicket_http_request_duration_seconds_sum{route="/callback"} 0.001
+wicket_http_request_duration_seconds_count{route="/callback"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.00005"} 0
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.0001"} 0
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.00025"} 0
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.0005"} 0
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.001"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.0025"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.005"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.01"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.025"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.05"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.1"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="0.25"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="1"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="2.5"} 1
+wicket_http_request_duration_seconds_bucket{route="/login",le="+Inf"} 1
+wicket_http_request_duration_seconds_sum{route="/login"} 0.001
+wicket_http_request_duration_seconds_count{route="/login"} 1

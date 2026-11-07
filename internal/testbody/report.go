@@ -74,6 +74,10 @@ type Report struct {
 	Packages []PackageCount
 	// Stale lists allow-list entries that matched no change.
 	Stale []Allowed
+	// Added counts the tests added since the move across all new
+	// directories, each directory once even when several old packages
+	// merged into it.
+	Added int
 }
 
 // OK reports whether every old test file moved cleanly and every package
@@ -99,6 +103,11 @@ func (r *Report) OK() bool {
 func Compare(pairs []Pair, readOld, readNew func(path string) ([]byte, error)) (*Report, error) {
 	rep := &Report{}
 	newTests := map[string]int{} // new dir -> tests added since the move
+	// A new file can be the home of several old ones (ParseMerges); a test
+	// in it counts as added only when none of them had it.
+	newSeen := map[string]map[string]bool{}
+	newFileTests := map[string][]string{}
+	var newOrder []string
 	for _, p := range pairs {
 		res := FileResult{Pair: p}
 		var oldF, newF *File
@@ -126,9 +135,24 @@ func Compare(pairs []Pair, readOld, readNew func(path string) ([]byte, error)) (
 			res.Changes, res.Added = CompareFiles(oldF, newF)
 		}
 		if p.New != "" {
-			newTests[path.Dir(p.New)] += len(missing(res.NewTests, res.OldTests))
+			if newSeen[p.New] == nil {
+				newSeen[p.New] = map[string]bool{}
+				newOrder = append(newOrder, p.New)
+				newFileTests[p.New] = res.NewTests
+			}
+			for _, t := range res.OldTests {
+				newSeen[p.New][t] = true
+			}
 		}
 		rep.Files = append(rep.Files, res)
+	}
+
+	for _, nf := range newOrder {
+		for _, t := range newFileTests[nf] {
+			if !newSeen[nf][t] {
+				newTests[path.Dir(nf)]++
+			}
+		}
 	}
 
 	byDir := map[string]*PackageCount{}
@@ -158,11 +182,16 @@ func Compare(pairs []Pair, readOld, readNew func(path string) ([]byte, error)) (
 		}
 	}
 	sort.Strings(dirs)
+	counted := map[string]bool{}
 	for _, d := range dirs {
 		pc := byDir[d]
 		sort.Strings(pc.NewDirs)
 		for _, nd := range pc.NewDirs {
 			pc.Added += newTests[nd]
+			if !counted[nd] {
+				counted[nd] = true
+				rep.Added += newTests[nd]
+			}
 		}
 		rep.Packages = append(rep.Packages, *pc)
 	}
@@ -225,7 +254,7 @@ func (r *Report) Write(w io.Writer, verbose bool) {
 	for _, p := range r.Packages {
 		tw = max(tw, len(p.OldDir))
 	}
-	var before, moved, addedTests int
+	var before, moved int
 	for _, p := range r.Packages {
 		mark := "ok  "
 		if !p.OK() {
@@ -245,12 +274,11 @@ func (r *Report) Write(w io.Writer, verbose bool) {
 		}
 		before += p.Before
 		moved += p.Moved
-		addedTests += p.Added
 	}
 	fmt.Fprintf(w, "\n%d file(s) clean, %d changed (%d line(s)), %d gone, %d added; %d allowed line(s), %d stale allow entr(ies)\n",
 		clean, changed, lines, gone, added, allowed, len(r.Stale))
 	fmt.Fprintf(w, "%d package(s): %d test(s) before, %d still there, %d added since\n",
-		len(r.Packages), before, moved, addedTests)
+		len(r.Packages), before, moved, r.Added)
 }
 
 func writeChanges(w io.Writer, f FileResult, changes []Change) {

@@ -268,7 +268,7 @@ internal/authn/config     JSON configuration: schema and semantic checks with JS
 internal/authn/check      offline file checks and online provider checks behind authz gateway check
 internal/authn/keyfile    SP keys, certificates and CA bundles from PEM files
 internal/authn/fakeidp    the test identity provider
-internal/authn/metrics    Prometheus text exposition
+internal/platform/metrics the shared metrics registry and Prometheus text exposition
 internal/authn/golden     normalised HTTP transcripts compared with golden files
 internal/authn/golden/e2e the end-to-end golden scenarios and their transcripts
 examples (wicket/), examples/whoami  demo script, nginx config, demo configs, a verifying upstream app

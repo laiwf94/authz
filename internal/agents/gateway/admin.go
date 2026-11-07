@@ -10,6 +10,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/approval"
 	"github.com/laiwf94/authz/internal/agents/httpx"
 	"github.com/laiwf94/authz/internal/agents/pins"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
 // AdminHandler returns the administrator API. Every route except /healthz
@@ -51,7 +52,7 @@ func (g *Gateway) AdminHandler(adminToken string) http.Handler {
 const adminBodyLimit = 64 << 10
 
 func (g *Gateway) metrics(w http.ResponseWriter, r *http.Request) error {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	w.Header().Set("Content-Type", metrics.ContentType)
 	return g.m.Write(w)
 }
 

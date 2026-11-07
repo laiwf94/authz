@@ -43,11 +43,11 @@ import (
 	"github.com/laiwf94/authz/internal/agents/identity"
 	"github.com/laiwf94/authz/internal/agents/jsonrpc"
 	"github.com/laiwf94/authz/internal/agents/mcp"
-	"github.com/laiwf94/authz/internal/agents/metrics"
 	"github.com/laiwf94/authz/internal/agents/pins"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/agents/ratelimit"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
 // Version is reported as serverInfo.version.
@@ -297,7 +297,7 @@ func (g *Gateway) toolsOf(ctx context.Context, u *upstream) (map[string]*upTool,
 	defer cancel()
 	defs, err := u.client.ListTools(cctx)
 	if err != nil {
-		g.count("toolgate_upstream_errors_total", fmt.Sprintf(`upstream=%q,op="tools/list"`, u.cfg.Name), "Failed upstream requests.")
+		g.count("toolgate_upstream_errors_total", metrics.Labels("upstream", u.cfg.Name, "op", "tools/list"), "Failed upstream requests.")
 		g.log.Error("listing upstream tools failed", "upstream", u.cfg.Name, "error", err.Error())
 		u.mu.Lock()
 		u.failedAt, u.lastErr = g.now(), err
@@ -413,7 +413,7 @@ func (g *Gateway) audit(ctx context.Context, event string, data map[string]any) 
 		g.count("toolgate_audit_failures_total", "", "Audit records that could not be written.")
 		g.log.Error("audit append failed", "event", event, "error", err.Error())
 	} else {
-		g.count("toolgate_audit_records_total", fmt.Sprintf("event=%q", event), "Audit records written.")
+		g.count("toolgate_audit_records_total", metrics.Labels("event", event), "Audit records written.")
 	}
 	return err
 }
@@ -450,7 +450,7 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 	early := func(outcome string, e *mcp.Error) (map[string]any, error) {
 		_ = g.audit(ctx, "tool_call", map[string]any{"agent": id.AgentID, "owner": id.Owner, "auth": id.Method,
 			"requested_tool": truncate(name, 128), "decision": "deny", "stage": "refused", "outcome": outcome})
-		g.count("toolgate_tool_calls_total", fmt.Sprintf(`upstream="",tool="",outcome=%q`, outcome), "Tool calls by outcome.")
+		g.count("toolgate_tool_calls_total", metrics.Labels("upstream", "", "tool", "", "outcome", outcome), "Tool calls by outcome.")
 		return nil, e
 	}
 	upName, toolName, ok := strings.Cut(name, ".")
@@ -485,7 +485,7 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 	refuse := func(outcome string, e *mcp.Error) (map[string]any, error) {
 		rec["stage"], rec["outcome"] = "refused", outcome
 		_ = g.audit(ctx, "tool_call", rec)
-		g.count("toolgate_tool_calls_total", fmt.Sprintf(`upstream=%q,tool=%q,outcome=%q`, upName, toolName, outcome), "Tool calls by outcome.")
+		g.count("toolgate_tool_calls_total", metrics.Labels("upstream", upName, "tool", toolName, "outcome", outcome), "Tool calls by outcome.")
 		return nil, e
 	}
 
@@ -558,7 +558,7 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 			rec[k] = v
 		}
 		_ = g.audit(ctx, "tool_call", rec)
-		g.count("toolgate_tool_calls_total", fmt.Sprintf(`upstream=%q,tool=%q,outcome=%q`, upName, toolName, outcome), "Tool calls by outcome.")
+		g.count("toolgate_tool_calls_total", metrics.Labels("upstream", upName, "tool", toolName, "outcome", outcome), "Tool calls by outcome.")
 	}
 
 	if !u.sem.Acquire(ctx, slotWait) {
@@ -601,7 +601,7 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 // error text is passed on only in short form, through the rule's redaction
 // patterns and the built-in ones.
 func (g *Gateway) upstreamFailure(up string, err error, out *guard.Guard, finish func(string, map[string]any)) *mcp.Error {
-	g.count("toolgate_upstream_errors_total", fmt.Sprintf(`upstream=%q,op="tools/call"`, up), "Failed upstream requests.")
+	g.count("toolgate_upstream_errors_total", metrics.Labels("upstream", up, "op", "tools/call"), "Failed upstream requests.")
 	var re *mcp.RPCError
 	switch {
 	case mcp.IsTimeout(err):

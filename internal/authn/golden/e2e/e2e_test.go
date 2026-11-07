@@ -14,10 +14,10 @@ import (
 	"testing"
 
 	"github.com/laiwf94/authz/internal/authn/config"
-	"github.com/laiwf94/authz/internal/authn/metrics"
 	"github.com/laiwf94/authz/internal/authn/server"
 	"github.com/laiwf94/authz/internal/authn/session"
 	"github.com/laiwf94/authz/internal/platform/jose"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/seal"
 )
 

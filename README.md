@@ -260,7 +260,6 @@ internal/authz/store        multi-version relationship store and write-ahead log
 internal/authz/check        check engine, result cache, lookups
 internal/authz/token        signed consistency tokens
 internal/authz/api          HTTP API, auth, errors, logging, metrics wiring
-internal/metrics            Prometheus text exposition
 internal/authz/golden       end-to-end transcript of the API, recorded from grantd
 cmd/authz/internal/gateway  authz gateway (formerly wicket): environment, startup, check
 cmd/authz/internal/fakeidp  authz fakeidp: test OIDC and SAML identity provider
@@ -272,6 +271,7 @@ internal/agents/...         agent traffic: MCP and JSON-RPC, policy, approvals, 
 internal/platform/keys      key rings with rotation, JWKS and the old key files
 internal/platform/jose      JWS/JWK/JWT: verification, ES256 signing, HS256 agent tokens
 internal/platform/seal      AES-256-GCM cookie sealing with key rotation
+internal/platform/metrics   one metrics registry: counters, gauges, histograms, series caps
 ```
 
 ## License

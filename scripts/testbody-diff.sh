@@ -12,7 +12,9 @@
 # removed from both. Every old top-level declaration must still be there with
 # the same lines, and so must the comments outside declarations; any other
 # changed line is printed and fails the run, unless scripts/testbody-allow.txt
-# lists it (relative fixture paths that gained a directory level). Tests and
+# lists it (relative fixture paths that gained a directory level). Packages
+# that later collapsed into one pair their old test files with the new one
+# through scripts/testbody-merge.txt, and each must still be clean. Tests and
 # helpers added after the move are reported, not failed, except init and
 # TestMain. A per-package table of test functions before and after follows.
 # Exit status: 0 clean, 1 changed or missing, 2 usage or git error.
@@ -28,4 +30,4 @@ base=${1:-41d9bf0af08b3f40e8292635831a76ce8714d27c}
 head=${2:-HEAD}
 
 cd "$(dirname "$0")/.."
-exec go run scripts/testbody-diff.go $verbose -allow scripts/testbody-allow.txt "$base" "$head"
+exec go run scripts/testbody-diff.go $verbose -allow scripts/testbody-allow.txt -merge scripts/testbody-merge.txt "$base" "$head"

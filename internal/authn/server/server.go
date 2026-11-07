@@ -23,11 +23,11 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/internal/authn/config"
-	"github.com/laiwf94/authz/internal/authn/metrics"
 	"github.com/laiwf94/authz/internal/authn/saml"
 	"github.com/laiwf94/authz/internal/authn/session"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/jose"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/seal"
 )
 
@@ -378,6 +378,6 @@ func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	w.Header().Set("Content-Type", metrics.ContentType)
 	_ = s.m.Write(w)
 }

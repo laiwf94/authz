@@ -323,7 +323,7 @@ internal/agents/guard          output redaction, truncation and audit previews
 internal/platform/audit        the platform's hash-chained audit log (shared)
 internal/agents/fakeserver     the tools behind `authz mcpfake`
 internal/agents/httpx          request IDs, logging, metrics, errors
-internal/agents/metrics        Prometheus text exposition
+internal/platform/metrics      the shared metrics registry and Prometheus text exposition
 ```
 
 ## License

@@ -20,10 +20,10 @@ import (
 	"github.com/laiwf94/authz/internal/agents/fakeserver"
 	"github.com/laiwf94/authz/internal/agents/identity"
 	"github.com/laiwf94/authz/internal/agents/mcp"
-	"github.com/laiwf94/authz/internal/agents/metrics"
 	"github.com/laiwf94/authz/internal/agents/pins"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
 const (

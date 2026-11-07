@@ -1,0 +1,12 @@
+# Old test files paired explicitly with their new home, checked by
+# scripts/testbody-diff.sh. Each entry is "OLD NEW": OLD a test file at the
+# base commit, NEW one at HEAD. Git's rename detection pairs each old file
+# with at most one new file, so packages that collapsed into one are listed
+# here; every old file is still compared with NEW in full and must find all
+# its declarations and tests there. An entry whose files are missing fails.
+
+# The three byte-identical metrics packages became the shared registry in
+# week 2 (#77). Their test file moved unchanged.
+internal/metrics/metrics_test.go internal/platform/metrics/metrics_test.go
+wicket/internal/metrics/metrics_test.go internal/platform/metrics/metrics_test.go
+toolgate/internal/metrics/metrics_test.go internal/platform/metrics/metrics_test.go

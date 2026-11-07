@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/laiwf94/authz/internal/agents/metrics"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
 func newServer(logs io.Writer) *Server {

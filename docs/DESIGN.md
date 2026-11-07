@@ -212,8 +212,9 @@ and its command to `cmd/authz/internal/serve`, which exports `Run`;
 `cmd/authz/main.go` dispatches `authz serve` to it. Every old main package
 became its own package under `cmd/authz/internal` because grantd, wicket,
 fakeidp, toolgate and mcpfake each define `run`, `env` or `loadConfig`, and
-their test bodies call those names unqualified. `internal/metrics` stays
-where it was until the shared registry in week 2.
+their test bodies call those names unqualified. `internal/metrics` stayed
+where it was until the shared registry in week 2; it is now
+`internal/platform/metrics`.
 
 **The contract.** An operator changes nothing: the `GRANTD_*` variables, the
 data directory and its `grantd.wal`, the token key and so every issued token,
@@ -527,3 +528,56 @@ handler takes about 1.7 µs and no allocations with a subcommand and no
 context values. With a correlation ID and tenant it takes about 2.5 µs and
 2 allocations, because the record is rebuilt and never appended to. A
 disabled level costs 22 ns.
+
+## One metrics registry (internal/platform/metrics)
+
+grantd, wicket and toolgate each carried a copy of the same small registry
+(`internal/metrics`, `internal/authn/metrics`, `internal/agents/metrics`, all
+byte-identical). In week 2 (#77) they became `internal/platform/metrics`, and
+`authz serve`, `authz gateway`, `authz mcp` and `authz mcpfake` all use it.
+
+**The exposition is unchanged.** Counters come first, then gauges, then
+histograms, each in series order, with one `# HELP` and `# TYPE` per family.
+`testdata/tracks.golden` registers every family the three tracks use, with
+their label sets and help texts, and was recorded with the old package before
+it was removed; the new registry writes the same bytes. A second test scans
+the tracks' sources for every `Counter`, `Histogram`, `Gauge` and `count`
+call and checks the golden file holds exactly those names, so a metric added
+to a track without updating the golden file fails the build. The serve golden
+transcript's `# TYPE` lines and the old `TestExposition` pass unchanged.
+
+What the registry adds:
+
+- **Settable gauges** (`GaugeSeries`, with labels) next to the scrape-time
+  function gauges, and **histograms with their own buckets**
+  (`HistogramBuckets`). Every series of a family shares one bucket layout.
+- **Series caps.** Each family may hold `DefaultLimit` (2,000) label sets,
+  or what `Limit` or `LimitFamily` sets. A label set past the cap is folded
+  into the family's `{overflow="true"}` series, so counts are kept, and
+  `authz_metrics_overflow_total{metric="NAME"}` counts the folded lookups.
+  That family appears only once something has overflowed. Label values that
+  come from outside, such as an upstream's tool names, can no longer grow
+  memory without bound.
+- **Checks at registration.** A family registered under two types, an
+  invalid metric or label name, a malformed label set, a repeated label, `le`
+  on a histogram or two bucket layouts for one family panic when the series is
+  created. These are programming errors and tests hit them. `Labels(k, v,
+  ...)` escapes values the way the exposition format requires (`\\`, `\"`,
+  `\n`, invalid UTF-8 replaced); toolgate's upstream, tool, outcome, event,
+  server and route labels are built with it. For printable values it gives
+  the same text as the `%q` it replaced.
+- **No lock held during gauge functions.** `Write` snapshots the series
+  under a read lock, releases it and then calls the gauge functions, so a
+  function may read or create other metrics.
+
+Lookups take a read lock, and only a new series takes the write lock. On a
+4-core 2.1 GHz Xeon, under `RunParallel`, finding and incrementing a counter
+by name and labels takes about 124 ns (the old registry took about 180 ns,
+behind one mutex), and a histogram observation takes about 110 ns either way.
+Writing 530 series takes about 0.39 ms, the same as before within noise.
+
+Three old test files merging into one is something git's rename detection
+can't express, so `scripts/testbody-merge.txt` pairs each of them with
+`internal/platform/metrics/metrics_test.go`. The test-body check compares
+each one with it in full. The suite-count steps map both old package paths
+to the new one.

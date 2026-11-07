@@ -25,7 +25,7 @@ import (
 
 	"github.com/laiwf94/authz/internal/agents/httpx"
 	"github.com/laiwf94/authz/internal/agents/mcp"
-	"github.com/laiwf94/authz/internal/agents/metrics"
+	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
 // Limits.

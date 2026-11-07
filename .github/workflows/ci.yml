@@ -71,30 +71,34 @@ jobs:
       # Every test, subtest and fuzz seed the wicket suite ran before the
       # move must still pass: internal/authn/testdata/wicket-suite.txt.
       # cmd/wicket and cmd/fakeidp are now authz gateway and authz fakeidp,
-      # and jose and seal moved on to internal/platform in week 2 (#76).
+      # jose and seal moved on to internal/platform in week 2 (#76), and
+      # metrics became the shared internal/platform/metrics (#77).
       - name: Suite counts (authn)
         shell: bash
         run: |
-          go test -json -count=1 ./internal/authn/... ./internal/platform/jose/... ./internal/platform/seal/... ./cmd/authz/internal/gateway/... ./cmd/authz/internal/fakeidp/... ./examples/whoami/... \
+          go test -json -count=1 ./internal/authn/... ./internal/platform/jose/... ./internal/platform/seal/... ./internal/platform/metrics/... ./cmd/authz/internal/gateway/... ./cmd/authz/internal/fakeidp/... ./examples/whoami/... \
             | go run scripts/suite-counts.go \
                 -map github.com/laiwf94/authz/internal/authn/jose=github.com/laiwf94/authz/internal/platform/jose \
                 -map github.com/laiwf94/authz/internal/authn/seal=github.com/laiwf94/authz/internal/platform/seal \
+                -map github.com/laiwf94/authz/internal/authn/metrics=github.com/laiwf94/authz/internal/platform/metrics \
                 -map github.com/laiwf94/authz/cmd/wicket=github.com/laiwf94/authz/cmd/authz/internal/gateway \
                 -map github.com/laiwf94/authz/cmd/fakeidp=github.com/laiwf94/authz/cmd/authz/internal/fakeidp \
                 internal/authn/testdata/wicket-suite.txt
       # Every test, subtest and fuzz seed the toolgate suite ran before the
       # move must still pass, under the race detector:
       # internal/agents/testdata/toolgate-suite.txt. The audit package became
-      # internal/platform/audit in week 2 (#78). Then the SIGKILL crash
+      # internal/platform/audit in week 2 (#78) and metrics the shared
+      # internal/platform/metrics (#77). Then the SIGKILL crash
       # harnesses against authz mcp serve, the audit chain under load and
       # approvals killed between asking, deciding and using (#77), three
       # times over for more kill points (they also run once in the Test step).
       - name: Suite counts (agents)
         shell: bash
         run: |
-          go test -race -json -count=1 ./internal/agents/... ./internal/platform/audit/... ./cmd/authz/internal/mcp/... ./cmd/authz/internal/mcpfake/... \
+          go test -race -json -count=1 ./internal/agents/... ./internal/platform/audit/... ./internal/platform/metrics/... ./cmd/authz/internal/mcp/... ./cmd/authz/internal/mcpfake/... \
             | go run scripts/suite-counts.go \
                 -map github.com/laiwf94/authz/internal/agents/audit=github.com/laiwf94/authz/internal/platform/audit \
+                -map github.com/laiwf94/authz/internal/agents/metrics=github.com/laiwf94/authz/internal/platform/metrics \
                 internal/agents/testdata/toolgate-suite.txt
           go test -race -count=3 -run '^TestMCP(Approval)?SurvivesSIGKILL$' ./cmd/authz
       # Every _test.go file of the three pre-merge trees must have moved with
