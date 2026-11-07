@@ -409,3 +409,42 @@ so a failed append is counted (`grantd_audit_failures_total`,
 `wicket_audit_failures_total`) and logged instead of failing the request.
 After that, `/healthz` answers 503 until the process restarts, the way
 `authz mcp`'s does.
+
+## One configuration file (internal/platform/config)
+
+Every subcommand reads its part of one versioned JSON document. A section
+is a Go struct registered with `config.NewSection(name, defaults, check)`;
+`config.NewSchema` refuses a section type it cannot decode, or two members
+that would share an environment variable, when the program starts rather
+than on some document.
+
+- *Every problem at once.* The document is walked token by token against
+  the section types, as wicket's config check did: unknown members (with a
+  "did you mean"), duplicates, wrong types and bad durations are reported
+  and dropped, and the section checks still run over the rest. Each problem
+  carries its JSON path and line and column, or the environment variable
+  its value came from.
+- *Versioned.* `"version"` is required. A version newer than the build's is
+  refused instead of being half understood.
+- *Precedence.* Defaults, then the file, then the environment. Each member
+  outside arrays and maps has a variable, `AUTHZ_<SECTION>_<PATH>`; lists of
+  strings are comma-separated; empty variables are ignored. A section given
+  only by variables is present. Unknown `AUTHZ_<SECTION>_` variables are
+  warnings.
+- *Secrets.* A `config.Secret` member cannot hold a literal in the file. It
+  is `{"file": path}` (at most 64 KiB, white space trimmed) or
+  `{"env": name}`, or set by `AUTHZ_<...>` or `AUTHZ_<...>_FILE`; setting both
+  is an error. `String`, `%v` and `%#v` print where it came from, never
+  the value.
+- *Live reload.* A `config.Watcher` holds the current `*Config` behind an
+  atomic pointer. Every second (`DefaultInterval`) it reads the
+  configuration file and every secret file the last load read, and compares
+  SHA-256 sums, so a same-size rewrite within one mtime tick, a Kubernetes
+  symlink swap and a file that appears or disappears are all seen. A change
+  is loaded and checked in full and swapped in only if it has no errors.
+  Otherwise the old configuration stays and `OnError` is called once for
+  that version of the files. Readers call `Current()` per request and see
+  one whole configuration or the next, never a mix: under a test that
+  rewrites the files in place, out of order and with garbage while eight
+  clients hammer an HTTP handler, no request fails and no client sees a
+  generation go backwards.

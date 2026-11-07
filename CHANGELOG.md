@@ -68,6 +68,18 @@ link the roadmap issue they come from.
   an HS256 ring from `internal/platform/keys`, and pooled HMAC states make
   issuing and verifying a token about twice as fast (Encode 790 to 330 ns,
   Decode 730 to 310 ns, 9 and 7 allocations down to 4 and 2).
+- **One configuration file schema** ([#76](https://github.com/laiwf94/authz/issues/76)).
+  `internal/platform/config` reads a versioned JSON document
+  (`{"version": 1, "serve": {...}, "gateway": {...}, "mcp": {...}}`) with a
+  section per subcommand. Every problem is reported at once with its JSON
+  path and line and column; a document for a newer version is refused.
+  Any member outside arrays and maps can be overridden from the environment
+  (`$.serve.addr` is `AUTHZ_SERVE_ADDR`), and misspelt variables are warned
+  about. Secrets are never written in the file: they are `{"file": ...}` or
+  `{"env": ...}` references, or `AUTHZ_..._FILE` variables. A watcher
+  reloads the file and every secret file it references within a second of
+  a change, refuses an invalid version and keeps the configuration it has.
+  The subcommands move onto it, and `authz check` validates it, next.
 
 ### Agent gateway (agents)
 

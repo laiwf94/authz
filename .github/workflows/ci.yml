@@ -44,7 +44,7 @@ jobs:
           go tool cover -func=coverage.out | tail -1
           m=github.com/laiwf94/authz
           go run scripts/coverage-floor.go -min 93.5 -rest authz \
-            -group authn=$m/internal/authn,$m/internal/platform/jose,$m/internal/platform/seal,$m/cmd/authz/internal/gateway,$m/cmd/authz/internal/fakeidp,$m/examples/whoami \
+            -group authn=$m/internal/authn,$m/internal/platform/jose,$m/internal/platform/seal,$m/internal/platform/config,$m/cmd/authz/internal/gateway,$m/cmd/authz/internal/fakeidp,$m/examples/whoami \
             -group agents=$m/internal/agents,$m/cmd/authz/internal/mcp,$m/cmd/authz/internal/mcpfake \
             coverage.out
       - name: Fuzz (short)
@@ -60,6 +60,7 @@ jobs:
           go test ./internal/authn/saml -run=^$ -fuzz=FuzzParseResponse -fuzztime=30s
           go test ./internal/authn/saml -run=^$ -fuzz=FuzzParseMetadata -fuzztime=20s
           go test ./internal/authn/config -run=^$ -fuzz=FuzzCheck -fuzztime=20s
+          go test ./internal/platform/config -run=^$ -fuzz=FuzzCheck -fuzztime=20s
           go test ./internal/agents/jsonrpc -run=^$ -fuzz=FuzzDecode -fuzztime=20s
           go test ./internal/agents/schema -run=^$ -fuzz=FuzzCompileValidate -fuzztime=20s
           go test ./internal/agents/policy -run=^$ -fuzz=FuzzParse -fuzztime=20s
