@@ -241,9 +241,12 @@ func TestMCPApprovalSurvivesSIGKILL(t *testing.T) {
 		if code, _ := admin(g.admin, "POST", "/admin/approvals/"+r.approval+"/approve", `{}`); code != 200 {
 			t.Fatalf("round %d: approve: %d", round, code)
 		}
+		// The racers call the gateway about to be killed; g is replaced
+		// by the restart below while they run.
+		addr := g.addr
 		var wg sync.WaitGroup
 		for range racers {
-			wg.Go(func() { call(g.addr, text) })
+			wg.Go(func() { call(addr, text) })
 		}
 		time.Sleep(time.Duration(rng.IntN(3000)) * time.Microsecond)
 		g = restart()
