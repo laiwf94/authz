@@ -63,11 +63,14 @@ const (
 
 // Options are the gateway's dependencies.
 type Options struct {
-	Config         *Config
-	Auth           *identity.Authenticator
-	Policy         *policy.Store
-	Audit          *audit.Log
-	Pins           *pins.Store
+	Config *Config
+	Auth   *identity.Authenticator
+	Policy *policy.Store
+	Audit  *audit.Log
+	Pins   *pins.Store
+	// ApprovalLog is the file approval requests, decisions and grant uses
+	// are kept in; empty keeps them in memory, lost on restart.
+	ApprovalLog    string
 	AuditKey       []byte // HMAC key for argument digests in the audit log
 	AllowedOrigins []string
 	Log            *slog.Logger
@@ -142,16 +145,24 @@ func New(opt Options) (*Gateway, error) {
 	}
 	c := opt.Config
 	ap := c.Approvals
+	acfg := approval.Config{
+		PendingTTL:  time.Duration(ap.PendingTTLSeconds) * time.Second,
+		MaxGrantTTL: time.Duration(ap.MaxGrantTTLSeconds) * time.Second,
+		Now:         opt.Now,
+	}
+	approvals := approval.New(acfg)
+	if opt.ApprovalLog != "" {
+		var err error
+		if approvals, err = approval.Open(opt.ApprovalLog, acfg); err != nil {
+			return nil, err
+		}
+	}
 	g := &Gateway{opt: opt, cfg: c, log: opt.Log, m: opt.Metrics, now: opt.Now,
-		limits:  map[string]Limits{},
-		limiter: ratelimit.NewLimiter(opt.Now),
-		quota:   ratelimit.NewQuota(opt.Now),
-		approvals: approval.New(approval.Config{
-			PendingTTL:  time.Duration(ap.PendingTTLSeconds) * time.Second,
-			MaxGrantTTL: time.Duration(ap.MaxGrantTTLSeconds) * time.Second,
-			Now:         opt.Now,
-		}),
-		ups: map[string]*upstream{},
+		limits:    map[string]Limits{},
+		limiter:   ratelimit.NewLimiter(opt.Now),
+		quota:     ratelimit.NewQuota(opt.Now),
+		approvals: approvals,
+		ups:       map[string]*upstream{},
 	}
 	for _, a := range c.Agents {
 		if a.Limits != nil {
@@ -190,6 +201,9 @@ func New(opt Options) (*Gateway, error) {
 	opt.Policy.SetOnReload(g.policyReloaded)
 	return g, nil
 }
+
+// Close closes the approval log. The gateway must not serve calls after it.
+func (g *Gateway) Close() error { return g.approvals.Close() }
 
 // Handler returns the agent-facing HTTP handler (/mcp and /healthz).
 func (g *Gateway) Handler() http.Handler {
@@ -617,6 +631,14 @@ func (g *Gateway) approve(ctx context.Context, id *identity.Identity, tool, rule
 	b := approval.Binding{AgentID: id.AgentID, Owner: id.Owner, Tool: tool, ArgsHash: argsHash,
 		Arguments: json.RawMessage(canonArgs), RuleID: ruleID}
 	req, out, err := g.approvals.Begin(b)
+	if err != nil && !errors.Is(err, approval.ErrTooMany) {
+		g.log.Error("opening an approval request failed", "agent", id.AgentID, "tool", tool, "error", err.Error())
+		rec["outcome"] = "approval_unavailable"
+		e := rpcErr(http.StatusServiceUnavailable, mcp.CodeApprovalPending, map[string]any{"status": "unavailable"},
+			"the approval request could not be recorded; try again later")
+		e.RetryAfter = 10 * time.Second
+		return "", e
+	}
 	if err != nil {
 		rec["outcome"] = "approval_limit"
 		e := rpcErr(http.StatusTooManyRequests, mcp.CodeRateLimited, map[string]any{"scope": "approvals"},

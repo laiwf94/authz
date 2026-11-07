@@ -21,7 +21,7 @@
 //	TOOLGATE_POLICY           AUTHZ_MCP_POLICY           path of the JSON policy, reloaded when it changes (required)
 //	TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        path of the append-only audit log (required)
 //	TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters; keys the argument digests in the audit log (required)
-//	TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        directory for trusted tool definitions; empty keeps them in memory only
+//	TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        directory for trusted tool definitions and approvals; empty keeps them in memory only
 //	TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,kid=<64 hex>...] for signed agent tokens; the first signs new tokens
 //	TOOLGATE_ALLOWED_ORIGINS  AUTHZ_MCP_ALLOWED_ORIGINS  comma-separated browser origins allowed to call /mcp (default none)
 //	TOOLGATE_POLICY_POLL      AUTHZ_MCP_POLICY_POLL      how often to check the policy file (default "2s"; "0" disables; SIGHUP always reloads)
@@ -81,7 +81,7 @@ error:
   TOOLGATE_POLICY           AUTHZ_MCP_POLICY           JSON policy, reloaded when it changes (required)
   TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        append-only audit log (required)
   TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters keying argument digests (required)
-  TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        trusted tool definitions; empty keeps them in memory
+  TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        tool pins and approvals; empty keeps them in memory
   TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,...] for signed agent tokens
   TOOLGATE_ALLOWED_ORIGINS  AUTHZ_MCP_ALLOWED_ORIGINS  browser origins allowed to call /mcp (default none)
   TOOLGATE_POLICY_POLL      AUTHZ_MCP_POLICY_POLL      policy file check interval (default "2s"; "0" disables)
@@ -311,21 +311,24 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 		return err
 	}
 	defer auditLog.Close()
-	pinPath := ""
+	pinPath, approvalPath := "", ""
 	if cfg.stateDir != "" {
 		pinPath = filepath.Join(cfg.stateDir, "pins.json")
+		approvalPath = filepath.Join(cfg.stateDir, "approvals.wal")
 	} else {
-		log.Warn("TOOLGATE_STATE_DIR not set; trusted tool definitions are kept in memory and reset on restart")
+		log.Warn("TOOLGATE_STATE_DIR not set; trusted tool definitions and approvals are kept in memory and reset on restart")
 	}
 	pinStore, err := pins.Open(pinPath, nil)
 	if err != nil {
 		return err
 	}
+	defer pinStore.Close()
 	gw, err := gateway.New(gateway.Options{Config: gc, Auth: auth, Policy: pol, Audit: auditLog, Pins: pinStore,
-		AuditKey: cfg.auditKey, AllowedOrigins: cfg.origins, Log: log, Metrics: metrics.New()})
+		ApprovalLog: approvalPath, AuditKey: cfg.auditKey, AllowedOrigins: cfg.origins, Log: log, Metrics: metrics.New()})
 	if err != nil {
 		return err
 	}
+	defer gw.Close()
 
 	servers := []*http.Server{newServer(gw.Handler()), newServer(gw.AdminHandler(cfg.adminToken))}
 	listeners := make([]net.Listener, 0, 2)

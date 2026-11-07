@@ -75,13 +75,15 @@ cannot be written, the call is refused with 503 and `/healthz` reports 503.
 
 Almost nothing is a database. The configuration (agents, upstreams, limits)
 is read once at start. The policy is a file, recompiled on change. Two files
-hold state that must survive a restart: the audit log, which only grows, and
-`pins.json`, the trusted hash of every tool definition seen. Everything else
-lives in memory and starts empty after a restart, which is the right default
-for each of them: rate-limit timestamps (one int64 per agent or agent+tool),
-daily quota counters, open approval requests, and legacy MCP sessions. An
-agent that loses a pending approval to a restart asks again; one that loses a
-session gets a 404 and runs `initialize`, as the 2025 transport requires.
+hold state that must survive a restart: the audit log, which only grows, and,
+in `TOOLGATE_STATE_DIR`, two wal streams (`internal/platform/storage/wal`, the
+platform's one append log): `pins.json`, the trusted hash of every tool
+definition seen, and `approvals.wal`, open approval requests, decisions and
+the use of each grant. Everything else lives in memory and starts empty after
+a restart, which is the right default for each of them: rate-limit timestamps
+(one int64 per agent or agent+tool), daily quota counters, and legacy MCP
+sessions. An agent that loses a session gets a 404 and runs `initialize`, as
+the 2025 transport requires.
 
 Tools are addressed as `upstream.tool`. Upstream names are restricted to
 `[a-z][a-z0-9_-]{0,31}`, so the first dot always splits them, while tool names
@@ -255,8 +257,19 @@ The administrator sees the exact canonical arguments
 (`GET /admin/approvals/{id}`) and approves with a TTL (capped by
 `max_grant_ttl_seconds`). Approvals use the admin token, a separate credential
 from any agent's, so an agent cannot approve itself. Open requests are bounded
-(16 per agent, 1024 in total) and kept in memory only; after a restart an
-agent asks again.
+(16 per agent, 1024 in total). With `TOOLGATE_STATE_DIR` set they are kept in
+`approvals.wal`: one record when a request opens, one when it is decided and
+one when its grant is used, compacted into a snapshot of the live requests as
+the file grows. A restart keeps pending requests under the same id, grants
+and denials. A decision is fsynced before the administrator gets an answer,
+and the use of a grant is fsynced before the call goes to the upstream, so a
+grant can never run twice, whenever the gateway is killed; a kill between
+the fsync and the upstream call uses the grant up without the call, and the
+agent asks again. Opening a request is not fsynced: a power cut can lose it,
+and the agent asks again. If the file cannot be written, a new request is
+refused with HTTP 503 and `-31004` (`status: unavailable`), a decision fails,
+and a call whose grant cannot be marked used does not run. Without a state
+directory everything is in memory and a restart starts empty.
 
 ## Pinning tool definitions
 
@@ -267,8 +280,12 @@ and hashes the rest in canonical JSON, so an upstream that only reformats its
 JSON does not trigger anything.
 
 On first sight the hash is pinned (trust on first use) and persisted to
-`TOOLGATE_STATE_DIR/pins.json` with a temp-file, fsync, rename, fsync-directory
-sequence, so a restart cannot reset trust. When an upstream later serves a
+`TOOLGATE_STATE_DIR/pins.json`, a wal stream with one fsynced record per
+change (the whole pin after it), so a restart cannot reset trust. The stream
+is rewritten as a snapshot (temp file, fsync, rename, fsync directory) once
+it holds four records per tool, after a failed write, and when the file at
+that path was removed or replaced while the gateway ran. A `pins.json` in the
+old format, one JSON array, is converted in place on first start, atomically. When an upstream later serves a
 different definition, the tool is quarantined: left out of every agent's list,
 and calls are refused with `-31006`. The quarantine is audited and counted in
 `toolgate_tools_quarantined`. An administrator reviews the pending definition
@@ -391,13 +408,15 @@ interactive request the agent never agreed to.
 | Audit log tampered while stopped | Startup refuses with the line number |
 | Crash mid-append | Torn last line removed on start; it was never acknowledged |
 | Gateway killed (SIGKILL) under load | Every call the upstream saw has a durable `started` record and every answered call its records; the restart cuts a torn tail, verifies the log and keeps the pins. `TestMCPSurvivesSIGKILL` kills `authz mcp serve` at random points eight times per run |
-| Pin store cannot be written | New tools not trusted; quarantines still enforced in memory |
+| Gateway killed between an approval and its use | The grant survives and lets the call through once; a used grant never comes back, a denial stays a denial. `TestMCPApprovalSurvivesSIGKILL` kills `authz mcp serve` between asking, deciding and using, and while identical calls race for one grant |
+| Pin store cannot be written | New tools not trusted; quarantines still enforced in memory, and written with the next change |
+| Approval log cannot be written | New requests refused (503 `-31004`), decisions fail, a grant that cannot be marked used does not run |
 | Upstream down | Its last good tool list is still used (pins still checked); a never-reached upstream lists nothing; calls get 502 `-31007` |
 | Upstream slow | Call cancelled at `timeout_ms`, 504 `-31008` |
 | Upstream floods | Response capped at `max_response_bytes`, 502 |
 | Upstream redirects | Not followed (the credential would go along), 502 |
 | Upstream at concurrency limit | Waits up to 1 s, then 429 `-31009` with `Retry-After` |
-| Gateway restart | Pins and audit chain persist; rate buckets, quotas, sessions and approval requests reset |
+| Gateway restart | Pins, approvals and audit chain persist; rate buckets, quotas and sessions reset |
 
 ## Limits
 
