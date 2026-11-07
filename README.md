@@ -103,7 +103,10 @@ $ authz ctl lookup doc view user:alice
 
 `check` exits 0 when allowed and 3 when denied; every subcommand exits 2 for
 a usage error. `authz check -relationships file -schema file` validates a
-file of relationships against a schema before you load it.
+file of relationships against a schema before you load it, and
+`authz check -config authz.json` validates the platform configuration file
+(its `serve`, `gateway` and `mcp` sections, see
+[docs/DESIGN.md](docs/DESIGN.md#one-configuration-file-internalplatformconfig)).
 
 Nothing changes for an existing grantd deployment: the same variables, data
 directory (`grantd.wal`), tokens, endpoints, error codes, metric names and
@@ -251,7 +254,7 @@ the trade-offs taken and what would change to run this across many machines.
 cmd/authz                   the one binary: subcommand dispatcher and version
 cmd/authz/internal/serve    authz serve (formerly grantd): configuration and startup
 cmd/authz/internal/ctl      authz ctl: HTTP client for schema, relationships, checks
-cmd/authz/internal/checkcmd authz check: validate environment, schema and relationship files
+cmd/authz/internal/checkcmd authz check: validate the config file, environment, schema and relationship files
 internal/authz/schema       schema language: lexer, parser, validation, canonical printer
 internal/authz/store        multi-version relationship store and write-ahead log
 internal/authz/check        check engine, result cache, lookups

@@ -79,7 +79,19 @@ link the roadmap issue they come from.
   `{"env": ...}` references, or `AUTHZ_..._FILE` variables. A watcher
   reloads the file and every secret file it references within a second of
   a change, refuses an invalid version and keeps the configuration it has.
-  The subcommands move onto it, and `authz check` validates it, next.
+- **`authz check -config file [-online] [-timeout 10s]`** ([#76](https://github.com/laiwf94/authz/issues/76))
+  validates the serve, gateway and mcp sections of that document, with the
+  `AUTHZ_*` overrides and the secrets it references, and prints every
+  problem as `file:line:col: severity: path: message` (or
+  `VARIABLE: severity: path: message` for an override). The serve and mcp
+  sections hold the `GRANTD_*` and `TOOLGATE_*` settings under their
+  `AUTHZ_SERVE_*` and `AUTHZ_MCP_*` names; the `AUTHZ_MCP_*` variables the
+  MCP gateway already reads are the same overrides. The gateway section holds
+  the `WICKET_*` settings and, inline, the members of a wicket file
+  (`public_url`, `session`, `providers`, `apps`…), checked by wicket's own
+  rules, and `-online` runs `authz gateway check -online`'s metadata checks
+  with paths under `$.gateway`. The subcommands do not start from the file
+  yet; that comes next.
 
 ### Agent gateway (agents)
 

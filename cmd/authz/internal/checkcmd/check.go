@@ -12,14 +12,16 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/laiwf94/authz/cmd/authz/internal/serve"
+	"github.com/laiwf94/authz/internal/authn/check"
 	"github.com/laiwf94/authz/internal/authz/schema"
 	"github.com/laiwf94/authz/internal/authz/store"
 )
 
 // Summary is the one-line description shown in "authz help".
-const Summary = "validate the serve environment, schema files and relationship files"
+const Summary = "validate the platform config file, the serve environment, schema files and relationship files"
 
 // Exit codes of "authz check".
 const (
@@ -32,11 +34,17 @@ const (
 // a few hundred bytes; anything longer is reported rather than buffered.
 const maxLine = 64 << 10
 
-const usage = `usage: authz check [-serve] [-schema file] [-relationships file]
+const usage = `usage: authz check [-config file [-online] [-timeout 10s]] [-serve] [-schema file] [-relationships file]
 
 Validates configuration without starting anything and prints every problem
 as "where: error: message". At least one flag is required.
 
+  -config file         the platform configuration file: its serve, gateway and mcp
+                       sections with the AUTHZ_* overrides and the secrets they
+                       reference, each problem as "file:line:col: severity: path: message"
+                       (or "VARIABLE: severity: path: message" for an override)
+  -online              with -config, also fetch the gateway's provider metadata
+  -timeout d           time limit for each provider's online checks (default 10s)
   -serve               the GRANTD_* environment "authz serve" would start with
   -schema file         a schema file, as PUT /v1/schema would accept it
   -relationships file  one relationship per line (type:id#relation@type:id[#relation]);
@@ -48,12 +56,15 @@ found, 2 usage error.
 `
 
 // Run is the "authz check" subcommand.
-func Run(_ context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+func Run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	env := fs.Bool("serve", false, "validate the GRANTD_* environment of authz serve")
 	schemaFile := fs.String("schema", "", "schema `file` to validate")
 	relFile := fs.String("relationships", "", "relationships `file` to validate, one per line")
+	configFile := fs.String("config", "", "platform configuration `file` to validate")
+	online := fs.Bool("online", false, "with -config, also fetch the gateway's provider metadata")
+	timeout := fs.Duration("timeout", check.DefaultTimeout, "time limit for each provider's online checks")
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage) }
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -65,8 +76,16 @@ func Run(_ context.Context, args []string, getenv func(string) string, stdin io.
 		fmt.Fprintf(stderr, "authz check: unexpected argument %q\n", fs.Arg(0))
 		return Usage
 	}
-	if !*env && *schemaFile == "" && *relFile == "" {
-		fmt.Fprint(stderr, "authz check: nothing to check; pass -serve, -schema or -relationships\n")
+	if !*env && *schemaFile == "" && *relFile == "" && *configFile == "" {
+		fmt.Fprint(stderr, "authz check: nothing to check; pass -config, -serve, -schema or -relationships\n")
+		return Usage
+	}
+	if *configFile == "" && (*online || *timeout != check.DefaultTimeout) {
+		fmt.Fprint(stderr, "authz check: -online and -timeout apply to -config\n")
+		return Usage
+	}
+	if *timeout <= 0 || *timeout > 5*time.Minute {
+		fmt.Fprint(stderr, "authz check: -timeout must be between 1ns and 5m\n")
 		return Usage
 	}
 	if *schemaFile == "-" && *relFile == "-" {
@@ -81,6 +100,9 @@ func Run(_ context.Context, args []string, getenv func(string) string, stdin io.
 	}
 
 	r := &report{out: stdout}
+	if *configFile != "" {
+		checkConfig(ctx, r, *configFile, getenv, check.Options{Getenv: getenv, Online: *online, Timeout: *timeout})
+	}
 	if *env {
 		errs := serve.Check(getenv)
 		for _, err := range errs {
@@ -117,6 +139,10 @@ type report struct {
 func (r *report) problem(where, msg string) {
 	r.problems++
 	fmt.Fprintf(r.out, "%s: error: %s\n", where, msg)
+}
+
+func (r *report) warning(where, msg string) {
+	fmt.Fprintf(r.out, "%s: warning: %s\n", where, msg)
 }
 
 func (r *report) note(msg string) { fmt.Fprintf(r.out, "%s\n", msg) }

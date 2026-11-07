@@ -217,7 +217,7 @@ func parseKeys(v string) (map[string][]byte, string, error) {
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
-	c := config{addr: "127.0.0.1:8080", adminAddr: "127.0.0.1:8081", poll: 2 * time.Second}
+	c := config{addr: "127.0.0.1:8080", adminAddr: "127.0.0.1:8081", poll: defaultPolicyPoll}
 	if v := getenv("TOOLGATE_ADDR"); v != "" {
 		c.addr = v
 	}

@@ -449,6 +449,31 @@ than on some document.
   clients hammer an HTTP handler, no request fails and no client sees a
   generation go backwards.
 
+### The sections
+
+Each subcommand defines its section next to the code that runs it
+(`serve.Section`, `gateway.Section`, `mcp.Section`), and `checkcmd.Schema`
+puts the three together for `authz check -config`.
+
+- *serve* holds the `GRANTD_*` settings by their `AUTHZ_SERVE_*` names:
+  `addr`, `data_dir`, `api_keys` and `token_key` (secrets), `cache_size`,
+  `retention`, `log_level`, `audit_log`. Its checks are the ones
+  `authz check -serve` applies to the environment.
+- *mcp* holds the `TOOLGATE_*` settings by their `AUTHZ_MCP_*` names, which
+  are already the gateway's second spelling of each variable, so
+  `AUTHZ_MCP_ADDR` means the same thing whether or not a file is used.
+  `admin_token`, `audit_key` and `signing_keys` are secrets. The check reads
+  the agents config and the policy the section names, as the gateway does
+  when it starts, and builds the authenticator from the config and the
+  signing keys.
+- *gateway* holds the `WICKET_*` settings (`cookie_keys` and `admin_token`
+  are secrets) and, inline, every member of a wicket file, so a wicket file
+  moves into the section unchanged. The wicket members are written back out
+  as a wicket document and checked by `check.Bytes`, the code behind
+  `authz gateway check`, offline or with `-online`; its paths are moved
+  under `$.gateway`, and the platform locates them in the file. A test keeps
+  the section's members in step with `config.Config`.
+
 ## One log handler (internal/platform/logging)
 
 Every subcommand logs JSON lines through log/slog. `internal/platform/logging`
