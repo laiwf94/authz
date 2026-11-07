@@ -62,7 +62,10 @@ hex='^[0-9a-f]{64}$'
 [[ "$(run "$AUTHZ_IMAGE" gateway genkey)" =~ $hex ]] || fail "authz gateway genkey"
 [[ "$(run "$GATEWAY_IMAGE" genkey)" =~ $hex ]] || fail "gateway image genkey"
 ok "genkey prints a 256-bit key as wicket, authz gateway and the gateway image"
-run --entrypoint /wicket "$AUTHZ_IMAGE" gensigningkey | grep -q -- '-----BEGIN' || fail "wicket gensigningkey"
+# The whole output first: grep -q stops reading at the first match, and the
+# key's remaining lines would then hit a closed pipe (#233).
+pem=$(run --entrypoint /wicket "$AUTHZ_IMAGE" gensigningkey) || fail "wicket gensigningkey exited non-zero"
+[[ "$pem" == *'-----BEGIN '* ]] || fail "wicket gensigningkey"
 ok "wicket gensigningkey prints a PEM key"
 help=$(run --entrypoint /wicket "$AUTHZ_IMAGE" -h 2>&1) || fail "wicket -h exited non-zero"
 [[ "$(head -1 <<<"$help")" == "usage: wicket" ]] || fail "wicket -h: $(head -1 <<<"$help")"
