@@ -5,95 +5,38 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
 
-// maxBuckets bounds the limiter's memory. When full, idle buckets are
-// dropped; if that is not enough, the oldest half goes.
+// maxBuckets bounds the limiter's memory. When full, buckets that have
+// refilled are dropped; if that is not enough, the half closest to full goes.
 const maxBuckets = 100_000
 
 // rateLimiter is a token bucket per client address: rate requests per
-// minute, bursting up to rate.
+// minute, bursting up to rate. The buckets are the platform's GCRA limiter
+// (internal/platform/ratelimit).
 type rateLimiter struct {
-	rate  float64 // tokens per second
+	limit ratelimit.Limit
 	burst float64
-	now   func() time.Time
-
-	mu      sync.Mutex
-	buckets map[string]*bucket
-}
-
-type bucket struct {
-	tokens float64
-	last   time.Time
+	lim   *ratelimit.Limiter
 }
 
 func newRateLimiter(perMinute int, now func() time.Time) *rateLimiter {
-	return &rateLimiter{rate: float64(perMinute) / 60, burst: float64(perMinute), now: now, buckets: map[string]*bucket{}}
+	return &rateLimiter{limit: ratelimit.PerMinute(perMinute), burst: float64(perMinute),
+		lim: ratelimit.New(ratelimit.Options{Now: now, MaxKeys: maxBuckets})}
 }
 
 // allow takes one token for key. When none is left it returns how long
 // until the next one.
 func (l *rateLimiter) allow(key string) (time.Duration, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := l.now()
-	b := l.buckets[key]
-	if b == nil {
-		if len(l.buckets) >= maxBuckets {
-			l.evictLocked(now)
-		}
-		b = &bucket{tokens: l.burst, last: now}
-		l.buckets[key] = b
-	}
-	// A clock that steps backwards must not drain the bucket.
-	if now.After(b.last) {
-		b.tokens = min(l.burst, b.tokens+now.Sub(b.last).Seconds()*l.rate)
-		b.last = now
-	}
-	if b.tokens < 1 {
-		return time.Duration((1 - b.tokens) / l.rate * float64(time.Second)), false
-	}
-	b.tokens--
-	return 0, true
+	ok, wait := l.lim.Take(key, l.limit)
+	return wait, ok
 }
 
 // sweep drops buckets that have refilled completely; they hold no state.
-func (l *rateLimiter) sweep() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.sweepLocked(l.now())
-}
-
-func (l *rateLimiter) sweepLocked(now time.Time) {
-	for k, b := range l.buckets {
-		if b.tokens+now.Sub(b.last).Seconds()*l.rate >= l.burst {
-			delete(l.buckets, k)
-		}
-	}
-}
-
-func (l *rateLimiter) evictLocked(now time.Time) {
-	l.sweepLocked(now)
-	if len(l.buckets) < maxBuckets {
-		return
-	}
-	cutoff := now
-	for _, b := range l.buckets {
-		if b.last.Before(cutoff) {
-			cutoff = b.last
-		}
-	}
-	// Still full of active clients: forget the less recent half rather than
-	// grow. A forgotten client just starts again with a full bucket.
-	mid := cutoff.Add(now.Sub(cutoff) / 2)
-	for k, b := range l.buckets {
-		if !b.last.After(mid) {
-			delete(l.buckets, k)
-		}
-	}
-}
+func (l *rateLimiter) sweep() { l.lim.Sweep() }
 
 // clientIP returns the client address. X-Forwarded-For is read right to
 // left and believed only while the hop that added an entry is a trusted

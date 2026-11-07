@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/metrics"
+	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
 
 // Request limits.
@@ -61,6 +63,12 @@ type Config struct {
 	// should be opened with audit.Default() schemas. The server does not
 	// close it.
 	Audit *audit.Log
+	// KeyLimit is the request rate allowed per API key, enforced with the
+	// platform limiter; requests over it get 429 with Retry-After. A zero
+	// Rate (the default) means no limit.
+	KeyLimit ratelimit.Limit
+	// Now is the limiter's clock; nil means time.Now.
+	Now func() time.Time
 }
 
 // Server is the HTTP API.
@@ -70,6 +78,9 @@ type Server struct {
 	tokens  *token.Issuer
 	keys    [][sha256.Size]byte
 	keyIDs  []string // fingerprints of keys, for audit actors
+	keyLim  *ratelimit.Limiter
+	limKeys []string // limiter key per API key
+	limit   ratelimit.Limit
 	audit   *audit.Log
 	log     *slog.Logger
 	m       *metrics.Registry
@@ -91,7 +102,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("api: at least one API key is required")
 	}
 	s := &Server{st: cfg.Store, tokens: cfg.Tokens, log: cfg.Logger, m: cfg.Metrics,
-		quantum: cfg.Quantum, timeout: cfg.Timeout, audit: cfg.Audit}
+		quantum: cfg.Quantum, timeout: cfg.Timeout, audit: cfg.Audit, limit: cfg.KeyLimit}
 	for _, k := range cfg.APIKeys {
 		if len(k) < MinKeyLength {
 			return nil, fmt.Errorf("api: API keys must be at least %d characters", MinKeyLength)
@@ -99,6 +110,10 @@ func New(cfg Config) (*Server, error) {
 		sum := sha256.Sum256([]byte(k))
 		s.keys = append(s.keys, sum)
 		s.keyIDs = append(s.keyIDs, KeyID(k))
+		s.limKeys = append(s.limKeys, ratelimit.Key("api_key", KeyID(k)))
+	}
+	if !cfg.KeyLimit.Unlimited() {
+		s.keyLim = ratelimit.New(ratelimit.Options{Now: cfg.Now, MaxKeys: len(s.keys)})
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -222,6 +237,14 @@ func (s *Server) route(pattern string, h handler, auth bool) {
 				sw.Header().Set("WWW-Authenticate", `Bearer realm="grantd"`)
 				writeError(sw, r, http.StatusUnauthorized, "unauthenticated", "missing or invalid API key")
 				return
+			}
+			if s.keyLim != nil {
+				if ok, wait := s.keyLim.Take(s.limKeys[k], s.limit); !ok {
+					sw.Header().Set("Retry-After", strconv.FormatInt(int64(math.Ceil(min(wait.Seconds(), 86400))), 10))
+					s.m.Counter("grantd_rate_limited_total", "", "Requests refused by the per-key rate limit.").Inc()
+					writeError(sw, r, http.StatusTooManyRequests, "resource_exhausted", "API key rate limit exceeded; retry later")
+					return
+				}
 			}
 			r = r.WithContext(context.WithValue(r.Context(), actorKey, s.keyIDs[k]))
 		}

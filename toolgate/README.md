@@ -316,7 +316,8 @@ internal/agents/jsonrpc        strict JSON-RPC 2.0 decoding and encoding
 internal/agents/policy         policy parsing, evaluation, hot reload, test cases
 internal/agents/schema         the argument-constraint schema subset
 internal/agents/identity       static keys and signed tokens
-internal/agents/ratelimit      GCRA buckets, daily quotas, upstream concurrency
+internal/agents/ratelimit      daily quotas, upstream concurrency, the platform buckets
+internal/platform/ratelimit    the platform's GCRA limiter (shared)
 internal/agents/approval       human approval requests and single-use grants
 internal/agents/pins           tool definition pinning and quarantine
 internal/agents/guard          output redaction, truncation and audit previews

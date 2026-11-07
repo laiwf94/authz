@@ -634,7 +634,7 @@ func TestRateLimiter(t *testing.T) {
 	}
 	c.Advance(2 * time.Minute)
 	l.sweep()
-	if len(l.buckets) != 0 {
+	if l.lim.Len() != 0 {
 		t.Fatal("sweep keeps full buckets")
 	}
 }
@@ -643,7 +643,7 @@ func TestRateLimiter(t *testing.T) {
 // microseconds ago and holds the given number of tokens.
 func fillBuckets(l *rateLimiter, now time.Time, tokens float64) {
 	for i := 0; i < maxBuckets; i++ {
-		l.buckets[strconv.Itoa(i)] = &bucket{tokens: tokens, last: now.Add(-time.Duration(i) * time.Microsecond)}
+		l.lim.Set(strconv.Itoa(i), l.limit, tokens, now.Add(-time.Duration(i)*time.Microsecond))
 	}
 }
 
@@ -651,14 +651,14 @@ func TestRateLimiterEvictsIdleBuckets(t *testing.T) {
 	c := &clock{t: time.Unix(1000, 0)}
 	l := newRateLimiter(60, c.Now)
 	fillBuckets(l, c.Now(), l.burst)
-	if len(l.buckets) != maxBuckets {
-		t.Fatalf("filled %d buckets, want %d", len(l.buckets), maxBuckets)
+	if l.lim.Len() != maxBuckets {
+		t.Fatalf("filled %d buckets, want %d", l.lim.Len(), maxBuckets)
 	}
 	if _, ok := l.allow("new"); !ok {
 		t.Fatal("new client refused")
 	}
-	if len(l.buckets) != 1 {
-		t.Fatalf("idle buckets kept: %d", len(l.buckets))
+	if l.lim.Len() != 1 {
+		t.Fatalf("idle buckets kept: %d", l.lim.Len())
 	}
 }
 
@@ -669,16 +669,16 @@ func TestRateLimiterEvictsOldestHalfWhenAllActive(t *testing.T) {
 	if _, ok := l.allow("new"); !ok {
 		t.Fatal("new client refused")
 	}
-	if n := len(l.buckets); n >= maxBuckets || n < maxBuckets/2 {
+	if n := l.lim.Len(); n >= maxBuckets || n < maxBuckets/2 {
 		t.Fatalf("after eviction: %d buckets", n)
 	}
-	if _, ok := l.buckets["0"]; !ok {
+	if _, ok := l.lim.Tokens("0", l.limit); !ok {
 		t.Error("most recent client forgotten")
 	}
-	if _, ok := l.buckets[strconv.Itoa(maxBuckets-1)]; ok {
+	if _, ok := l.lim.Tokens(strconv.Itoa(maxBuckets-1), l.limit); ok {
 		t.Error("oldest client kept")
 	}
-	if b := l.buckets["new"]; b == nil || b.tokens != l.burst-1 {
+	if b, ok := l.lim.Tokens("new", l.limit); !ok || b != l.burst-1 {
 		t.Errorf("new client bucket: %+v", b)
 	}
 }

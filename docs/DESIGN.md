@@ -185,6 +185,11 @@ the watch stream, like Zanzibar's Leopard index for nested groups.
   the server log only.
 - Request IDs from clients are accepted only if they match a safe pattern;
   otherwise a random one is generated.
+- `GRANTD_KEY_RATE` (requests per second) and `GRANTD_KEY_BURST` limit each
+  API key with the platform limiter (below). The limit is taken after the
+  key is recognised, so failed authentications and `/healthz` cost nothing;
+  a request over it gets 429 `resource_exhausted` with `Retry-After`, counted
+  in `grantd_rate_limited_total`. It is off by default.
 
 ## Beyond one node
 
@@ -581,3 +586,38 @@ can't express, so `scripts/testbody-merge.txt` pairs each of them with
 `internal/platform/metrics/metrics_test.go`. The test-body check compares
 each one with it in full. The suite-count steps map both old package paths
 to the new one.
+
+## One rate limiter (internal/platform/ratelimit)
+
+The gateway's per-agent and per-tool buckets, the sign-on gateway's
+per-client login limit and `authz serve`'s per-key limit are one GCRA
+limiter (week 2, #78). Each key stores only its theoretical arrival time
+(TAT) as an int64 of nanoseconds; with interval T = 1/rate and tolerance
+τ = T·(burst−1), a take at t is admitted when max(TAT, t) − t ≤ τ and moves
+TAT on by T. That is an exact token bucket with no floating-point refill.
+`TakeN` takes several tokens at once or none.
+
+- Keys come from `ratelimit.Key(dims...)`, which writes each dimension as its
+  length, a colon and its bytes. ("agent", "a", "tool") can never meet
+  ("agent", "a\x00tool"), as the gateway's old NUL-joined keys could have.
+- Time is measured from the limiter's creation, on Go's monotonic clock, so a
+  wall-clock step neither drains nor refills a bucket. An injected clock is
+  clamped to the latest time seen: wicket's limiter guarded against a step
+  back draining a bucket, toolgate's against one minting tokens, and both
+  tests pass against the one limiter.
+- Memory is bounded by `MaxKeys` (100,000 by default). A key whose TAT has
+  passed is a full bucket and is dropped by a sweep, which runs whenever the
+  table has doubled since the last one and on `Sweep`. When the table is
+  still full of live keys, the half with the earliest TAT, the ones closest
+  to full, is forgotten; a forgotten key starts again full, so those keys
+  lose the least. `Evicted` counts them.
+- `Set` and `Tokens` restore and read a bucket as tokens at a time, for
+  handing state over.
+
+toolgate's limiter tests run unchanged against it. wicket's three limiter
+tests read the old bucket map directly; ten lines now read the limiter
+through `Len`, `Set` and `Tokens` instead, with the same assertions, listed in
+scripts/testbody-allow.txt. A take on a held key costs about 95 ns with no
+allocations on a 4-core 2.1 GHz Xeon (190 ns across 4 goroutines on one
+mutex), and inserting new keys into a full table, sweeps and evictions
+included, about 470 ns.

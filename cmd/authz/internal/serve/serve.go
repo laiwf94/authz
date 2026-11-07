@@ -12,6 +12,10 @@
 //	GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
 //	GRANTD_AUDIT_LOG   the platform's hash-chained audit log for schema changes and
 //	                   relationship writes; empty keeps no audit log
+//	GRANTD_KEY_RATE    requests per second allowed per API key; 0 or empty (the
+//	                   default) sets no limit. Requests over it get 429 and Retry-After
+//	GRANTD_KEY_BURST   requests an API key may make at once above the rate
+//	                   (default: the rate rounded up, at least 1)
 package serve
 
 import (
@@ -22,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -34,6 +39,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/metrics"
+	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
 
 // Summary is the one-line description shown in "authz help".
@@ -54,6 +60,10 @@ It takes no flags; configuration comes from the environment, as grantd's did:
   GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
   GRANTD_AUDIT_LOG   hash-chained audit log of schema changes and relationship writes;
                      empty keeps none
+  GRANTD_KEY_RATE    requests per second allowed per API key; 0 or empty (the default)
+                     sets no limit. Requests over it get 429 and Retry-After
+  GRANTD_KEY_BURST   requests an API key may make at once above the rate
+                     (default: the rate rounded up, at least 1)
 
 Logs are JSON lines on standard output. SIGINT or SIGTERM drains requests
 and stops. "authz check -serve" validates this environment without starting.
@@ -121,6 +131,7 @@ type config struct {
 	retention store.Revision
 	logLevel  slog.Level
 	auditLog  string
+	keyLimit  ratelimit.Limit
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -165,6 +176,23 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if err := c.logLevel.UnmarshalText([]byte(v)); err != nil {
 			return c, fmt.Errorf("GRANTD_LOG_LEVEL: %v", err)
 		}
+	}
+	if v := getenv("GRANTD_KEY_RATE"); v != "" {
+		r, err := strconv.ParseFloat(v, 64)
+		if err != nil || r < 0 || math.IsInf(r, 0) || math.IsNaN(r) {
+			return c, errors.New("GRANTD_KEY_RATE must be a non-negative number of requests per second")
+		}
+		c.keyLimit = ratelimit.Limit{Rate: r, Burst: int(min(math.Ceil(r), math.MaxInt32))}
+	}
+	if v := getenv("GRANTD_KEY_BURST"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return c, errors.New("GRANTD_KEY_BURST must be a positive integer")
+		}
+		if c.keyLimit.Unlimited() {
+			return c, errors.New("GRANTD_KEY_BURST needs GRANTD_KEY_RATE")
+		}
+		c.keyLimit.Burst = n
 	}
 	return c, nil
 }
@@ -224,7 +252,7 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 	}
 
 	srv, err := api.New(api.Config{Store: st, Tokens: tokens, APIKeys: cfg.apiKeys, Logger: log,
-		Metrics: metrics.New(), CacheSize: cfg.cacheSize, Audit: auditLog})
+		Metrics: metrics.New(), CacheSize: cfg.cacheSize, Audit: auditLog, KeyLimit: cfg.keyLimit})
 	if err != nil {
 		return err
 	}

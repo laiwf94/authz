@@ -23,6 +23,7 @@ func registerTracks(r *Registry) {
 	r.Counter("grantd_http_requests_total", fmt.Sprintf(`route=%q,code="%d"`, "/v1/check", 400), "HTTP requests.").Inc()
 	r.Counter("grantd_audit_failures_total", "", "Audit records that could not be written.").Add(0)
 	r.Counter("grantd_audit_records_total", fmt.Sprintf("event=%q", "relationships.write"), "Audit records written.").Add(3)
+	r.Counter("grantd_rate_limited_total", "", "Requests refused by the per-key rate limit.").Add(1)
 	h := r.Histogram("grantd_check_duration_seconds", "", "Time to evaluate one check.")
 	for _, d := range []time.Duration{40 * time.Microsecond, 120 * time.Microsecond, 2 * ms, 3 * time.Second} {
 		h.Observe(d)

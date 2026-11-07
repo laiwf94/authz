@@ -48,6 +48,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/ratelimit"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/metrics"
+	platformlimit "github.com/laiwf94/authz/internal/platform/ratelimit"
 )
 
 // Version is reported as serverInfo.version.
@@ -243,7 +244,7 @@ func (g *Gateway) Authenticate(r *http.Request) (any, string, error) {
 		g.log.Warn("authentication failed", "request_id", httpx.RequestID(r.Context()), "reason", err.Error())
 		return nil, "", mcp.NewError(http.StatusUnauthorized, mcp.CodeUnauthenticated, "missing or invalid credential")
 	}
-	if ok, wait := g.limiter.Take("agent\x00"+id.AgentID, g.limitsFor(id.AgentID).agent()); !ok {
+	if ok, wait := g.limiter.Take(platformlimit.Key("agent", id.AgentID), g.limitsFor(id.AgentID).agent()); !ok {
 		g.count("toolgate_rate_limited_total", `scope="agent"`, "Requests refused by a rate limit.")
 		return nil, "", &mcp.Error{RPC: jsonrpc.NewError(mcp.CodeRateLimited, "rate limit exceeded for agent %s", id.AgentID).
 			WithData(map[string]any{"scope": "agent", "retry_after_ms": wait.Milliseconds()}),
@@ -522,7 +523,7 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 		return refuse("invalid_arguments", rpcErr(http.StatusBadRequest, jsonrpc.CodeInvalidParams, nil, "%v", err))
 	}
 
-	if ok, wait := g.limiter.Take("tool\x00"+id.AgentID+"\x00"+name, lim.tool()); !ok {
+	if ok, wait := g.limiter.Take(platformlimit.Key("tool", id.AgentID, name), lim.tool()); !ok {
 		g.count("toolgate_rate_limited_total", `scope="tool"`, "Requests refused by a rate limit.")
 		e := rpcErr(http.StatusTooManyRequests, mcp.CodeRateLimited, map[string]any{"scope": "tool", "retry_after_ms": wait.Milliseconds()},
 			"rate limit exceeded for %s", name)

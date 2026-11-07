@@ -1,88 +1,29 @@
 // Package ratelimit provides the gateway's three admission controls: token
-// buckets (per agent and per agent+tool), a daily call quota per agent, and a
-// concurrency limit per upstream.
+// buckets (per agent and per agent+tool, from the platform limiter), a daily
+// call quota per agent, and a concurrency limit per upstream.
 package ratelimit
 
 import (
 	"context"
-	"math"
 	"sync"
 	"time"
+
+	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
 
 // Limit is a token bucket: Rate tokens per second, holding at most Burst.
 // A zero Rate means unlimited.
-type Limit struct {
-	Rate  float64
-	Burst int
-}
+type Limit = ratelimit.Limit
 
-// Limiter keeps one token bucket per key. It is safe for concurrent use.
-//
-// Buckets are implemented as GCRA (the generic cell rate algorithm of ITU-T
-// I.371): each key stores only its theoretical arrival time (TAT) in integer
-// nanoseconds. With emission interval T = 1/Rate and tolerance
-// tau = T*(Burst-1), a take at time t is admitted when max(TAT, t) - t <= tau,
-// and then TAT = max(TAT, t) + T. This is exactly a token bucket, with no
-// floating-point refill to drift.
-//
-// Memory is bounded: a key whose TAT has passed is a full bucket, equivalent
-// to no entry, so such entries are swept whenever the map has doubled in size
-// since the last sweep. Live keys are bounded by agents x tools.
-type Limiter struct {
-	mu      sync.Mutex
-	tat     map[string]int64
-	now     func() time.Time
-	sweepAt int
-}
+// Limiter keeps one token bucket per key: the platform's GCRA limiter
+// (internal/platform/ratelimit), with its bounded table and monotonic clock.
+// Keys are built with ratelimit.Key from the agent and tool.
+type Limiter = ratelimit.Limiter
 
-// NewLimiter returns an empty limiter. now may be nil for time.Now.
+// NewLimiter returns an empty limiter holding up to
+// ratelimit.DefaultMaxKeys buckets. now may be nil for time.Now.
 func NewLimiter(now func() time.Time) *Limiter {
-	if now == nil {
-		now = time.Now
-	}
-	return &Limiter{tat: map[string]int64{}, now: now, sweepAt: 1024}
-}
-
-// Take removes one token from key's bucket. When the bucket is empty it
-// returns false and how long until a token is available.
-func (l *Limiter) Take(key string, lim Limit) (bool, time.Duration) {
-	if lim.Rate <= 0 {
-		return true, 0
-	}
-	interval := int64(math.Round(float64(time.Second) / lim.Rate))
-	interval = max(interval, 1)
-	tau := interval * int64(max(lim.Burst, 1)-1)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := l.now().UnixNano()
-	tat, ok := l.tat[key]
-	if !ok && len(l.tat) >= l.sweepAt {
-		l.sweepLocked(now)
-	}
-	tat = max(tat, now)
-	if tat-now > tau {
-		return false, time.Duration(tat - now - tau)
-	}
-	l.tat[key] = tat + interval
-	return true, 0
-}
-
-// sweepLocked drops keys whose bucket has refilled completely.
-func (l *Limiter) sweepLocked(now int64) {
-	for k, tat := range l.tat {
-		if tat <= now {
-			delete(l.tat, k)
-		}
-	}
-	l.sweepAt = max(1024, 2*len(l.tat))
-}
-
-// Len returns the number of buckets held, for metrics and tests.
-func (l *Limiter) Len() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.tat)
+	return ratelimit.New(ratelimit.Options{Now: now})
 }
 
 // Quota counts calls per key per UTC day. It is safe for concurrent use.

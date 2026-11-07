@@ -3,7 +3,7 @@
 # path for a removed line (-) and the new path for an added one (+), TEXT is
 # the line without its indentation. Every entry must match exactly one
 # changed line; one that matches nothing fails the check. Each is also listed
-# in the week 1 issue (#74).
+# in the week 1 issue (#74), or in the issue of the week that changed it.
 
 # toolgate's examples stayed in toolgate/examples while its tests moved two
 # directories deeper (#75, c012175 and 0bcc6e8).
@@ -11,3 +11,27 @@ toolgate/internal/policy/cases_test.go - b, err := os.ReadFile(filepath.Join("..
 internal/agents/policy/cases_test.go + b, err := os.ReadFile(filepath.Join("..", "..", "..", "toolgate", "examples", name))
 toolgate/cmd/toolgate/main_test.go - pol, cases := filepath.Join("..", "..", "examples", "policy.json"), filepath.Join("..", "..", "examples", "policy_cases.json")
 cmd/authz/internal/mcp/mcp_test.go + pol, cases := filepath.Join("..", "..", "..", "..", "toolgate", "examples", "policy.json"), filepath.Join("..", "..", "..", "..", "toolgate", "examples", "policy_cases.json")
+
+# wicket's login limiter tests poke at its bucket map, which became the
+# platform GCRA limiter in week 2 (#78): the same assertions read the
+# limiter through Len, Set and Tokens instead of len(l.buckets) and *bucket.
+wicket/internal/server/server_test.go - if len(l.buckets) != 0 {
+internal/authn/server/server_test.go + if l.lim.Len() != 0 {
+wicket/internal/server/server_test.go - l.buckets[strconv.Itoa(i)] = &bucket{tokens: tokens, last: now.Add(-time.Duration(i) * time.Microsecond)}
+internal/authn/server/server_test.go + l.lim.Set(strconv.Itoa(i), l.limit, tokens, now.Add(-time.Duration(i)*time.Microsecond))
+wicket/internal/server/server_test.go - if len(l.buckets) != maxBuckets {
+wicket/internal/server/server_test.go - t.Fatalf("filled %d buckets, want %d", len(l.buckets), maxBuckets)
+internal/authn/server/server_test.go + if l.lim.Len() != maxBuckets {
+internal/authn/server/server_test.go + t.Fatalf("filled %d buckets, want %d", l.lim.Len(), maxBuckets)
+wicket/internal/server/server_test.go - if len(l.buckets) != 1 {
+wicket/internal/server/server_test.go - t.Fatalf("idle buckets kept: %d", len(l.buckets))
+internal/authn/server/server_test.go + if l.lim.Len() != 1 {
+internal/authn/server/server_test.go + t.Fatalf("idle buckets kept: %d", l.lim.Len())
+wicket/internal/server/server_test.go - if n := len(l.buckets); n >= maxBuckets || n < maxBuckets/2 {
+internal/authn/server/server_test.go + if n := l.lim.Len(); n >= maxBuckets || n < maxBuckets/2 {
+wicket/internal/server/server_test.go - if _, ok := l.buckets["0"]; !ok {
+internal/authn/server/server_test.go + if _, ok := l.lim.Tokens("0", l.limit); !ok {
+wicket/internal/server/server_test.go - if _, ok := l.buckets[strconv.Itoa(maxBuckets-1)]; ok {
+internal/authn/server/server_test.go + if _, ok := l.lim.Tokens(strconv.Itoa(maxBuckets-1), l.limit); ok {
+wicket/internal/server/server_test.go - if b := l.buckets["new"]; b == nil || b.tokens != l.burst-1 {
+internal/authn/server/server_test.go + if b, ok := l.lim.Tokens("new", l.limit); !ok || b != l.burst-1 {

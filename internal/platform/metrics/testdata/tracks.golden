@@ -16,6 +16,9 @@ grantd_http_requests_total{route="/metrics",code="200"} 30
 grantd_http_requests_total{route="/v1/check",code="200"} 10
 grantd_http_requests_total{route="/v1/check",code="400"} 1
 grantd_http_requests_total{route="/v1/relationships/write",code="200"} 20
+# HELP grantd_rate_limited_total Requests refused by the per-key rate limit.
+# TYPE grantd_rate_limited_total counter
+grantd_rate_limited_total 1
 # HELP mcpfake_http_requests_total HTTP requests.
 # TYPE mcpfake_http_requests_total counter
 mcpfake_http_requests_total{server="mcpfake",route="/mcp",code="200"} 1
