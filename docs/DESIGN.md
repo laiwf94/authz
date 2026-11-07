@@ -448,3 +448,57 @@ than on some document.
   rewrites the files in place, out of order and with garbage while eight
   clients hammer an HTTP handler, no request fails and no client sees a
   generation go backwards.
+
+## One log handler (internal/platform/logging)
+
+Every subcommand logs JSON lines through log/slog. `internal/platform/logging`
+(week 2, #78) is the one handler they move to. It wraps slog's JSON handler
+and adds three attributes at the top level of every record, outside any
+group the logger opened:
+
+- `subcommand`: set once when the handler is built (`serve`, `gateway`, `mcp`).
+- `correlation_id`: taken from the request context. `Middleware` sets it to
+  the trace ID of the request's W3C `traceparent` when that header is valid,
+  or to a new random trace ID when it isn't. The same value goes into the
+  audit envelope's `correlation_id`, and `Traceparent(id)` carries it to an
+  upstream with a fresh parent ID. So a log line, its audit record and the
+  upstream call share one ID.
+- `tenant`: taken from the context, or the handler's default. The default
+  tenant adds nothing.
+
+A key that the logger or the record already sets at the top level is not
+added again. If the handler has none of these values, it writes exactly the
+bytes slog's JSON handler writes. Moving a subcommand to it therefore changes
+no log line until the subcommand asks for one of the attributes.
+
+The level is an `slog.Leveler`, normally an `*slog.LevelVar`. It can be
+changed while the process runs in three ways:
+
+- `SetLevel` changes it directly.
+- `ReloadLevel` re-reads it each time a channel fires, such as on SIGHUP or a
+  config reload.
+- `LevelHandler` serves GET and PUT `{"level":"debug"}` for an admin API.
+
+Each change is logged at the higher of the old and new levels, so it shows
+whichever way the level moved.
+
+Secrets are redacted before encoding, at any depth:
+
+- a value of type `logging.Secret`, which `fmt` and `encoding/json` also print
+  as `[REDACTED]`;
+- an attribute whose key names a secret. The key is matched after
+  lowercasing it and turning `-` into `_`. It matches `password`, `token`,
+  `authorization`, `cookie`, `client_secret`, the OAuth token names, and any
+  key ending in `_token`, `_secret`, `_password` or `_api_key`. The list can
+  be extended per handler, and empty values are kept;
+- a struct field tagged `log:"secret"`. A struct holding one is written as a
+  group named the way encoding/json names its fields, with that field
+  redacted. A slice or map of such structs is redacted whole. Types that
+  render themselves (`error`, `json.Marshaler`) are left to their author.
+
+On the request line every subcommand writes (five attributes), slog's JSON
+handler takes about 1.1 µs and no allocations on a 4-core 2.1 GHz Xeon. This
+handler takes about 1.7 µs and no allocations with a subcommand and no
+context values. With a correlation ID and tenant it takes about 2.5 µs and
+2 allocations, because the record is rebuilt and never appended to. A
+disabled level costs 22 ns.
