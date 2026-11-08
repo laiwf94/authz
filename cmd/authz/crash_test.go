@@ -332,8 +332,24 @@ func TestMCPSurvivesSIGKILL(t *testing.T) {
 // leaveTornWrite appends the first half of a well-formed next record without
 // its newline, as a write cut short by power loss leaves it. The gateway must
 // cut it on start: it was never acknowledged.
+//
+// The kill may already have left one: Linux copies a write to a regular file
+// a page at a time and stops between pages once SIGKILL is pending, so an
+// append in flight can end partway (#236). That tear is the round's torn
+// write; everything before it must verify.
 func leaveTornWrite(t *testing.T, path string) {
 	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end := bytes.LastIndexByte(raw, '\n') + 1; end < len(raw) {
+		if _, err := audit.Verify(bytes.NewReader(raw[:end])); err != nil {
+			t.Fatalf("%s before the kill's torn write: %v", path, err)
+		}
+		t.Logf("the kill tore the last append: %d bytes after the last newline", len(raw)-end)
+		return
+	}
 	recs := readRecords(t, path)
 	last := recs[len(recs)-1]
 	line := fmt.Sprintf(`{"seq":%d,"time":"2026-11-03T00:00:00Z","prev":"%s","event":"tool_call","data":{"stage":"started"}}`,
@@ -399,4 +415,31 @@ func runMain(t *testing.T, args string, extraEnv ...string) (int, string) {
 		t.Fatal(err)
 	}
 	return 0, string(out)
+}
+
+// TestLeaveTornWrite: on a clean log the helper adds half a record; on one
+// a kill already tore, it keeps that tear and adds nothing (#236).
+func TestLeaveTornWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l, err := audit.Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if err := l.Append("tool_call", map[string]any{"n": i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l.Close()
+	clean, _ := os.ReadFile(path)
+	leaveTornWrite(t, path)
+	torn, _ := os.ReadFile(path)
+	if !bytes.HasPrefix(torn, clean) || len(torn) == len(clean) || torn[len(torn)-1] == '\n' {
+		t.Fatalf("clean log: no torn write added:\n%s", torn)
+	}
+	// A second call sees the tear and leaves the file as it is.
+	leaveTornWrite(t, path)
+	if again, _ := os.ReadFile(path); !bytes.Equal(again, torn) {
+		t.Fatalf("torn log changed:\n%s", again)
+	}
 }
