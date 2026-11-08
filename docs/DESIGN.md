@@ -534,6 +534,65 @@ context values. With a correlation ID and tenant it takes about 2.5 µs and
 2 allocations, because the record is rebuilt and never appended to. A
 disabled level costs 22 ns.
 
+### Secret scan
+
+Redaction only covers the values someone thought to mark. The secret scan
+(week 2, #78) checks the output instead: `logging.Scanner` looks for the
+shapes credentials take, and every test suite runs under it.
+
+The rules, each named in a finding:
+
+- `jwt`: a compact JWS or JWE whose header decodes to JSON with `alg` or `enc`.
+- `private_key`: a PEM private key block.
+- `jwk_private`: a JWK's private members (`d`, `p`, `q`, ..., `k`) next to a `kty`.
+- `auth_header`: `Bearer` credentials that look like a token (16 bytes or
+  more with a digit, or 24 or more, so SAML's "bearer confirmation" is not
+  one), and `Basic` credentials that decode to `user:password`.
+- `credential_param`: `password=`, `client_secret=`, `access_token=` and the
+  other credential names in a query string, form body or logfmt line.
+- `credential_field`: a JSON string member whose key the handler would
+  redact (the same key rules), unless its value is empty or `[REDACTED]`.
+- `url_password`: `scheme://user:password@host`.
+- `provider_key`: well-known provider key formats (GitHub, Slack, Stripe,
+  Google and model provider keys).
+- `known`: a value the test registered (`Known`), raw or base64, base64url,
+  hex, URL- or JSON-escaped.
+
+A finding reports the line, the rule and the first four bytes of a value of
+12 bytes or more with its length; a registered value is shown by its length
+only. A report never carries the secret. Scanning a 230-byte request line
+takes about 2 µs: each rule first checks for a substring it needs, and the
+two broadest (parameters and JSON members) are hand-written scanners, not
+regular expressions.
+
+The scan sees output in three ways:
+
+- **A process tap.** The handler writes through a writer that hands every
+  record, after redaction, to the functions registered with `logging.Watch`.
+  `internal/platform/audit` hands over every record it appends, under its
+  lock, so in chain order. With nothing registered this costs one atomic load
+  (about 2 ns, no allocations); no server registers anything.
+- **`logtest.Check(t)`**, the test hook. It watches the tap while the test
+  runs. `Writer` wraps a logger's writer that does not go through the
+  handler, `File` scans an audit file when the test ends, and `Known` adds
+  the test's own client secrets, cookie keys and API keys. Any finding fails
+  the test. The audit tests of the gateway, the authorization API and both
+  subcommands use it.
+- **The CI step "Secret scan"** runs every suite again built with
+  `-tags secretscan`. In that build, `logging` registers a watcher at start
+  that prints each finding to stderr as a `SECRET-SCAN:` line.
+  `scripts/secret-scan.go` reads `go test -json` and fails the test that
+  printed one, and it also scans all test output itself (`t.Log`, and
+  whatever the code under test writes to stdout and stderr). Findings that
+  are the point of a test are listed in `scripts/secretscan-allow.txt` as
+  package, test and rule; an entry that matches nothing fails the step. The
+  only entries are logtest's own tests, which leak on purpose.
+
+Today the tap covers what goes through the platform handler and the audit
+log. serve, gateway and mcp still log through their own slog handlers; once
+they move to the platform handler, their log lines come under the CI scan
+without any change to their tests.
+
 ## One metrics registry (internal/platform/metrics)
 
 grantd, wicket and toolgate each carried a copy of the same small registry

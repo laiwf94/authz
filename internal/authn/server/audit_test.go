@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/logging"
+	"github.com/laiwf94/authz/internal/platform/logging/logtest"
 )
 
 // withAudit gives h's server a hash-chained audit log in h.dir.
@@ -68,6 +70,8 @@ func TestAuditChain(t *testing.T) {
 	var cfg map[string]any
 	h := newHarness(t, harnessOpts{cfgMutate: func(c map[string]any) { cfg = c }})
 	path, _ := withAudit(t, h)
+	scan := logtest.Check(t).Known(clientSecret, string(h.cookieKey))
+	scan.File(path)
 
 	// A sign-in under a request ID the proxy chose.
 	alice := h.browser()
@@ -218,11 +222,16 @@ func TestAuditChain(t *testing.T) {
 		t.Errorf("logout_rejected: %+v", lr[0].Envelope)
 	}
 
-	// The audit log holds no cookie, client secret or cookie key.
+	// The audit log holds no cookie, client secret or cookie key, and
+	// neither does the gateway's log (logtest checks both when the test
+	// ends, and the audit log once more below).
 	raw, _ := os.ReadFile(path)
 	u, _ := url.Parse(h.public)
 	for _, b := range []*browser{alice, bob, carol, other} {
 		for _, c := range b.jar.Cookies(u) {
+			if len(c.Value) >= logging.MinKnownBytes {
+				scan.Known(c.Value)
+			}
 			if len(c.Value) >= 16 && bytes.Contains(raw, []byte(c.Value)) {
 				t.Errorf("audit log contains cookie %s", c.Name)
 			}
@@ -234,6 +243,7 @@ func TestAuditChain(t *testing.T) {
 	if bytes.Contains(raw, []byte(hex.EncodeToString(h.cookieKey))) || bytes.Contains(raw, h.cookieKey) {
 		t.Error("audit log contains the cookie key")
 	}
+	scan.Bytes("gateway log", []byte(h.logs.String()))
 
 	// The log line wicket wrote is still there, unchanged in shape.
 	h.expectAudit("login_succeeded", "")

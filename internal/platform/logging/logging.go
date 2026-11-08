@@ -13,6 +13,12 @@
 // they are encoded: any Secret, attributes whose keys name a secret
 // (DefaultSecretKeys and Options.SecretKeys) and struct fields tagged
 // `log:"secret"`, at any depth.
+//
+// Scan and Scanner find keys, tokens and passwords that got through anyway.
+// Every record a Handler writes, and every record the audit log appends, is
+// handed to the Watchers registered with Watch, which is how the tests and
+// the secretscan build check all log and audit output (see the logtest
+// package and docs/DESIGN.md, "Secret scan").
 package logging
 
 import (
@@ -85,7 +91,7 @@ func New(w io.Writer, opts Options) *Handler {
 		}
 		return a
 	}
-	var base slog.Handler = slog.NewJSONHandler(w, &slog.HandlerOptions{
+	var base slog.Handler = slog.NewJSONHandler(observed{w}, &slog.HandlerOptions{
 		Level:       opts.Level,
 		AddSource:   opts.AddSource,
 		ReplaceAttr: replace,

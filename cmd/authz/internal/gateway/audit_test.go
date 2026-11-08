@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/logging/logtest"
 )
 
 // TestRunAuditLog: WICKET_AUDIT_LOG gives the gateway a hash-chained audit
@@ -19,6 +20,9 @@ func TestRunAuditLog(t *testing.T) {
 	path := filepath.Join(dir, "audit.log")
 	e := map[string]string{"WICKET_CONFIG": writeConfig(t, dir), "WICKET_COOKIE_KEYS": cookieKey, "CORP_SECRET": "s",
 		"WICKET_ADDR": "127.0.0.1:0", "WICKET_ADMIN_ADDR": "127.0.0.1:0", "WICKET_AUDIT_LOG": path}
+	// Neither the logs nor the audit records may carry the cookie key.
+	scan := logtest.Check(t).Known(cookieKey)
+	scan.File(path)
 	if s, err := loadSettings(env(e)); err != nil || s.auditLog != path {
 		t.Fatalf("settings: %+v %v", s, err)
 	}
@@ -26,7 +30,8 @@ func TestRunAuditLog(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		addrs := make(chan [2]string, 1)
 		done := make(chan error, 1)
-		go func() { done <- run(ctx, env(e), &syncBuf{}, nil, func(p, a string) { addrs <- [2]string{p, a} }) }()
+		logs := scan.Writer(&syncBuf{})
+		go func() { done <- run(ctx, env(e), logs, nil, func(p, a string) { addrs <- [2]string{p, a} }) }()
 		var a [2]string
 		select {
 		case a = <-addrs:

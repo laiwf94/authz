@@ -39,6 +39,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/laiwf94/authz/internal/platform/logging"
 )
 
 // MaxLineBytes bounds one record.
@@ -208,6 +210,8 @@ func (l *Log) AppendWith(event string, env Envelope, data any) error {
 	l.head = hex.EncodeToString(sum[:])
 	l.size += int64(len(line)) + 1
 	end := l.size
+	// Under the lock, so watchers see records in chain order.
+	logging.Observe(logging.SourceAudit, line)
 	l.mu.Unlock()
 	return l.syncTo(end)
 }

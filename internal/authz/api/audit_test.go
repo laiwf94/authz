@@ -18,6 +18,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/logging/logtest"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
@@ -125,6 +126,9 @@ func TestKeyID(t *testing.T) {
 // write nothing.
 func TestAuditSchemaAndWrites(t *testing.T) {
 	h := newAuditHarness(t)
+	scan := logtest.Check(t).Known(apiKey, secondKey)
+	scan.File(h.path)
+	defer func() { scan.Bytes("serve log", []byte(h.logs.String())) }()
 	code, out := h.do("PUT", "/v1/schema", apiKey, "req-schema-1", map[string]string{"schema": schemaSrc})
 	if code != 200 {
 		t.Fatalf("schema: %d %v", code, out)

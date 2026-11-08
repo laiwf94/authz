@@ -11,6 +11,7 @@ import (
 
 	"github.com/laiwf94/authz/internal/authz/api"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/logging/logtest"
 )
 
 // TestRunAuditLog: GRANTD_AUDIT_LOG gives authz serve a hash-chained audit
@@ -18,6 +19,9 @@ import (
 func TestRunAuditLog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.log")
 	const apiKey = "integration-key-0123"
+	// Neither the log nor the audit records may carry the key.
+	scan := logtest.Check(t).Known(apiKey)
+	scan.File(path)
 	e := map[string]string{"GRANTD_ADDR": "127.0.0.1:0", "GRANTD_API_KEYS": apiKey, "GRANTD_AUDIT_LOG": path}
 	if c, err := loadConfig(env(e)); err != nil || c.auditLog != path {
 		t.Fatalf("config: %+v %v", c, err)
@@ -26,7 +30,8 @@ func TestRunAuditLog(t *testing.T) {
 	defer cancel()
 	addrs := make(chan string, 1)
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, env(e), &bytes.Buffer{}, func(a string) { addrs <- a }) }()
+	logs := scan.Writer(&bytes.Buffer{})
+	go func() { done <- run(ctx, env(e), logs, func(a string) { addrs <- a }) }()
 	var addr string
 	select {
 	case addr = <-addrs:

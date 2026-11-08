@@ -47,6 +47,17 @@ jobs:
             -group authn=$m/internal/authn,$m/internal/platform/jose,$m/internal/platform/seal,$m/internal/platform/config,$m/cmd/authz/internal/gateway,$m/cmd/authz/internal/fakeidp,$m/examples/whoami \
             -group agents=$m/internal/agents,$m/cmd/authz/internal/mcp,$m/cmd/authz/internal/mcpfake \
             coverage.out
+      # Every suite again, built with -tags secretscan: each log line and
+      # audit record written through internal/platform/logging and
+      # internal/platform/audit is scanned in the test process, and so is
+      # all test output. A key, token or password fails the test that wrote
+      # it unless scripts/secretscan-allow.txt lists it (#78).
+      - name: Secret scan
+        shell: bash
+        run: |
+          set -o pipefail
+          go vet -tags secretscan ./internal/platform/logging/...
+          go test -tags secretscan -count=1 -json ./... | go run scripts/secret-scan.go -allow scripts/secretscan-allow.txt
       - name: Fuzz (short)
         run: |
           go test ./internal/authz/schema -run=^$ -fuzz=FuzzParse -fuzztime=30s
@@ -68,6 +79,7 @@ jobs:
           go test ./internal/agents/identity -run=^$ -fuzz=FuzzAuthenticate -fuzztime=20s
           go test ./internal/platform/audit -run=^$ -fuzz=FuzzVerify -fuzztime=20s
           go test ./internal/platform/logging -run=^$ -fuzz=FuzzParseTraceparent -fuzztime=20s
+          go test ./internal/platform/logging -run=^$ -fuzz=FuzzScan -fuzztime=20s
       # Every test, subtest and fuzz seed the wicket suite ran before the
       # move must still pass: internal/authn/testdata/wicket-suite.txt.
       # cmd/wicket and cmd/fakeidp are now authz gateway and authz fakeidp,
