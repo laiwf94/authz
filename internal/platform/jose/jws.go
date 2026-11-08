@@ -100,7 +100,13 @@ func Parse(s string) (*Token, error) {
 	return t, nil
 }
 
+// b64 decodes one canonical unpadded base64url string. Strict refuses
+// non-zero padding bits but, like every Go base64 decoder, skips CR and LF,
+// which would let two different strings decode to one signature (#237).
 func b64(s string) ([]byte, error) {
+	if strings.ContainsAny(s, "\r\n") {
+		return nil, errors.New("line break in base64url")
+	}
 	return base64.RawURLEncoding.Strict().DecodeString(s)
 }
 

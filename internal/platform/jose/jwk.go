@@ -187,7 +187,7 @@ func parseJWK(b []byte) (Key, bool, error) {
 }
 
 func decodeBigInt(s string) (*big.Int, error) {
-	b, err := base64.RawURLEncoding.Strict().DecodeString(s)
+	b, err := b64(s)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +201,7 @@ func decodeBigInt(s string) (*big.Int, error) {
 }
 
 func decodeFixed(s string, size int) ([]byte, error) {
-	b, err := base64.RawURLEncoding.Strict().DecodeString(s)
+	b, err := b64(s)
 	if err != nil {
 		return nil, err
 	}

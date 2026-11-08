@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 )
 
@@ -129,7 +130,9 @@ func (kr *Keyring) Seal(purpose string, plaintext []byte) string {
 // Open reverses Seal. The purpose must match the one used to seal, so a
 // value sealed for one cookie can't be replayed as another.
 func (kr *Keyring) Open(purpose, s string) ([]byte, error) {
-	if len(s) > MaxEncoded {
+	// The decoder skips CR and LF even in strict mode; refusing them keeps
+	// one sealed value to one string (#237).
+	if len(s) > MaxEncoded || strings.ContainsAny(s, "\r\n") {
 		return nil, ErrInvalid
 	}
 	b, err := base64.RawURLEncoding.Strict().DecodeString(s)
