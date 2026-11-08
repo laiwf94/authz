@@ -62,8 +62,16 @@ The main image (the root `Dockerfile`) contains the same binary, so
   `WICKET_LOG_LEVEL`. `authz gateway -h` describes each one. One variable
   is new and optional: `WICKET_AUDIT_LOG` names a file for the platform's
   hash-chained audit log, which then also receives every audit event as a
-  typed record (see "One audit log" in docs/DESIGN.md). Without it the
-  gateway behaves exactly as wicket did.
+  typed record (see "One audit log" in docs/DESIGN.md). Five more are new
+  and optional, the same for every subcommand (see "One HTTP server" in
+  docs/DESIGN.md): `WICKET_TLS_CERT` and `WICKET_TLS_KEY` serve both
+  listeners over TLS 1.2 or later, reloading renewed files without a
+  restart; `WICKET_TLS_CLIENT_CA` requires client certificates;
+  `WICKET_DRAIN_DELAY` keeps accepting requests for a while after
+  `SIGTERM` while the admin listener's `/readyz` answers 503; and
+  `WICKET_DRAIN_TIMEOUT` (default 20s, as before) bounds how long
+  in-flight requests may finish. Without them the gateway behaves exactly
+  as wicket did.
 - **The endpoints, cookies and headers** are the same. That includes the
   `__Host-wicket` cookie, so signed-in users stay signed in across the
   upgrade, and sessions in an existing `WICKET_SESSION_FILE` are kept.

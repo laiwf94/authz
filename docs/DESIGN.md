@@ -621,3 +621,52 @@ scripts/testbody-allow.txt. A take on a held key costs about 95 ns with no
 allocations on a 4-core 2.1 GHz Xeon (190 ns across 4 goroutines on one
 mutex), and inserting new keys into a full table, sweeps and evictions
 included, about 470 ns.
+
+## One HTTP server (internal/platform/httpserver)
+
+`authz serve`, `authz gateway` and `authz mcp` each built their own
+`http.Server`, with their own timeouts and their own shutdown. Since week 2
+(#77) each describes its listeners as `httpserver.Spec`s, and one
+`httpserver.Group` binds them, serves them and drains them together.
+
+- **Limits.** Every listener gets the same defaults: 5 s to read the
+  headers, 15 s to read the request, 30 s to write the response, 120 s idle
+  and 16 KiB of headers. A listener overrides only what it must, and the
+  overrides are the values each subcommand already had: `authz serve`
+  writes for the longest watch poll plus 15 s, the sign-on gateway's public
+  listener allows 45 s and 32 KiB of headers (large cookies), and the agent
+  gateway allows 6 minutes, the worst case for one tool call at the
+  configuration maximums.
+- **TLS.** `<PREFIX>TLS_CERT` and `<PREFIX>TLS_KEY` (`GRANTD_`, `WICKET_`,
+  `TOOLGATE_` or `AUTHZ_MCP_`) serve every listener of the subcommand over
+  TLS 1.2 or later with Go's default cipher suites and key exchanges (only
+  forward-secret AEAD suites; the hybrid post-quantum group first) and
+  HTTP/2. The files are checked for a renewal at most every 10 s during
+  handshakes and reloaded when their modification times change, so a
+  renewed certificate needs no restart; a renewal that fails to load (a new
+  certificate with the old key, half-way through a rotation) keeps the
+  certificate in use until both files match. `<PREFIX>TLS_CLIENT_CA`
+  requires client certificates signed by those CAs. Without the variables
+  the listeners serve plain HTTP, as before.
+- **Readiness.** A Spec may name a readiness path. `authz serve` keeps its
+  own `/readyz`, which reports the log's health; the two gateways get
+  `/readyz` on their admin listeners. Once shutdown begins the group
+  answers that path with 503 `{"status":"draining"}` itself.
+- **Bounded drain.** On SIGINT or SIGTERM the group flips readiness and
+  turns keep-alives off, so each client's next request opens a new
+  connection a load balancer can route elsewhere. For `<PREFIX>DRAIN_DELAY`
+  (default 0) the listeners keep accepting, so requests sent before the load
+  balancer saw the probe still land. Then the listeners close and in-flight
+  requests finish, for at most `<PREFIX>DRAIN_TIMEOUT` (default 20 s, the
+  bound every subcommand had). Requests still running at the bound have
+  their connections closed, and the subcommand exits 1 saying how many.
+- **One failure stops the group.** If any listener fails, the others close
+  and the subcommand exits with that error, as each subcommand did.
+
+The startup and shutdown log lines are unchanged, so the golden replays of
+all three subcommands still match byte for byte. The package's tests cover
+the limits (431 for oversized headers, a slow client cut at the header
+timeout), the probe before and during a drain, a request in flight across
+the drain, the bound, a listener failing during the delay, certificate
+renewal and a failed renewal, and mutual TLS; each subcommand has a test
+that serves over TLS, sees `/readyz` turn 503 on shutdown and stops cleanly.

@@ -14,6 +14,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/gateway"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
+	"github.com/laiwf94/authz/internal/platform/httpserver"
 )
 
 // SectionName is the name of the mcp section of the platform configuration
@@ -53,6 +54,17 @@ type Settings struct {
 	PolicyPoll pcfg.Duration `json:"policy_poll"`
 	// LogLevel is TOOLGATE_LOG_LEVEL.
 	LogLevel string `json:"log_level"`
+	// TLSCert and TLSKey are TOOLGATE_TLS_CERT and TOOLGATE_TLS_KEY: PEM
+	// files both listeners serve TLS with. Empty serves plain HTTP.
+	TLSCert string `json:"tls_cert"`
+	TLSKey  string `json:"tls_key"`
+	// TLSClientCA is TOOLGATE_TLS_CLIENT_CA: CAs client certificates must
+	// chain to.
+	TLSClientCA string `json:"tls_client_ca"`
+	// DrainDelay is TOOLGATE_DRAIN_DELAY.
+	DrainDelay pcfg.Duration `json:"drain_delay"`
+	// DrainTimeout is TOOLGATE_DRAIN_TIMEOUT.
+	DrainTimeout pcfg.Duration `json:"drain_timeout"`
 }
 
 // Section describes the mcp section with toolgate's defaults and the rules
@@ -70,6 +82,7 @@ func defaultSettings(s *Settings) {
 	s.AdminAddr = "127.0.0.1:8081"
 	s.PolicyPoll = pcfg.Duration(defaultPolicyPoll)
 	s.LogLevel = "info"
+	s.DrainTimeout = pcfg.Duration(httpserver.DefaultDrainTimeout)
 }
 
 func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
@@ -145,6 +158,29 @@ func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
 	}
 	if err := new(slog.Level).UnmarshalText([]byte(s.LogLevel)); err != nil {
 		c.Errorf(c.Field("log_level"), "%q is not debug, info, warn or error", s.LogLevel)
+	}
+	checkHTTP(s, c)
+}
+
+// checkHTTP applies the rules httpserver.FromEnv and httpserver.Listen
+// apply to the TLS and drain settings, loading the TLS files.
+func checkHTTP(s *Settings, c *pcfg.Checker) {
+	switch {
+	case s.TLSCert != "" && s.TLSKey != "":
+		f := httpserver.TLSFiles{CertFile: s.TLSCert, KeyFile: s.TLSKey, ClientCAFile: s.TLSClientCA}
+		if err := f.Check(); err != nil {
+			c.Errorf(c.Field("tls_cert"), "%s", strings.TrimPrefix(err.Error(), "httpserver: "))
+		}
+	case s.TLSCert != "" || s.TLSKey != "":
+		c.Errorf(c.Field("tls_cert"), "tls_cert and tls_key must be set together")
+	case s.TLSClientCA != "":
+		c.Errorf(c.Field("tls_client_ca"), "needs tls_cert and tls_key")
+	}
+	if time.Duration(s.DrainDelay) > time.Hour {
+		c.Errorf(c.Field("drain_delay"), "must be at most 1h")
+	}
+	if d := time.Duration(s.DrainTimeout); d == 0 || d > time.Hour {
+		c.Errorf(c.Field("drain_timeout"), "must be more than 0s and at most 1h")
 	}
 }
 

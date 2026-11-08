@@ -155,6 +155,13 @@ func TestSectionProblems(t *testing.T) {
 		"bad log level":    {map[string]any{"log_level": "loud"}, goodEnviron, upstreamEnv, "$.mcp.log_level", `"loud" is not debug`},
 		"bad policy poll":  {nil, append(goodEnviron, "AUTHZ_MCP_POLICY_POLL=soon"), upstreamEnv, "$.mcp.policy_poll", "invalid duration"},
 		"policy poll file": {map[string]any{"policy_poll": "-1s"}, goodEnviron, upstreamEnv, "$.mcp.policy_poll", "invalid duration"},
+		"cert alone":       {map[string]any{"tls_cert": file}, goodEnviron, upstreamEnv, "$.mcp.tls_cert", "must be set together"},
+		"key alone":        {nil, append(goodEnviron, "AUTHZ_MCP_TLS_KEY="+file), upstreamEnv, "$.mcp.tls_cert", "must be set together"},
+		"unloadable tls":   {map[string]any{"tls_cert": file, "tls_key": file}, goodEnviron, upstreamEnv, "$.mcp.tls_cert", "tls: "},
+		"missing tls":      {map[string]any{"tls_cert": file + "x", "tls_key": file}, goodEnviron, upstreamEnv, "$.mcp.tls_cert", "certificate: "},
+		"client CA alone":  {map[string]any{"tls_client_ca": file}, goodEnviron, upstreamEnv, "$.mcp.tls_client_ca", "needs tls_cert and tls_key"},
+		"long drain delay": {map[string]any{"drain_delay": "2h"}, goodEnviron, upstreamEnv, "$.mcp.drain_delay", "at most 1h"},
+		"zero drain":       {nil, append(goodEnviron, "AUTHZ_MCP_DRAIN_TIMEOUT=0s"), upstreamEnv, "$.mcp.drain_timeout", "more than 0s"},
 	}
 	for name, c := range cases {
 		r := mcpSchema(t, c.getenv).Check(goodSection(t, c.extra), c.environ)

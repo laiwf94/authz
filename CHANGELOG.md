@@ -36,6 +36,16 @@ link the roadmap issue they come from.
   and test-count checks of the move, govulncheck, and a golden replay of
   grantd's recorded end-to-end transcript and README demo through
   `authz serve`, including a restart on a data directory grantd wrote.
+- **One HTTP server setup for every subcommand**
+  ([#77](https://github.com/laiwf94/authz/issues/77)). `authz serve`,
+  `authz gateway` and `authz mcp` share listener setup, timeouts, header
+  limits and shutdown. New optional variables, under each subcommand's
+  prefix (`GRANTD_`, `WICKET_`, `TOOLGATE_`/`AUTHZ_MCP_`): `TLS_CERT` and
+  `TLS_KEY` serve TLS 1.2+ and HTTP/2 with certificate renewal picked up
+  without a restart, `TLS_CLIENT_CA` requires client certificates,
+  `DRAIN_DELAY` keeps accepting after SIGTERM while `/readyz` answers 503,
+  and `DRAIN_TIMEOUT` (default 20s) bounds the drain. Both gateways now
+  answer `/readyz` on their admin listener.
 
 ### Sign-on (authn)
 

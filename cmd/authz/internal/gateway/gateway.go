@@ -26,6 +26,12 @@
 //	WICKET_LOG_LEVEL        debug, info, warn or error (default info)
 //	WICKET_AUDIT_LOG        the platform's hash-chained audit log; empty writes audit
 //	                        events to the JSON log only
+//	WICKET_TLS_CERT         PEM certificate chain; with WICKET_TLS_KEY both listeners serve
+//	WICKET_TLS_KEY          TLS 1.2+ and pick up renewed files without a restart
+//	WICKET_TLS_CLIENT_CA    PEM CAs; when set, clients must present a certificate one signed
+//	WICKET_DRAIN_DELAY      after SIGTERM, how long the admin /readyz answers 503 while
+//	                        requests are still accepted (default 0s)
+//	WICKET_DRAIN_TIMEOUT    how long in-flight requests may then finish (default 20s)
 //
 // The configuration is reloaded on SIGHUP or POST /admin/reload.
 package gateway
@@ -43,7 +49,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -56,6 +61,7 @@ import (
 	"github.com/laiwf94/authz/internal/authn/server"
 	"github.com/laiwf94/authz/internal/authn/session"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/jose"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/seal"
@@ -90,6 +96,12 @@ else comes from the environment:
   WICKET_LOGIN_RATE       login requests per minute per client address (default 30)
   WICKET_LOG_LEVEL        debug, info, warn or error (default info)
   WICKET_AUDIT_LOG        hash-chained audit log file; empty writes audit events to the log only
+  WICKET_TLS_CERT         PEM certificate chain; with WICKET_TLS_KEY both listeners serve
+  WICKET_TLS_KEY          TLS 1.2+ and pick up renewed files without a restart
+  WICKET_TLS_CLIENT_CA    PEM CAs; when set, clients must present a certificate one signed
+  WICKET_DRAIN_DELAY      after SIGTERM, how long the admin /readyz answers 503 while
+                          requests are still accepted (default 0s)
+  WICKET_DRAIN_TIMEOUT    how long in-flight requests may then finish (default 20s)
 
 Logs are JSON lines on standard output. SIGHUP or POST /admin/reload reloads
 the configuration; SIGINT or SIGTERM drains requests and stops. Exit codes:
@@ -171,6 +183,7 @@ type settings struct {
 	trusted     []netip.Prefix
 	loginRate   int
 	logLevel    slog.Level
+	http        httpserver.Options // WICKET_TLS_* and WICKET_DRAIN_*
 }
 
 func loadSettings(getenv func(string) string) (settings, error) {
@@ -233,6 +246,10 @@ func loadSettings(getenv func(string) string) (settings, error) {
 		if err := s.logLevel.UnmarshalText([]byte(v)); err != nil {
 			return s, fmt.Errorf("WICKET_LOG_LEVEL: %v", err)
 		}
+	}
+	var err error
+	if s.http, err = httpserver.FromEnv(getenv, "WICKET_"); err != nil {
+		return s, err
 	}
 	return s, nil
 }
@@ -342,34 +359,28 @@ func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hu
 		return err
 	}
 
-	pub := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
-		WriteTimeout: 45 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
-	adm := &http.Server{Handler: srv.AdminHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
-		WriteTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 16 << 10}
-	pln, err := net.Listen("tcp", st.addr)
+	g, err := httpserver.Listen(st.http,
+		httpserver.Spec{Name: "public", Addr: st.addr, Handler: srv.Handler(),
+			Limits: httpserver.Limits{WriteTimeout: 45 * time.Second, MaxHeaderBytes: 32 << 10}},
+		httpserver.Spec{Name: "admin", Addr: st.adminAddr, Handler: srv.AdminHandler(), ReadyPath: "/readyz"})
 	if err != nil {
 		return err
 	}
-	aln, err := net.Listen("tcp", st.adminAddr)
-	if err != nil {
-		pln.Close()
-		return err
-	}
-	log.Info("listening", "addr", pln.Addr().String(), "admin_addr", aln.Addr().String(),
+	addrs := g.Addrs()
+	log.Info("listening", "addr", addrs[0], "admin_addr", addrs[1],
 		"persistent_sessions", st.sessionFile != "", "sessions", sessions.Len())
 	if ready != nil {
-		ready(pln.Addr().String(), aln.Addr().String())
+		ready(addrs[0], addrs[1])
 	}
-	errc := make(chan error, 2)
-	go func() { errc <- pub.Serve(pln) }()
-	go func() { errc <- adm.Serve(aln) }()
+	sctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	done := make(chan error, 1)
+	go func() { done <- g.Serve(sctx) }()
 	sweep := time.NewTicker(time.Minute)
 	defer sweep.Stop()
 	for {
 		select {
-		case err := <-errc:
-			pub.Close()
-			adm.Close()
+		case err := <-done:
 			return err
 		case <-hup:
 			if err := srv.Reload(ctx); err != nil {
@@ -379,11 +390,8 @@ func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hu
 			srv.Sweep()
 		case <-ctx.Done():
 			log.Info("shutting down")
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			err1 := pub.Shutdown(shutdownCtx)
-			err2 := adm.Shutdown(shutdownCtx)
-			return errors.Join(err1, err2)
+			stop()
+			return <-done
 		}
 	}
 }

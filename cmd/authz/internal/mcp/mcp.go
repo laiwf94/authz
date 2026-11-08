@@ -26,6 +26,11 @@
 //	TOOLGATE_ALLOWED_ORIGINS  AUTHZ_MCP_ALLOWED_ORIGINS  comma-separated browser origins allowed to call /mcp (default none)
 //	TOOLGATE_POLICY_POLL      AUTHZ_MCP_POLICY_POLL      how often to check the policy file (default "2s"; "0" disables; SIGHUP always reloads)
 //	TOOLGATE_LOG_LEVEL        AUTHZ_MCP_LOG_LEVEL        debug, info, warn or error (default info)
+//	TOOLGATE_TLS_CERT         AUTHZ_MCP_TLS_CERT         PEM certificate chain; with the key, both listeners serve TLS 1.2+ and pick up renewed files
+//	TOOLGATE_TLS_KEY          AUTHZ_MCP_TLS_KEY          PEM private key for TOOLGATE_TLS_CERT
+//	TOOLGATE_TLS_CLIENT_CA    AUTHZ_MCP_TLS_CLIENT_CA    PEM CAs; when set, clients must present a certificate one signed
+//	TOOLGATE_DRAIN_DELAY      AUTHZ_MCP_DRAIN_DELAY      after SIGTERM, how long the admin /readyz answers 503 while requests are still accepted (default 0s)
+//	TOOLGATE_DRAIN_TIMEOUT    AUTHZ_MCP_DRAIN_TIMEOUT    how long in-flight calls may then finish (default 20s)
 //
 // Upstream credentials are read from the environment variables the config
 // names in credential_env, exactly as named.
@@ -44,8 +49,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -58,6 +61,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/pins"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
@@ -86,6 +90,13 @@ error:
   TOOLGATE_ALLOWED_ORIGINS  AUTHZ_MCP_ALLOWED_ORIGINS  browser origins allowed to call /mcp (default none)
   TOOLGATE_POLICY_POLL      AUTHZ_MCP_POLICY_POLL      policy file check interval (default "2s"; "0" disables)
   TOOLGATE_LOG_LEVEL        AUTHZ_MCP_LOG_LEVEL        debug, info, warn or error (default info)
+  TOOLGATE_TLS_CERT         AUTHZ_MCP_TLS_CERT         PEM certificate chain; with the key, both listeners
+                                                       serve TLS 1.2+ and pick up renewed files
+  TOOLGATE_TLS_KEY          AUTHZ_MCP_TLS_KEY          PEM private key for the certificate
+  TOOLGATE_TLS_CLIENT_CA    AUTHZ_MCP_TLS_CLIENT_CA    PEM CAs; clients must present a certificate one signed
+  TOOLGATE_DRAIN_DELAY      AUTHZ_MCP_DRAIN_DELAY      after SIGTERM, how long the admin /readyz answers 503
+                                                       while requests are still accepted (default 0s)
+  TOOLGATE_DRAIN_TIMEOUT    AUTHZ_MCP_DRAIN_TIMEOUT    how long in-flight calls may then finish (default 20s)
 
 Logs are JSON lines on standard output. SIGHUP reloads the policy; SIGINT or
 SIGTERM drains requests and stops. Exit codes: 0 success, 1 failure (a failed
@@ -182,6 +193,7 @@ type config struct {
 	origins         []string
 	poll            time.Duration
 	logLevel        slog.Level
+	http            httpserver.Options // TOOLGATE_TLS_* and TOOLGATE_DRAIN_*
 }
 
 func required(getenv func(string) string, name string) (string, error) {
@@ -271,6 +283,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return c, fmt.Errorf("TOOLGATE_LOG_LEVEL: %v", err)
 		}
 	}
+	if c.http, err = httpserver.FromEnv(getenv, legacyPrefix); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 
@@ -330,23 +345,22 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 	}
 	defer gw.Close()
 
-	servers := []*http.Server{newServer(gw.Handler()), newServer(gw.AdminHandler(cfg.adminToken))}
-	listeners := make([]net.Listener, 0, 2)
-	for _, addr := range []string{cfg.addr, cfg.adminAddr} {
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			for _, l := range listeners {
-				l.Close()
-			}
-			return err
-		}
-		listeners = append(listeners, ln)
+	// Longer than the worst case for one call: a tool-list refresh (120 s)
+	// plus an approval wait (60 s), a slot wait (1 s) and the call itself
+	// (120 s), at the configuration maximums.
+	lim := httpserver.Limits{WriteTimeout: 6 * time.Minute, MaxHeaderBytes: 32 << 10}
+	g, err := httpserver.Listen(cfg.http,
+		httpserver.Spec{Name: "agent", Addr: cfg.addr, Handler: gw.Handler(), Limits: lim},
+		httpserver.Spec{Name: "admin", Addr: cfg.adminAddr, Handler: gw.AdminHandler(cfg.adminToken), Limits: lim, ReadyPath: "/readyz"})
+	if err != nil {
+		return err
 	}
+	addrs := g.Addrs()
 	n, head := auditLog.Head()
-	log.Info("listening", "addr", listeners[0].Addr().String(), "admin_addr", listeners[1].Addr().String(),
+	log.Info("listening", "addr", addrs[0], "admin_addr", addrs[1],
 		"policy", pol.Current().Hash, "audit_records", n, "audit_head", head, "upstreams", len(gc.Upstreams))
 	if ready != nil {
-		ready(listeners[0].Addr().String(), listeners[1].Addr().String())
+		ready(addrs[0], addrs[1])
 	}
 
 	bg, cancelBG := context.WithCancel(ctx)
@@ -382,40 +396,19 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 		}
 	}()
 
-	errc := make(chan error, len(servers))
-	for i, s := range servers {
-		go func() { errc <- s.Serve(listeners[i]) }()
-	}
+	sctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	done := make(chan error, 1)
+	go func() { done <- g.Serve(sctx) }()
 	select {
-	case err = <-errc:
+	case err = <-done:
+		log.Info("shutting down")
+		return err
 	case <-ctx.Done():
 	}
 	log.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	for _, s := range servers {
-		if serr := s.Shutdown(shutdownCtx); serr != nil && err == nil {
-			err = serr
-		}
-	}
-	if errors.Is(err, http.ErrServerClosed) {
-		err = nil
-	}
-	return err
-}
-
-func newServer(h http.Handler) *http.Server {
-	return &http.Server{
-		Handler:           h,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		// Longer than the worst case for one call: a tool-list refresh (120 s)
-		// plus an approval wait (60 s), a slot wait (1 s) and the call itself
-		// (120 s), at the configuration maximums.
-		WriteTimeout:   6 * time.Minute,
-		IdleTimeout:    120 * time.Second,
-		MaxHeaderBytes: 32 << 10,
-	}
+	stop()
+	return <-done
 }
 
 func auditVerify(prog string, args []string, stdout, stderr io.Writer) int {

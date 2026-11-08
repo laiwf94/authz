@@ -16,6 +16,12 @@
 //	                   default) sets no limit. Requests over it get 429 and Retry-After
 //	GRANTD_KEY_BURST   requests an API key may make at once above the rate
 //	                   (default: the rate rounded up, at least 1)
+//	GRANTD_TLS_CERT    PEM certificate chain; with GRANTD_TLS_KEY the API serves TLS 1.2+
+//	GRANTD_TLS_KEY     and picks up renewed files without a restart
+//	GRANTD_TLS_CLIENT_CA PEM CAs; when set, clients must present a certificate one signed
+//	GRANTD_DRAIN_DELAY after SIGTERM, how long /readyz answers 503 while requests are
+//	                   still accepted (default 0s)
+//	GRANTD_DRAIN_TIMEOUT how long in-flight requests may finish after that (default 20s)
 package serve
 
 import (
@@ -28,7 +34,6 @@ import (
 	"log/slog"
 	"math"
 	"net"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -38,6 +43,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
@@ -64,6 +70,12 @@ It takes no flags; configuration comes from the environment, as grantd's did:
                      sets no limit. Requests over it get 429 and Retry-After
   GRANTD_KEY_BURST   requests an API key may make at once above the rate
                      (default: the rate rounded up, at least 1)
+  GRANTD_TLS_CERT    PEM certificate chain; with GRANTD_TLS_KEY the API serves TLS 1.2+
+  GRANTD_TLS_KEY     and picks up renewed files without a restart
+  GRANTD_TLS_CLIENT_CA  PEM CAs; when set, clients must present a certificate one signed
+  GRANTD_DRAIN_DELAY    after SIGTERM, how long /readyz answers 503 while requests
+                        are still accepted (default 0s)
+  GRANTD_DRAIN_TIMEOUT  how long in-flight requests may then finish (default 20s)
 
 Logs are JSON lines on standard output. SIGINT or SIGTERM drains requests
 and stops. "authz check -serve" validates this environment without starting.
@@ -118,6 +130,11 @@ func Check(getenv func(string) string) []error {
 			errs = append(errs, fmt.Errorf("GRANTD_DATA_DIR: %v", err))
 		}
 	}
+	if cfg.http.TLS != nil {
+		if err := cfg.http.TLS.Check(); err != nil {
+			errs = append(errs, fmt.Errorf("GRANTD_TLS_CERT, GRANTD_TLS_KEY: %v", err))
+		}
+	}
 	return errs
 }
 
@@ -132,6 +149,7 @@ type config struct {
 	logLevel  slog.Level
 	auditLog  string
 	keyLimit  ratelimit.Limit
+	http      httpserver.Options // GRANTD_TLS_* and GRANTD_DRAIN_*
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -193,6 +211,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return c, errors.New("GRANTD_KEY_BURST needs GRANTD_KEY_RATE")
 		}
 		c.keyLimit.Burst = n
+	}
+	var err error
+	if c.http, err = httpserver.FromEnv(getenv, "GRANTD_"); err != nil {
+		return c, err
 	}
 	return c, nil
 }
@@ -256,33 +278,35 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 	if err != nil {
 		return err
 	}
-	hs := &http.Server{
-		Addr:              cfg.addr,
-		Handler:           srv,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      api.MaxWatchWait + 15*time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    16 << 10,
-	}
-
-	ln, err := net.Listen("tcp", cfg.addr)
+	g, err := httpserver.Listen(cfg.http, httpserver.Spec{
+		Name:    "api",
+		Addr:    cfg.addr,
+		Handler: srv,
+		// Long enough for the longest watch poll.
+		Limits: httpserver.Limits{WriteTimeout: api.MaxWatchWait + 15*time.Second},
+		// The API answers /readyz itself (with the log's health) until
+		// SIGTERM; from then on the group answers 503.
+		ReadyPath: "/readyz",
+		Ready:     srv,
+	})
 	if err != nil {
 		return err
 	}
-	log.Info("listening", "addr", ln.Addr().String(), "persistent", cfg.dataDir != "", "revision", uint64(st.Head()))
+	addr := g.Addrs()[0]
+	log.Info("listening", "addr", addr, "persistent", cfg.dataDir != "", "revision", uint64(st.Head()))
 	if ready != nil {
-		ready(ln.Addr().String())
+		ready(addr)
 	}
-	errc := make(chan error, 1)
-	go func() { errc <- hs.Serve(ln) }()
+	sctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	done := make(chan error, 1)
+	go func() { done <- g.Serve(sctx) }()
 	select {
-	case err := <-errc:
+	case err := <-done:
 		return err
 	case <-ctx.Done():
 	}
 	log.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	return hs.Shutdown(shutdownCtx)
+	stop()
+	return <-done
 }
