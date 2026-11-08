@@ -80,8 +80,8 @@ func TestSectionHoldsWicketFile(t *testing.T) {
 		}
 	}
 	// The section's other members are the WICKET_ variables.
-	if n := len(ours) - len(members(reflect.TypeFor[config.Config]())); n != 10 {
-		t.Errorf("%d members besides wicket's file, want the 10 WICKET_ settings", n)
+	if n := len(ours) - len(members(reflect.TypeFor[config.Config]())); n != 15 {
+		t.Errorf("%d members besides wicket's file, want the 15 WICKET_ settings", n)
 	}
 }
 

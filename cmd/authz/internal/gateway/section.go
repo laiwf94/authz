@@ -8,11 +8,13 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"time"
 
 	"github.com/laiwf94/authz/internal/authn/check"
 	"github.com/laiwf94/authz/internal/authn/config"
 	"github.com/laiwf94/authz/internal/authn/server"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
+	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/seal"
 )
 
@@ -50,6 +52,17 @@ type Settings struct {
 	LogLevel string `json:"log_level"`
 	// AuditLog is WICKET_AUDIT_LOG.
 	AuditLog string `json:"audit_log"`
+	// TLSCert and TLSKey are WICKET_TLS_CERT and WICKET_TLS_KEY: PEM files
+	// both listeners serve TLS with. Empty serves plain HTTP.
+	TLSCert string `json:"tls_cert"`
+	TLSKey  string `json:"tls_key"`
+	// TLSClientCA is WICKET_TLS_CLIENT_CA: PEM CAs client certificates must
+	// chain to.
+	TLSClientCA string `json:"tls_client_ca"`
+	// DrainDelay is WICKET_DRAIN_DELAY.
+	DrainDelay pcfg.Duration `json:"drain_delay"`
+	// DrainTimeout is WICKET_DRAIN_TIMEOUT.
+	DrainTimeout pcfg.Duration `json:"drain_timeout"`
 
 	// The members of wicket's file (WICKET_CONFIG), checked by wicket's
 	// own rules.
@@ -124,6 +137,7 @@ func defaultSettings(s *Settings) {
 	s.TrustedProxies = []string{"127.0.0.0/8", "::1/128"}
 	s.LoginRate = server.DefaultLoginRate
 	s.LogLevel = "info"
+	s.DrainTimeout = pcfg.Duration(httpserver.DefaultDrainTimeout)
 }
 
 func checkSettings(o SectionOptions, s *Settings, c *pcfg.Checker) {
@@ -177,6 +191,8 @@ func checkSettings(o SectionOptions, s *Settings, c *pcfg.Checker) {
 		c.Errorf(c.Field("log_level"), "%q is not debug, info, warn or error", s.LogLevel)
 	}
 
+	checkHTTP(s, c)
+
 	// Wicket's own checks, offline or online, with their paths moved under
 	// the section: $.providers[0].issuer is $.gateway.providers[0].issuer.
 	r := check.Bytes(o.Context, s.File(), o.Check)
@@ -188,6 +204,35 @@ func checkSettings(o SectionOptions, s *Settings, c *pcfg.Checker) {
 			c.Errorf(path, "%s", p.Message)
 		}
 	}
+}
+
+// checkHTTP applies the rules httpserver.FromEnv and httpserver.Listen
+// apply to the WICKET_TLS_* and WICKET_DRAIN_* settings, loading the TLS
+// files.
+func checkHTTP(s *Settings, c *pcfg.Checker) {
+	switch {
+	case s.TLSCert != "" && s.TLSKey != "":
+		if err := s.tlsFiles().Check(); err != nil {
+			c.Errorf(c.Field("tls_cert"), "%s", strings.TrimPrefix(err.Error(), "httpserver: "))
+		}
+	case s.TLSCert != "" || s.TLSKey != "":
+		c.Errorf(c.Field("tls_cert"), "tls_cert and tls_key must be set together")
+	case s.TLSClientCA != "":
+		c.Errorf(c.Field("tls_client_ca"), "needs tls_cert and tls_key")
+	}
+	if time.Duration(s.DrainDelay) > time.Hour {
+		c.Errorf(c.Field("drain_delay"), "must be at most 1h")
+	}
+	if d := time.Duration(s.DrainTimeout); d == 0 || d > time.Hour {
+		c.Errorf(c.Field("drain_timeout"), "must be more than 0s and at most 1h")
+	}
+}
+
+func (s *Settings) tlsFiles() *httpserver.TLSFiles {
+	if s.TLSCert == "" || s.TLSKey == "" {
+		return nil
+	}
+	return &httpserver.TLSFiles{CertFile: s.TLSCert, KeyFile: s.TLSKey, ClientCAFile: s.TLSClientCA}
 }
 
 // blankSecret reports a secret set directly, by an environment override,

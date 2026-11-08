@@ -107,8 +107,10 @@ file of relationships against a schema before you load it, and
 `authz check -config authz.json` validates the platform configuration file
 (its `serve`, `gateway` and `mcp` sections, see
 [docs/DESIGN.md](docs/DESIGN.md#one-configuration-file-internalplatformconfig)),
-and `authz serve -config authz.json` starts from its serve section, applying
-API key and log level changes while it runs.
+`authz serve -config authz.json` starts from its serve section, applying
+API key and log level changes while it runs, and `authz gateway -config
+authz.json` from its gateway section, applying cookie key, provider, app and
+log level changes while it runs.
 
 Nothing changes for an existing grantd deployment: the same variables, data
 directory (`grantd.wal`), tokens, endpoints, error codes, metric names and

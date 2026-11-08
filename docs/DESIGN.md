@@ -511,8 +511,44 @@ replaced, rewritten in place and the configuration broken and fixed, no
 request fails (about 60,000 requests in the test), and a key file change
 applies about a second after it is written.
 
-`authz gateway` and `authz mcp` start from their sections the same way in
-the next tasks of #76.
+`authz gateway -config file` (or `AUTHZ_CONFIG=file`) starts the sign-on
+gateway from the gateway section the same way, with serve and mcp skipped;
+without either, the `WICKET_*` variables and the wicket file `WICKET_CONFIG`
+names work exactly as before, and with a file they are ignored, with a
+warning naming them. The section gains `tls_cert`, `tls_key`,
+`tls_client_ca`, `drain_delay` and `drain_timeout` for the `WICKET_TLS_*`
+and `WICKET_DRAIN_*` variables, so every variable `authz gateway -h`
+documents has a member (a test reads the help to keep it so), and a test
+compares the settings the section starts with to those the same values as
+variables give.
+
+The gateway's reload has two halves:
+
+- `cookie_keys` and `log_level` apply inside the watcher's poll.
+  `seal.Keyring.Rotate` swaps the key list behind an atomic pointer, so a
+  cookie is sealed or opened with one whole list; the ring the handlers
+  hold stays the same object. A key listed twice is refused by the ring
+  and so by the watcher.
+- The wicket members (`public_url`, `session`, `providers`, `apps` and the
+  rest) are rebuilt by `server.Reload`, the code SIGHUP and
+  `POST /admin/reload` already ran: the poll wakes the serve loop, which
+  calls it, and the server's `Load` returns the section the watcher holds,
+  written out as a wicket document. SIGHUP and `POST /admin/reload` poll
+  the files first, so they pick up a change at once and report a refused
+  one; a change such a reload finds is built once, not again by the serve
+  loop. Files the wicket members name (`client_secret_file`, `ca_file`, SAML
+  metadata and keys) are read on every rebuild, as before.
+
+The reload is logged with the members applied (`cookie_keys`,
+`log_level` and each wicket member that changed) and those that wait for a
+restart: the listeners, `admin_token`, `session_file`, `signing_keys`,
+`trusted_proxies`, `login_rate`, `audit_log`, TLS and drain. Under eight
+clients sending forward-auth requests with a cookie sealed by a key every
+version lists, while the keys rotate, an app changes and the key file and
+the document are broken and fixed, no request fails (about 74,000 requests
+in the test), and a key or app change applies within about a second.
+
+`authz mcp` starts from its section the same way in the next task of #76.
 
 ## One log handler (internal/platform/logging)
 

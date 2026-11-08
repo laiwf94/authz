@@ -110,6 +110,17 @@ link the roadmap issue they come from.
   refused, and other members are logged as applying on restart. Without a
   file the `GRANTD_*` variables work as before; with one they are ignored,
   and the log names them.
+- **`authz gateway -config file`** ([#76](https://github.com/laiwf94/authz/issues/76)),
+  or `AUTHZ_CONFIG=file`, starts the sign-on gateway from the gateway
+  section, which gains the TLS and drain settings, with the serve and mcp
+  sections skipped. While it runs, a change to `cookie_keys` (new key first
+  to rotate, then drop the old one) or `log_level` applies within about a
+  second, providers, apps and the other wicket members are rebuilt, and
+  SIGHUP or `POST /admin/reload` read the file at once. An invalid change
+  is logged and refused with no failed requests; members such as the
+  listeners and signing keys are logged as applying on restart. Without a
+  file the `WICKET_*` variables and wicket files work as before; with one
+  they are ignored, and the log names them.
 
 ### Agent gateway (agents)
 

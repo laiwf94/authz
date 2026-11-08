@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync/atomic"
 )
 
 // Sizes and limits of the sealed format.
@@ -36,17 +37,43 @@ type key struct {
 	aead cipher.AEAD
 }
 
-// Keyring holds the keys. It is safe for concurrent use.
+// Keyring holds the keys. It is safe for concurrent use, including
+// Rotate while values are sealed and opened.
 type Keyring struct {
-	keys []key
+	keys atomic.Pointer[[]key]
 }
 
 // New builds a key ring. keys[0] seals; all keys open. Each key is 32 bytes.
 func New(keys [][]byte) (*Keyring, error) {
+	ks, err := build(keys)
+	if err != nil {
+		return nil, err
+	}
+	kr := &Keyring{}
+	kr.keys.Store(&ks)
+	return kr, nil
+}
+
+// Rotate replaces the keys in place, with New's rules: keys[0] seals from
+// now on and all of them open. Each Seal and Open uses one whole key list,
+// the old or the new. On an error the keys in use are kept.
+func (kr *Keyring) Rotate(keys [][]byte) error {
+	ks, err := build(keys)
+	if err != nil {
+		return err
+	}
+	kr.keys.Store(&ks)
+	return nil
+}
+
+// Len returns the number of keys in the ring.
+func (kr *Keyring) Len() int { return len(*kr.keys.Load()) }
+
+func build(keys [][]byte) ([]key, error) {
 	if len(keys) == 0 || len(keys) > maxKeys {
 		return nil, fmt.Errorf("seal: need 1 to %d keys, got %d", maxKeys, len(keys))
 	}
-	kr := &Keyring{}
+	out := make([]key, 0, len(keys))
 	seen := map[[kidSize]byte]bool{}
 	for i, k := range keys {
 		if len(k) != KeySize {
@@ -68,9 +95,9 @@ func New(keys [][]byte) (*Keyring, error) {
 			return nil, fmt.Errorf("seal: key %d is a duplicate", i)
 		}
 		seen[id] = true
-		kr.keys = append(kr.keys, key{id: id, aead: aead})
+		out = append(out, key{id: id, aead: aead})
 	}
-	return kr, nil
+	return out, nil
 }
 
 // RandomKey returns a new random 32-byte key.
@@ -90,7 +117,7 @@ func (kr *Keyring) Seal(purpose string, plaintext []byte) string {
 	if len(purpose) == 0 || len(purpose) > maxPurpose {
 		panic("seal: purpose must be 1-64 bytes")
 	}
-	k := kr.keys[0]
+	k := (*kr.keys.Load())[0]
 	out := make([]byte, headerBytes+nonceSize, overhead+len(plaintext))
 	out[0] = version
 	copy(out[1:headerBytes], k.id[:])
@@ -109,7 +136,7 @@ func (kr *Keyring) Open(purpose, s string) ([]byte, error) {
 	if err != nil || len(b) < overhead || b[0] != version {
 		return nil, ErrInvalid
 	}
-	for _, k := range kr.keys {
+	for _, k := range *kr.keys.Load() {
 		if [kidSize]byte(b[1:headerBytes]) != k.id {
 			continue
 		}

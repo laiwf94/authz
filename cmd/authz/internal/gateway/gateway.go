@@ -2,7 +2,7 @@
 // that was the wicket command. Its subcommands, environment variables,
 // config file, endpoints, cookies and exit codes are wicket's, unchanged:
 //
-//	authz gateway                          run the gateway (configured from the environment)
+//	authz gateway [-config file]           run the gateway (configured from a platform file or the environment)
 //	authz gateway check [-online] [file]   validate a configuration without starting the gateway
 //	authz gateway genkey                   print a new cookie key
 //	authz gateway gensigningkey            print a new P-256 signing key in PEM
@@ -34,6 +34,14 @@
 //	WICKET_DRAIN_TIMEOUT    how long in-flight requests may then finish (default 20s)
 //
 // The configuration is reloaded on SIGHUP or POST /admin/reload.
+//
+// With -config file (or AUTHZ_CONFIG), the gateway starts from the gateway
+// section of the platform configuration file instead, with the serve and
+// mcp sections skipped, and the WICKET_ variables are ignored. The file and
+// the secret files it names are watched: cookie_keys and log_level apply
+// at once, providers, apps and the other wicket members are rebuilt within
+// seconds, and an invalid change is refused with the running configuration
+// kept.
 package gateway
 
 import (
@@ -45,6 +53,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -61,6 +70,7 @@ import (
 	"github.com/laiwf94/authz/internal/authn/server"
 	"github.com/laiwf94/authz/internal/authn/session"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/jose"
 	"github.com/laiwf94/authz/internal/platform/metrics"
@@ -75,6 +85,7 @@ const Summary = "run the single sign-on gateway (formerly wicket), check its con
 const LegacyName = "wicket"
 
 const usageText = `usage: %[1]s
+       %[1]s -config file
        %[1]s check [-online] [-timeout 10s] [config.json]
        %[1]s genkey | gensigningkey
 
@@ -83,6 +94,17 @@ validates a configuration without starting it, "genkey" prints a new cookie
 key and "gensigningkey" a new P-256 signing key in PEM. Apps and identity
 providers are described in the JSON file named by WICKET_CONFIG; everything
 else comes from the environment:
+
+  -config file            start from the gateway section of the platform
+                          configuration file instead (default: $AUTHZ_CONFIG);
+                          every member can be overridden by its AUTHZ_GATEWAY_
+                          variable and the WICKET_ variables are ignored. The
+                          file and the secret files it names are watched:
+                          cookie_keys and log_level apply at once, providers,
+                          apps and the other members of a wicket file within
+                          seconds, an invalid change is refused and the running
+                          configuration kept, and the listeners, keys files and
+                          the rest apply on restart.
 
   WICKET_CONFIG           JSON configuration file (required)
   WICKET_COOKIE_KEYS      comma-separated 64-hex-character keys; the first seals cookies (required)
@@ -125,14 +147,36 @@ func Wicket(ctx context.Context, args []string, getenv func(string) string, _ io
 // returns the process exit code. hup, when set, replaces the SIGHUP
 // subscription (for tests).
 func cli(ctx context.Context, prog string, args []string, getenv func(string) string, stdout, stderr io.Writer, hup <-chan os.Signal) int {
-	if len(args) == 0 {
+	if len(args) == 0 || isConfigFlag(args[0]) {
+		path := getenv(ConfigEnv)
+		if len(args) > 0 {
+			fs := flag.NewFlagSet(prog, flag.ContinueOnError)
+			fs.SetOutput(stderr)
+			fs.Usage = func() { fmt.Fprintf(stderr, usageText, prog) }
+			file := fs.String("config", "", "platform configuration file (default $"+ConfigEnv+")")
+			if err := fs.Parse(args); err != nil {
+				if errors.Is(err, flag.ErrHelp) {
+					return 0
+				}
+				return 2
+			}
+			if fs.NArg() > 0 {
+				fmt.Fprintf(stderr, "%s: unexpected argument %q; run \"%s -h\" for help\n", prog, fs.Arg(0), prog)
+				return 2
+			}
+			if *file == "" {
+				fmt.Fprintf(stderr, "%s: -config needs a file name\n", prog)
+				return 2
+			}
+			path = *file
+		}
 		if hup == nil {
 			c := make(chan os.Signal, 1)
 			signal.Notify(c, syscall.SIGHUP)
 			defer signal.Stop(c)
 			hup = c
 		}
-		if err := run(ctx, getenv, stdout, hup, nil); err != nil {
+		if err := serveFrom(ctx, getenv, path, stdout, hup, nil, nil); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", prog, err)
 			return 1
 		}
@@ -150,6 +194,13 @@ func cli(ctx context.Context, prog string, args []string, getenv func(string) st
 		return 2
 	}
 	return 0
+}
+
+// isConfigFlag reports whether arg is the -config flag, in any of the
+// spellings the flag package reads.
+func isConfigFlag(arg string) bool {
+	name, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-"), "=")
+	return strings.HasPrefix(arg, "-") && name == "config"
 }
 
 func subcommand(name string, out io.Writer) error {
@@ -298,24 +349,55 @@ func loadSigners(files []string) ([]*jose.Signer, error) {
 // run serves until ctx ends. ready, when set, receives the public and admin
 // addresses once both listeners are bound.
 func run(ctx context.Context, getenv func(string) string, logOut io.Writer, hup <-chan os.Signal, ready func(public, admin string)) error {
-	return serve(ctx, getenv, logOut, hup, ready, nil)
+	return serveFrom(ctx, getenv, "", logOut, hup, ready, nil)
 }
 
 // serve is run with the clock the sessions and handlers read; nil is the
 // wall clock. Only the golden replay sets it, so the times in its tokens and
 // cookies are fixed offsets and the transcripts compare byte for byte.
 func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hup <-chan os.Signal, ready func(public, admin string), now func() time.Time) error {
-	st, err := loadSettings(getenv)
+	return serveFrom(ctx, getenv, "", logOut, hup, ready, now)
+}
+
+// serveFrom serves until ctx ends, configured by the gateway section of
+// the platform configuration file at path, or by the WICKET_ variables and
+// the wicket file they name when path is empty.
+func serveFrom(ctx context.Context, getenv func(string) string, path string, logOut io.Writer, hup <-chan os.Signal,
+	ready func(public, admin string), now func() time.Time) error {
+	var (
+		st      settings
+		err     error
+		watcher *pcfg.Watcher
+		rl      *reloader
+	)
+	level := new(slog.LevelVar)
+	if path == "" {
+		st, err = loadSettings(getenv)
+	} else {
+		rl = newReloader(level)
+		watcher, st, err = watchFile(path, getenv, rl)
+	}
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{Level: st.logLevel}))
+	level.Set(st.logLevel)
+	log := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{Level: level}))
+	if watcher != nil {
+		if ignored := wicketVars(getenv); len(ignored) > 0 {
+			log.Warn("WICKET_ variables are ignored with a configuration file; use its AUTHZ_GATEWAY_ overrides",
+				"config", path, "ignored", ignored)
+		}
+	}
 	signers, err := loadSigners(st.signingKeys)
 	if err != nil {
 		return err
 	}
 	if len(signers) == 0 {
-		log.Warn("WICKET_SIGNING_KEYS not set; using a key generated for this process, so upstream tokens can't be verified across replicas or restarts")
+		if watcher != nil {
+			log.Warn("$.gateway.signing_keys not set; using a key generated for this process, so upstream tokens can't be verified across replicas or restarts")
+		} else {
+			log.Warn("WICKET_SIGNING_KEYS not set; using a key generated for this process, so upstream tokens can't be verified across replicas or restarts")
+		}
 		k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		sg, _ := jose.NewSigner(k)
 		signers = []*jose.Signer{sg}
@@ -324,7 +406,25 @@ func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hu
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(st.configPath, getenv)
+	// load reads the wicket configuration again: the file WICKET_CONFIG
+	// names, or, with a platform file, the section the watcher holds after
+	// looking at the files once more, so SIGHUP and POST /admin/reload pick
+	// up a change at once.
+	load := func() (*config.Config, error) { return config.Load(st.configPath, getenv) }
+	if watcher != nil {
+		load = func() (*config.Config, error) {
+			if err := rl.poll(watcher); err != nil {
+				return nil, err
+			}
+			return rl.config(watcher, getenv)
+		}
+	}
+	var cfg *config.Config
+	if watcher != nil {
+		cfg, err = rl.config(watcher, getenv)
+	} else {
+		cfg, err = config.Load(st.configPath, getenv)
+	}
 	if err != nil {
 		return err
 	}
@@ -349,7 +449,7 @@ func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hu
 				first = false
 				return cfg, nil
 			}
-			return config.Load(st.configPath, getenv)
+			return load()
 		},
 		Sessions: sessions, Keys: keys, Signers: signers, Logger: log, Metrics: metrics.New(),
 		AdminToken: st.adminToken, TrustedProxies: st.trusted, LoginRate: st.loginRate, Now: now,
@@ -365,6 +465,15 @@ func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hu
 		httpserver.Spec{Name: "admin", Addr: st.adminAddr, Handler: srv.AdminHandler(), ReadyPath: "/readyz"})
 	if err != nil {
 		return err
+	}
+	var changed <-chan struct{}
+	if watcher != nil {
+		rl.start(log, keys, st)
+		wctx, stopWatch := context.WithCancel(ctx)
+		defer stopWatch()
+		go func() { _ = watcher.Run(wctx) }()
+		changed = rl.changed
+		log.Info("configuration loaded", "config", path, "sources", len(watcher.Current().Sources()))
 	}
 	addrs := g.Addrs()
 	log.Info("listening", "addr", addrs[0], "admin_addr", addrs[1],
@@ -385,6 +494,12 @@ func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hu
 		case <-hup:
 			if err := srv.Reload(ctx); err != nil {
 				log.Error("reload failed; keeping the running configuration", "error", err.Error())
+			}
+		case <-changed:
+			if rl.stale(watcher) {
+				if err := srv.Reload(ctx); err != nil {
+					log.Error("reload failed; keeping the running configuration", "error", err.Error())
+				}
 			}
 		case <-sweep.C:
 			srv.Sweep()
