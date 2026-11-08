@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/gateway"
+	"github.com/laiwf94/authz/cmd/authz/internal/mcp"
+	"github.com/laiwf94/authz/cmd/authz/internal/serve"
 	"github.com/laiwf94/authz/internal/authn/check"
 	authnconfig "github.com/laiwf94/authz/internal/authn/config"
 	"github.com/laiwf94/authz/internal/authn/fakeidp"
@@ -204,10 +207,39 @@ func TestConfigUsage(t *testing.T) {
 func TestEnvironIncludesProcessAndSchema(t *testing.T) {
 	t.Setenv("AUTHZ_GATEWAY_FROM_PROCESS", "1")
 	sc := Schema(context.Background(), check.Options{})
-	got := environ(sc, func(k string) string {
+	got := sc.Environ(func(k string) string {
 		return map[string]string{"AUTHZ_SERVE_ADDR": ":1", "AUTHZ_GATEWAY_FROM_PROCESS": "x", "UNRELATED": "y"}[k]
 	})
 	if strings.Join(got, " ") != "AUTHZ_GATEWAY_FROM_PROCESS=x AUTHZ_SERVE_ADDR=:1" {
 		t.Fatalf("%v", got)
+	}
+}
+
+// Each subcommand that reads the platform file skips the sections of the
+// others: the serve schema reads the whole file, whatever the other
+// sections hold, and knows every section the full schema has.
+func TestServeSchemaSkipsTheOthers(t *testing.T) {
+	file := platformDoc(t, "https://idp.example.com")
+	for k, v := range goodEnv() {
+		t.Setenv(k, v)
+	}
+	sc := serve.Schema()
+	res, err := sc.LoadResult(file, os.Environ())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Problems) != 0 {
+		t.Fatalf("serve schema on the full file: %v", res.Problems)
+	}
+	b, _ := os.ReadFile(file)
+	broken := strings.Replace(string(b), `"public_url": "https://auth.example.com"`, `"public_url": 7`, 1)
+	if r := sc.Check([]byte(broken), os.Environ()); len(r.Problems) != 0 {
+		t.Fatalf("a gateway problem stopped serve: %v", r.Problems)
+	}
+	if r := Schema(context.Background(), check.Options{}).Check([]byte(broken), os.Environ()); r.Problems.Err() == nil {
+		t.Fatal("the full schema missed the gateway problem")
+	}
+	if want := []string{gateway.SectionName, mcp.SectionName}; strings.Join(serve.OtherSections, ",") != strings.Join(want, ",") {
+		t.Fatalf("serve.OtherSections = %q, want %q", serve.OtherSections, want)
 	}
 }

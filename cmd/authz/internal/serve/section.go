@@ -5,14 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/laiwf94/authz/internal/authz/api"
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
+	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
 
 // SectionName is the name of the serve section of the platform
@@ -43,6 +47,38 @@ type Settings struct {
 	LogLevel string `json:"log_level"`
 	// AuditLog is GRANTD_AUDIT_LOG.
 	AuditLog string `json:"audit_log"`
+	// KeyRate is GRANTD_KEY_RATE: requests per second per API key; 0 sets
+	// no limit.
+	KeyRate float64 `json:"key_rate"`
+	// KeyBurst is GRANTD_KEY_BURST; 0 means the rate rounded up, at least 1.
+	KeyBurst int `json:"key_burst"`
+	// TLSCert and TLSKey are GRANTD_TLS_CERT and GRANTD_TLS_KEY: PEM files
+	// the API serves TLS with. Empty serves plain HTTP.
+	TLSCert string `json:"tls_cert"`
+	TLSKey  string `json:"tls_key"`
+	// TLSClientCA is GRANTD_TLS_CLIENT_CA: CAs client certificates must
+	// chain to.
+	TLSClientCA string `json:"tls_client_ca"`
+	// DrainDelay is GRANTD_DRAIN_DELAY.
+	DrainDelay pcfg.Duration `json:"drain_delay"`
+	// DrainTimeout is GRANTD_DRAIN_TIMEOUT.
+	DrainTimeout pcfg.Duration `json:"drain_timeout"`
+}
+
+// OtherSections are the sections of the platform file that belong to the
+// other long-running subcommands. "authz serve -config" reads past them, so
+// one file can configure every subcommand and a problem in another's
+// section does not stop this one.
+var OtherSections = []string{"gateway", "mcp"}
+
+// Schema is what "authz serve -config" reads: its own section, with the
+// others skipped.
+func Schema() *pcfg.Schema {
+	secs := []pcfg.Section{Section()}
+	for _, name := range OtherSections {
+		secs = append(secs, pcfg.Skip(name))
+	}
+	return pcfg.MustSchema(secs...)
 }
 
 // Section describes the serve section, with grantd's defaults and the
@@ -56,6 +92,7 @@ func defaultSettings(s *Settings) {
 	s.CacheSize = 100_000
 	s.Retention = store.DefaultRetention
 	s.LogLevel = "info"
+	s.DrainTimeout = pcfg.Duration(httpserver.DefaultDrainTimeout)
 }
 
 func checkSettings(s *Settings, c *pcfg.Checker) {
@@ -104,6 +141,72 @@ func checkSettings(s *Settings, c *pcfg.Checker) {
 	if err := new(slog.Level).UnmarshalText([]byte(s.LogLevel)); err != nil {
 		c.Errorf(c.Field("log_level"), "%q is not debug, info, warn or error", s.LogLevel)
 	}
+	if s.KeyRate < 0 {
+		c.Errorf(c.Field("key_rate"), "must not be negative (0 sets no limit)")
+	}
+	switch {
+	case s.KeyBurst < 0:
+		c.Errorf(c.Field("key_burst"), "must not be negative (0 means the rate rounded up)")
+	case s.KeyBurst > 0 && !(s.KeyRate > 0):
+		c.Errorf(c.Field("key_burst"), "needs key_rate")
+	}
+	checkHTTP(s, c)
+}
+
+// checkHTTP applies the rules httpserver.FromEnv and httpserver.Listen
+// apply to the TLS and drain settings, loading the TLS files.
+func checkHTTP(s *Settings, c *pcfg.Checker) {
+	switch {
+	case s.TLSCert != "" && s.TLSKey != "":
+		if err := s.tlsFiles().Check(); err != nil {
+			c.Errorf(c.Field("tls_cert"), "%s", strings.TrimPrefix(err.Error(), "httpserver: "))
+		}
+	case s.TLSCert != "" || s.TLSKey != "":
+		c.Errorf(c.Field("tls_cert"), "tls_cert and tls_key must be set together")
+	case s.TLSClientCA != "":
+		c.Errorf(c.Field("tls_client_ca"), "needs tls_cert and tls_key")
+	}
+	if time.Duration(s.DrainDelay) > time.Hour {
+		c.Errorf(c.Field("drain_delay"), "must be at most 1h")
+	}
+	if d := time.Duration(s.DrainTimeout); d == 0 || d > time.Hour {
+		c.Errorf(c.Field("drain_timeout"), "must be more than 0s and at most 1h")
+	}
+}
+
+func (s *Settings) tlsFiles() *httpserver.TLSFiles {
+	if s.TLSCert == "" || s.TLSKey == "" {
+		return nil
+	}
+	return &httpserver.TLSFiles{CertFile: s.TLSCert, KeyFile: s.TLSKey, ClientCAFile: s.TLSClientCA}
+}
+
+// settingsConfig is the configuration a checked section starts the server
+// with, the same one loadConfig builds from the GRANTD_ variables.
+func settingsConfig(s *Settings) (config, error) {
+	c := config{addr: s.Addr, dataDir: s.DataDir, auditLog: s.AuditLog, cacheSize: s.CacheSize,
+		retention: store.Revision(s.Retention), apiKeys: splitList(s.APIKeys.Value())}
+	if len(c.apiKeys) == 0 {
+		return c, errors.New("$.serve.api_keys holds no key")
+	}
+	if s.TokenKey.IsSet() {
+		ks, err := tokenKeys(s.TokenKey.Value())
+		if err != nil {
+			return c, fmt.Errorf("$.serve.token_key: %v", err)
+		}
+		c.tokenKey, c.oldTokens = ks[0], ks[1:]
+	}
+	if err := c.logLevel.UnmarshalText([]byte(s.LogLevel)); err != nil {
+		return c, fmt.Errorf("$.serve.log_level: %v", err)
+	}
+	c.http = httpserver.Options{TLS: s.tlsFiles(), DrainDelay: time.Duration(s.DrainDelay), DrainTimeout: time.Duration(s.DrainTimeout)}
+	if s.KeyRate > 0 {
+		c.keyLimit = ratelimit.Limit{Rate: s.KeyRate, Burst: int(min(math.Ceil(s.KeyRate), math.MaxInt32))}
+		if s.KeyBurst > 0 {
+			c.keyLimit.Burst = s.KeyBurst
+		}
+	}
+	return c, nil
 }
 
 // tokenKeys reads a token key list: one key, or a comma-separated list

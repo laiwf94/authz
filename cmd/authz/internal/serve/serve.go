@@ -43,6 +43,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/ratelimit"
@@ -51,10 +52,18 @@ import (
 // Summary is the one-line description shown in "authz help".
 const Summary = "run the authorization (relationships and checks) API"
 
-const usage = `usage: authz serve
+const usage = `usage: authz serve [-config file]
 
 Runs the authorization API: schema, relationships, checks, lookups and watch.
-It takes no flags; configuration comes from the environment, as grantd's did:
+
+  -config file  read the serve section of the platform configuration file
+                (default: $AUTHZ_CONFIG). Every member can be overridden by
+                its AUTHZ_SERVE_ variable. The file and the secret files it
+                names are watched: api_keys and log_level changes apply
+                within seconds, an invalid change is refused and the running
+                configuration kept, and the other members apply on restart.
+
+Without a file, configuration comes from the environment, as grantd's did:
 
   GRANTD_ADDR        listen address (default ":8080")
   GRANTD_DATA_DIR    directory for the write-ahead log; empty keeps data in memory only
@@ -78,7 +87,8 @@ It takes no flags; configuration comes from the environment, as grantd's did:
   GRANTD_DRAIN_TIMEOUT  how long in-flight requests may then finish (default 20s)
 
 Logs are JSON lines on standard output. SIGINT or SIGTERM drains requests
-and stops. "authz check -serve" validates this environment without starting.
+and stops. "authz check -serve" validates this environment, and
+"authz check -config file" the file, without starting.
 `
 
 // Run is the "authz serve" subcommand. It serves until ctx ends and returns
@@ -88,6 +98,7 @@ func Run(ctx context.Context, args []string, getenv func(string) string, _ io.Re
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage) }
+	file := fs.String("config", "", "platform configuration file (default $AUTHZ_CONFIG)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -95,10 +106,13 @@ func Run(ctx context.Context, args []string, getenv func(string) string, _ io.Re
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "authz serve: unexpected argument %q; configuration comes from the environment\n", fs.Arg(0))
+		fmt.Fprintf(stderr, "authz serve: unexpected argument %q; configuration comes from -config or the environment\n", fs.Arg(0))
 		return 2
 	}
-	if err := run(ctx, getenv, stdout, nil); err != nil {
+	if *file == "" {
+		*file = getenv(ConfigEnv)
+	}
+	if err := serve(ctx, getenv, *file, stdout, nil); err != nil {
 		fmt.Fprintln(stderr, "authz serve:", err)
 		return 1
 	}
@@ -243,13 +257,44 @@ func parseTokenKeys(v string) ([][]byte, error) {
 	return out, nil
 }
 
-// run serves until ctx ends. ready, when set, receives the bound address.
+// ConfigEnv names the platform configuration file when -config is not
+// given.
+const ConfigEnv = "AUTHZ_CONFIG"
+
+// run serves from the GRANTD_ variables until ctx ends. ready, when set,
+// receives the bound address.
 func run(ctx context.Context, getenv func(string) string, logOut io.Writer, ready func(addr string)) error {
-	cfg, err := loadConfig(getenv)
+	return serve(ctx, getenv, "", logOut, ready)
+}
+
+// serve serves until ctx ends, configured by the serve section of the file
+// at path, or by the GRANTD_ variables when path is empty.
+func serve(ctx context.Context, getenv func(string) string, path string, logOut io.Writer, ready func(addr string)) error {
+	var (
+		cfg     config
+		err     error
+		watcher *pcfg.Watcher
+		rl      *reloader
+	)
+	level := new(slog.LevelVar)
+	if path == "" {
+		cfg, err = loadConfig(getenv)
+	} else {
+		rl = &reloader{level: level}
+		watcher, cfg, err = watchFile(path, getenv, rl)
+	}
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{Level: cfg.logLevel}))
+	loaded := cfg // before a random token key is filled in
+	level.Set(cfg.logLevel)
+	log := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{Level: level}))
+	if watcher != nil {
+		if ignored := grantdVars(getenv); len(ignored) > 0 {
+			log.Warn("GRANTD_ variables are ignored with a configuration file; use its AUTHZ_SERVE_ overrides",
+				"config", path, "ignored", ignored)
+		}
+	}
 	if cfg.tokenKey == nil {
 		log.Warn("GRANTD_TOKEN_KEY not set; using a random key, so consistency tokens end with this process")
 		if cfg.tokenKey, err = token.RandomKey(); err != nil {
@@ -291,6 +336,13 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 	})
 	if err != nil {
 		return err
+	}
+	if watcher != nil {
+		rl.start(log, srv, loaded)
+		wctx, stop := context.WithCancel(ctx)
+		defer stop()
+		go func() { _ = watcher.Run(wctx) }()
+		log.Info("configuration loaded", "config", path, "sources", len(watcher.Current().Sources()))
 	}
 	addr := g.Addrs()[0]
 	log.Info("listening", "addr", addr, "persistent", cfg.dataDir != "", "revision", uint64(st.Head()))

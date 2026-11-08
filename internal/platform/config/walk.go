@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -14,6 +15,8 @@ import (
 var (
 	durationType = reflect.TypeFor[Duration]()
 	secretType   = reflect.TypeFor[Secret]()
+	// skipType marks a Skip section: its value is read past, not decoded.
+	skipType = reflect.TypeFor[struct{ skip struct{} }]()
 )
 
 // checkType reports a type the walker has no rule for. Schemas are checked
@@ -26,6 +29,8 @@ func checkType(t reflect.Type, where string) error {
 	case t.Kind() == reflect.String || t.Kind() == reflect.Bool:
 		return nil
 	case t.Kind() == reflect.Int || t.Kind() == reflect.Int64 || t.Kind() == reflect.Int32:
+		return nil
+	case t.Kind() == reflect.Float64:
 		return nil
 	case t.Kind() == reflect.Slice:
 		return checkType(t.Elem(), where+"[]")
@@ -139,6 +144,12 @@ func (w *walker) value(t reflect.Type, path string) (v any, keep bool, err error
 		// null leaves the member unset, as if it were absent.
 		return nil, false, nil
 	}
+	if t == skipType {
+		if _, ok := tok.(json.Delim); ok {
+			return nil, false, w.skipRest()
+		}
+		return nil, false, nil
+	}
 	switch {
 	case t == durationType:
 		str, ok := tok.(string)
@@ -195,6 +206,17 @@ func (w *walker) value(t reflect.Type, path string) (v any, keep bool, err error
 			return nil, false, nil
 		}
 		return i, true, nil
+	case t.Kind() == reflect.Float64:
+		n, ok := tok.(json.Number)
+		if !ok {
+			return w.mismatch(tok, path, "a number")
+		}
+		f, err := parseFloat(string(n))
+		if err != nil {
+			w.r.errorf(path, "%v", err)
+			return nil, false, nil
+		}
+		return f, true, nil
 	case t.Kind() == reflect.Slice:
 		if tok != json.Delim('[') {
 			return w.mismatch(tok, path, "an array")
@@ -380,6 +402,15 @@ func editDistance(a, b string) int {
 		prev, cur = cur, prev
 	}
 	return prev[len(b)]
+}
+
+// parseFloat reads a finite number.
+func parseFloat(s string) (float64, error) {
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return 0, fmt.Errorf("%s is not a finite number", s)
+	}
+	return f, nil
 }
 
 func minInt(t reflect.Type) int64 { return -1 << (t.Bits() - 1) }

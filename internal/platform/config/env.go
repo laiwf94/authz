@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -40,7 +41,8 @@ func bindings(prefix string, t reflect.Type) []binding {
 				out = append(out, binding{name: env, index: idx, rel: r},
 					binding{name: env + SecretFileSuffix, index: idx, rel: r, file: true})
 			case f.Type == durationType || f.Type.Kind() == reflect.String || f.Type.Kind() == reflect.Bool ||
-				f.Type.Kind() == reflect.Int || f.Type.Kind() == reflect.Int64 || f.Type.Kind() == reflect.Int32:
+				f.Type.Kind() == reflect.Int || f.Type.Kind() == reflect.Int64 || f.Type.Kind() == reflect.Int32 ||
+				f.Type.Kind() == reflect.Float64:
 				out = append(out, binding{name: env, index: idx, rel: r})
 			case f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() == reflect.String && f.Type.Elem() != durationType:
 				out = append(out, binding{name: env, index: idx, rel: r})
@@ -110,6 +112,13 @@ func applyEnv(s *section, v reflect.Value, env map[string]string, r *report) boo
 				continue
 			}
 			f.SetBool(bv)
+		case f.Kind() == reflect.Float64:
+			fv, err := parseFloat(val)
+			if err != nil {
+				r.errorf(path, "%q is not a finite number", val)
+				continue
+			}
+			f.SetFloat(fv)
 		case f.Kind() == reflect.Slice:
 			var list []string
 			for _, e := range strings.Split(val, ",") {
@@ -154,4 +163,31 @@ func unknownEnv(s *section, env map[string]string, r *report) {
 			Message: "unknown variable" + suggest(name, known)})
 		r.mu.Unlock()
 	}
+}
+
+// Environ rebuilds a process environment from getenv, for the subcommands
+// that take getenv rather than reading os.Environ themselves (so tests can
+// give their own): every variable the process has and every override the
+// schema reads, with the values getenv gives. A secret the file names as
+// {"env": NAME} is found only when the process has NAME.
+func (sc *Schema) Environ(getenv func(string) string) []string {
+	names := map[string]bool{}
+	for _, kv := range os.Environ() {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			names[k] = true
+		}
+	}
+	for _, s := range sc.sections {
+		for _, b := range s.env {
+			names[b.name] = true
+		}
+	}
+	out := make([]string, 0, len(names))
+	for n := range names {
+		if v := getenv(n); v != "" {
+			out = append(out, n+"="+v)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

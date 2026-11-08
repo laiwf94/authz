@@ -463,7 +463,10 @@ puts the three together for `authz check -config`.
 
 - *serve* holds the `GRANTD_*` settings by their `AUTHZ_SERVE_*` names:
   `addr`, `data_dir`, `api_keys` and `token_key` (secrets), `cache_size`,
-  `retention`, `log_level`, `audit_log`. Its checks are the ones
+  `retention`, `log_level`, `audit_log`, `key_rate` (a number, so the
+  platform reads `float64` members), `key_burst`, and the `GRANTD_TLS_*`
+  and `GRANTD_DRAIN_*` settings as `tls_cert`, `tls_key`, `tls_client_ca`,
+  `drain_delay` and `drain_timeout`. Its checks are the ones
   `authz check -serve` applies to the environment.
 - *mcp* holds the `TOOLGATE_*` settings by their `AUTHZ_MCP_*` names, which
   are already the gateway's second spelling of each variable, so
@@ -479,6 +482,37 @@ puts the three together for `authz check -config`.
   `authz gateway check`, offline or with `-online`; its paths are moved
   under `$.gateway`, and the platform locates them in the file. A test keeps
   the section's members in step with `config.Config`.
+
+### Starting from the file
+
+`authz serve -config file` (or `AUTHZ_CONFIG=file`) starts from the serve
+section; without either, the `GRANTD_*` variables work exactly as before,
+and with a file they are ignored, with a warning naming them. The section
+starts the server with exactly the configuration the same values as
+`GRANTD_*` variables give (a test compares the two).
+
+Each subcommand reads one section of a file that may hold all three.
+`config.Skip(name)` lists the others: they are read past whatever they
+hold, so a problem in the gateway's section does not stop `authz serve`, but
+a misspelt section name is still an error. `WatchOptions.Validate` refuses a
+version of the file with no serve section, as a problem in it would be.
+
+While serving, a `config.Watcher` polls the file and the secret files it
+names every second. `api_keys` applies at once: `api.Server.SetAPIKeys`
+swaps the accepted keys behind an atomic pointer, so a request is checked
+against one whole key list, and a key kept across the change keeps its rate
+limit bucket. `log_level` applies at once through a `slog.LevelVar`; the
+reload is logged at the more verbose of the two levels so a change to a
+quieter one is still seen. The other members are logged as applying on
+restart. An invalid version (a short key, broken JSON, no serve section) is
+logged and refused, and the running configuration is kept. Under eight
+clients using a key that every version holds, while the key file is
+replaced, rewritten in place and the configuration broken and fixed, no
+request fails (about 60,000 requests in the test), and a key file change
+applies about a second after it is written.
+
+`authz gateway` and `authz mcp` start from their sections the same way in
+the next tasks of #76.
 
 ## One log handler (internal/platform/logging)
 

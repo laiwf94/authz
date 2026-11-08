@@ -23,6 +23,10 @@ type WatchOptions struct {
 	// Interval is how often the files are compared with what was loaded;
 	// zero means DefaultInterval.
 	Interval time.Duration
+	// Validate, if set, is a last check on a configuration that has no
+	// errors, before it is put in place: an error refuses it as a problem
+	// in the document would. A subcommand uses it to require its section.
+	Validate func(*Config) error
 	// OnReload, if set, is called after a new configuration is in place,
 	// with the one it replaced and the warnings it has.
 	OnReload func(old, cur *Config, warnings Problems)
@@ -59,7 +63,7 @@ func NewWatcher(sc *Schema, path string, opts WatchOptions) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := r.Problems.Err(); err != nil {
+	if err := w.validate(r); err != nil {
 		return nil, err
 	}
 	w.cur.Store(r.Config)
@@ -104,7 +108,7 @@ func (w *Watcher) Poll() error {
 	r, err := w.schema.load(w.path, &loader{env: w.env})
 	w.watched = r.Sources
 	if err == nil {
-		err = r.Problems.Err()
+		err = w.validate(r)
 	}
 	if err != nil {
 		if w.opts.OnError != nil {
@@ -121,6 +125,17 @@ func (w *Watcher) Poll() error {
 			}
 		}
 		w.opts.OnReload(old, r.Config, warnings)
+	}
+	return nil
+}
+
+// validate returns the errors of a loaded document, then Validate's.
+func (w *Watcher) validate(r *Result) error {
+	if err := r.Problems.Err(); err != nil {
+		return err
+	}
+	if w.opts.Validate != nil {
+		return w.opts.Validate(r.Config)
 	}
 	return nil
 }

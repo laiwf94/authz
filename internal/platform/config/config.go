@@ -54,15 +54,16 @@ type section struct {
 	check     func(v any, c *Checker)
 	env       []binding
 	envPrefix string
+	skip      bool // Skip: present or not, never read
 }
 
 // NewSection describes the section called name, decoded into a T. T is a
 // struct whose exported members have json names of lower-case letters,
-// digits and '_'; members may be strings, booleans, integers, Durations,
-// Secrets, structs, slices and maps with string keys. defaults, if not nil,
-// fills in a new T before the file and the environment are applied. check,
-// if not nil, validates the result; it runs only when the section is
-// present, in the file or through an environment variable.
+// digits and '_'; members may be strings, booleans, integers, float64s,
+// Durations, Secrets, structs, slices and maps with string keys. defaults,
+// if not nil, fills in a new T before the file and the environment are
+// applied. check, if not nil, validates the result; it runs only when the
+// section is present, in the file or through an environment variable.
 func NewSection[T any](name string, defaults func(*T), check func(*T, *Checker)) Section {
 	s := &section{
 		name: name,
@@ -82,6 +83,17 @@ func NewSection[T any](name string, defaults func(*T), check func(*T, *Checker))
 		envPrefix: EnvPrefix + strings.ToUpper(name) + "_",
 	}
 	return Section{s}
+}
+
+// Skip describes a section that belongs to another subcommand. A document
+// may hold it with any content; it is not decoded, checked or overridden
+// from the environment, and Has reports it absent. A subcommand that reads
+// one section of a shared file lists the others with Skip, so a typo in a
+// section name is still caught and another subcommand's problems do not
+// stop it.
+func Skip(name string) Section {
+	return Section{&section{name: name, typ: skipType, skip: true,
+		envPrefix: EnvPrefix + strings.ToUpper(name) + "_"}}
 }
 
 // Schema is the set of sections a document may hold.
@@ -105,6 +117,11 @@ func NewSchema(sections ...Section) (*Schema, error) {
 		}
 		if _, dup := sc.sections[s.name]; dup {
 			return nil, fmt.Errorf("config: two sections are named %q", s.name)
+		}
+		if s.skip {
+			sc.sections[s.name] = s
+			sc.names = append(sc.names, s.name)
+			continue
 		}
 		if s.typ.Kind() != reflect.Struct {
 			return nil, fmt.Errorf("config: section %s: %s is not a struct", s.name, s.typ)
@@ -139,7 +156,7 @@ func MustSchema(sections ...Section) *Schema {
 // named section, sorted.
 func (sc *Schema) EnvNames(section string) []string {
 	s, ok := sc.sections[section]
-	if !ok {
+	if !ok || s.skip {
 		return nil
 	}
 	out := make([]string, len(s.env))
@@ -288,6 +305,9 @@ func (sc *Schema) check(src []byte, l *loader) *Result {
 
 	for _, name := range sc.names {
 		s := sc.sections[name]
+		if s.skip {
+			continue
+		}
 		v := s.newValue()
 		raw, inFile := doc[name]
 		if inFile {

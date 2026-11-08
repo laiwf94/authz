@@ -3,8 +3,6 @@ package checkcmd
 import (
 	"context"
 	"fmt"
-	"os"
-	"sort"
 	"strings"
 
 	"github.com/laiwf94/authz/cmd/authz/internal/gateway"
@@ -26,36 +24,10 @@ func Schema(ctx context.Context, o check.Options) *config.Schema {
 	)
 }
 
-// environ rebuilds an environment from getenv: every variable the process
-// has and every override the schema reads, with the values getenv gives.
-// A secret the file names as {"env": NAME} is found only when the process
-// has NAME, as it is when the subcommand loads the file.
-func environ(sc *config.Schema, getenv func(string) string) []string {
-	names := map[string]bool{}
-	for _, kv := range os.Environ() {
-		if k, _, ok := strings.Cut(kv, "="); ok {
-			names[k] = true
-		}
-	}
-	for _, s := range []string{serve.SectionName, gateway.SectionName, mcp.SectionName} {
-		for _, n := range sc.EnvNames(s) {
-			names[n] = true
-		}
-	}
-	out := make([]string, 0, len(names))
-	for n := range names {
-		if v := getenv(n); v != "" {
-			out = append(out, n+"="+v)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // checkConfig validates the platform configuration file at name.
 func checkConfig(ctx context.Context, r *report, name string, getenv func(string) string, o check.Options) {
 	sc := Schema(ctx, o)
-	res, err := sc.LoadResult(name, environ(sc, getenv))
+	res, err := sc.LoadResult(name, sc.Environ(getenv))
 	if err != nil {
 		r.problem(name, strings.TrimPrefix(err.Error(), "config: "))
 		return

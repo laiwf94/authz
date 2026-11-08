@@ -416,7 +416,7 @@ func TestNewSchemaErrors(t *testing.T) {
 		A string `json:"A"`
 	}
 	type float struct {
-		F float64 `json:"f"`
+		F float32 `json:"f"`
 	}
 	type ptr struct {
 		P *string `json:"p"`
@@ -453,7 +453,7 @@ func TestNewSchemaErrors(t *testing.T) {
 		{"not struct", []Section{NewSection[string]("a", nil, nil)}, "string is not a struct"},
 		{"no tag", []Section{NewSection[noTag]("a", nil, nil)}, "a.A has no json name"},
 		{"bad tag", []Section{NewSection[badName]("a", nil, nil)}, `json name "A"`},
-		{"float", []Section{NewSection[float]("a", nil, nil)}, "a.f: no rule for float64"},
+		{"float", []Section{NewSection[float]("a", nil, nil)}, "a.f: no rule for float32"},
 		{"pointer", []Section{NewSection[ptr]("a", nil, nil)}, "a.p: no rule for *string"},
 		{"int map", []Section{NewSection[intMap]("a", nil, nil)}, "a.m: map keys must be strings"},
 		{"env collision", []Section{NewSection[collide]("a", nil, nil)}, "AUTHZ_A_A_B would set both"},

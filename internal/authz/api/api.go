@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/laiwf94/authz/internal/authz/check"
@@ -76,10 +77,8 @@ type Server struct {
 	st      *store.Store
 	eng     *check.Engine
 	tokens  *token.Issuer
-	keys    [][sha256.Size]byte
-	keyIDs  []string // fingerprints of keys, for audit actors
+	keys    atomic.Pointer[keySet]
 	keyLim  *ratelimit.Limiter
-	limKeys []string // limiter key per API key
 	limit   ratelimit.Limit
 	audit   *audit.Log
 	log     *slog.Logger
@@ -98,22 +97,16 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Store == nil || cfg.Tokens == nil {
 		return nil, errors.New("api: store and token issuer are required")
 	}
-	if len(cfg.APIKeys) == 0 {
-		return nil, errors.New("api: at least one API key is required")
-	}
 	s := &Server{st: cfg.Store, tokens: cfg.Tokens, log: cfg.Logger, m: cfg.Metrics,
 		quantum: cfg.Quantum, timeout: cfg.Timeout, audit: cfg.Audit, limit: cfg.KeyLimit}
-	for _, k := range cfg.APIKeys {
-		if len(k) < MinKeyLength {
-			return nil, fmt.Errorf("api: API keys must be at least %d characters", MinKeyLength)
-		}
-		sum := sha256.Sum256([]byte(k))
-		s.keys = append(s.keys, sum)
-		s.keyIDs = append(s.keyIDs, KeyID(k))
-		s.limKeys = append(s.limKeys, ratelimit.Key("api_key", KeyID(k)))
+	if err := s.SetAPIKeys(cfg.APIKeys); err != nil {
+		return nil, err
 	}
 	if !cfg.KeyLimit.Unlimited() {
-		s.keyLim = ratelimit.New(ratelimit.Options{Now: cfg.Now, MaxKeys: len(s.keys)})
+		// Keys are limited by fingerprint, so a key kept across SetAPIKeys
+		// keeps its bucket. The table holds more than the keys configured
+		// so that keys added later do not evict the others.
+		s.keyLim = ratelimit.New(ratelimit.Options{Now: cfg.Now, MaxKeys: max(4*len(cfg.APIKeys), minLimiterKeys)})
 	}
 	if s.log == nil {
 		s.log = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -146,6 +139,37 @@ func New(cfg Config) (*Server, error) {
 		return &apiError{http.StatusNotFound, "not_found", "no such endpoint"}
 	}, false)
 	return s, nil
+}
+
+// minLimiterKeys is the smallest per-key limiter table.
+const minLimiterKeys = 64
+
+// keySet is the API keys a server accepts, replaced whole by SetAPIKeys.
+type keySet struct {
+	sums    [][sha256.Size]byte
+	ids     []string // fingerprints, for audit actors
+	limKeys []string // limiter key per API key
+}
+
+// SetAPIKeys replaces the bearer keys the server accepts. A request already
+// authorized finishes; every request that starts afterwards is checked
+// against the new keys only. It refuses an empty list and a key shorter
+// than MinKeyLength, leaving the keys in place.
+func (s *Server) SetAPIKeys(keys []string) error {
+	if len(keys) == 0 {
+		return errors.New("api: at least one API key is required")
+	}
+	ks := &keySet{}
+	for _, k := range keys {
+		if len(k) < MinKeyLength {
+			return fmt.Errorf("api: API keys must be at least %d characters", MinKeyLength)
+		}
+		ks.sums = append(ks.sums, sha256.Sum256([]byte(k)))
+		ks.ids = append(ks.ids, KeyID(k))
+		ks.limKeys = append(ks.limKeys, ratelimit.Key("api_key", KeyID(k)))
+	}
+	s.keys.Store(ks)
+	return nil
 }
 
 // ServeHTTP implements http.Handler.
@@ -232,21 +256,21 @@ func (s *Server) route(pattern string, h handler, auth bool) {
 				"status", code, "duration_ms", float64(time.Since(start).Microseconds())/1000)
 		}()
 		if auth {
-			k := s.authorized(r)
+			ks, k := s.authorized(r)
 			if k < 0 {
 				sw.Header().Set("WWW-Authenticate", `Bearer realm="grantd"`)
 				writeError(sw, r, http.StatusUnauthorized, "unauthenticated", "missing or invalid API key")
 				return
 			}
 			if s.keyLim != nil {
-				if ok, wait := s.keyLim.Take(s.limKeys[k], s.limit); !ok {
+				if ok, wait := s.keyLim.Take(ks.limKeys[k], s.limit); !ok {
 					sw.Header().Set("Retry-After", strconv.FormatInt(int64(math.Ceil(min(wait.Seconds(), 86400))), 10))
 					s.m.Counter("grantd_rate_limited_total", "", "Requests refused by the per-key rate limit.").Inc()
 					writeError(sw, r, http.StatusTooManyRequests, "resource_exhausted", "API key rate limit exceeded; retry later")
 					return
 				}
 			}
-			r = r.WithContext(context.WithValue(r.Context(), actorKey, s.keyIDs[k]))
+			r = r.WithContext(context.WithValue(r.Context(), actorKey, ks.ids[k]))
 		}
 		if path != "/" && (r.Method == http.MethodPost || r.Method == http.MethodPut) {
 			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
@@ -262,19 +286,21 @@ func (s *Server) route(pattern string, h handler, auth bool) {
 }
 
 // authorized compares the bearer token against every key in constant time
-// and returns the index of the one it matches, or -1.
-func (s *Server) authorized(r *http.Request) int {
+// and returns the key set it used and the index of the key it matches, or
+// -1.
+func (s *Server) authorized(r *http.Request) (*keySet, int) {
+	ks := s.keys.Load()
 	h := r.Header.Get("Authorization")
 	tok, ok := strings.CutPrefix(h, "Bearer ")
 	if !ok || tok == "" {
-		return -1
+		return ks, -1
 	}
 	sum := sha256.Sum256([]byte(tok))
 	match := -1
-	for i, k := range s.keys {
+	for i, k := range ks.sums {
 		match = subtle.ConstantTimeSelect(subtle.ConstantTimeCompare(sum[:], k[:]), i, match)
 	}
-	return match
+	return ks, match
 }
 
 // record appends one typed audit record, when an audit log is configured.

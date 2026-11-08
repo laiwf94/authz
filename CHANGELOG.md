@@ -100,8 +100,16 @@ link the roadmap issue they come from.
   the `WICKET_*` settings and, inline, the members of a wicket file
   (`public_url`, `session`, `providers`, `apps`…), checked by wicket's own
   rules, and `-online` runs `authz gateway check -online`'s metadata checks
-  with paths under `$.gateway`. The subcommands do not start from the file
-  yet; that comes next.
+  with paths under `$.gateway`.
+- **`authz serve -config file`** ([#76](https://github.com/laiwf94/authz/issues/76)),
+  or `AUTHZ_CONFIG=file`, starts the server from the serve section, which
+  gains `key_rate`, `key_burst` and the TLS and drain settings. The file
+  may hold the gateway and mcp sections too; serve reads past them. The file and the secret files it
+  names are watched: a change to `api_keys` or `log_level` applies within
+  about a second with no failed requests, an invalid change is logged and
+  refused, and other members are logged as applying on restart. Without a
+  file the `GRANTD_*` variables work as before; with one they are ignored,
+  and the log names them.
 
 ### Agent gateway (agents)
 
