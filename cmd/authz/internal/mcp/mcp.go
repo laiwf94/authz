@@ -62,6 +62,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
@@ -308,7 +309,10 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{Level: cfg.logLevel}))
+	// The platform handler: request lines carry the correlation ID their
+	// audit records do, and its tap feeds the secret scan. No subcommand
+	// attribute, so every other line stays byte for byte as recorded.
+	log := logging.NewLogger(logOut, logging.Options{Level: cfg.logLevel})
 	gc, err := readGatewayConfig(cfg.configPath, getenv)
 	if err != nil {
 		return err

@@ -409,8 +409,13 @@ config loads) as its typed `authn.` event, and keeps the log line as wicket
 wrote it. The user's subject is the actor and `app:<id>`, `session:<id>` or
 `host:<host>` is the subject. Values from outside, such as an identity
 provider's subject, go through `audit.Clean`, so a control character or an
-oversized name can't cause a record to be refused. The request ID is the
-correlation ID. Both servers have already committed what a record describes,
+oversized name can't cause a record to be refused. The correlation ID is the
+request's (see "One log handler"): the trace ID of its `traceparent`, or a
+generated one, and not the `X-Request-Id`, which stays in the log lines.
+The records `authz mcp` writes for a request (tool calls, approvals asked
+and decided, quarantines, tool approvals) carry it too, in an envelope with
+only that field, so their data and the recorded decisions are toolgate's;
+policy loads happen outside any request and carry none. Both servers have already committed what a record describes,
 so a failed append is counted (`grantd_audit_failures_total`,
 `wicket_audit_failures_total`) and logged instead of failing the request.
 After that, `/healthz` answers 503 until the process restarts, the way
@@ -566,6 +571,21 @@ group the logger opened:
   upstream call share one ID.
 - `tenant`: taken from the context, or the handler's default. The default
   tenant adds nothing.
+
+serve, gateway and mcp log through it (week 2, #78). Each request wrapper
+calls `logging.Correlate` before anything else, so the request line, every
+line logged with the request's context and the audit record share the ID.
+`authz mcp` sends it to its upstreams with `logging.Propagate`, which sets a
+`traceparent` with the same trace ID and a new parent ID on every MCP request
+made under the call's context. The gateway returns one on an allowed
+forward-auth answer when the proxy sent one, for the proxy to copy upstream
+(docs/proxies.md, "Correlation IDs and `traceparent`"); without one its
+answers stay as wicket's golden transcripts recorded them. None of the three
+sets `subcommand` yet: serve's golden replay compares its start and stop
+lines byte for byte. `TestMainCorrelationAcrossSubcommands` runs the three as
+the binary does, with and without a `traceparent`, and requires the same ID
+on the request line, in the audit record and, for mcp, on the upstream's
+`traceparent`.
 
 A key that the logger or the record already sets at the top level is not
 added again. If the handler has none of these values, it writes exactly the

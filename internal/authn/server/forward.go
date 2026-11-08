@@ -9,6 +9,7 @@ import (
 
 	"github.com/laiwf94/authz/internal/authn/session"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/logging"
 )
 
 // Identity headers sent to the proxy on success. The proxy copies them to
@@ -145,7 +146,7 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 	}
 	tok, err := s.upstreamToken(rt, sess, a.id)
 	if err != nil {
-		s.log.Error("signing upstream token", "request_id", requestIDFrom(r.Context()), "error", err.Error())
+		s.log.ErrorContext(r.Context(), "signing upstream token", "request_id", requestIDFrom(r.Context()), "error", err.Error())
 		writeError(w, r, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
@@ -160,6 +161,13 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 	h.Set(HeaderGroups, strings.Join(groups, ","))
 	h.Set(HeaderProvider, sess.Identity.Provider)
 	h.Set(HeaderToken, tok)
+	// A proxy that traces sent a traceparent; answer with one for it to copy
+	// upstream with the identity headers, carrying the same trace ID with
+	// the gateway's own parent ID. Without one the response is unchanged,
+	// as wicket wrote it.
+	if _, ok := logging.ParseTraceparent(r.Header.Get(logging.HeaderTraceparent)); ok {
+		logging.Propagate(r.Context(), h)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 

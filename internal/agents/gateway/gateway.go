@@ -47,6 +47,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/agents/ratelimit"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 	platformlimit "github.com/laiwf94/authz/internal/platform/ratelimit"
 )
@@ -409,10 +410,12 @@ func (g *Gateway) audit(ctx context.Context, event string, data map[string]any) 
 	if rid := httpx.RequestID(ctx); rid != "" {
 		data["request_id"] = rid
 	}
-	err := g.opt.Audit.Append(event, data)
+	// The envelope carries only the correlation ID, so the data is
+	// toolgate's record as it was and recorded decisions do not change.
+	err := g.opt.Audit.AppendWith(event, audit.Envelope{CorrelationID: logging.CorrelationID(ctx)}, data)
 	if err != nil {
 		g.count("toolgate_audit_failures_total", "", "Audit records that could not be written.")
-		g.log.Error("audit append failed", "event", event, "error", err.Error())
+		g.log.ErrorContext(ctx, "audit append failed", "event", event, "error", err.Error())
 	} else {
 		g.count("toolgate_audit_records_total", metrics.Labels("event", event), "Audit records written.")
 	}

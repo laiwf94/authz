@@ -26,6 +26,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
@@ -60,9 +61,9 @@ type Config struct {
 	Timeout time.Duration
 	// Audit, when set, receives a typed record in the platform's hash chain
 	// for every schema change and relationship write, with the API key's
-	// fingerprint as the actor and the request ID as the correlation ID. It
-	// should be opened with audit.Default() schemas. The server does not
-	// close it.
+	// fingerprint as the actor and the request's correlation ID (see
+	// logging.Correlate). It should be opened with audit.Default() schemas.
+	// The server does not close it.
 	Audit *audit.Log
 	// KeyLimit is the request rate allowed per API key, enforced with the
 	// platform limiter; requests over it get 429 with Retry-After. A zero
@@ -233,11 +234,14 @@ func (s *Server) route(pattern string, h handler, auth bool) {
 		sw.Header().Set(requestIDHeader, id)
 		sw.Header().Set("Cache-Control", "no-store")
 		sw.Header().Set("X-Content-Type-Options", "nosniff")
+		// The correlation ID (the traceparent's trace ID, or a new one) goes
+		// into every log line written with ctx and every audit record.
+		r, _ = logging.Correlate(r)
 		ctx := context.WithValue(r.Context(), requestIDKey, id)
 		r = r.WithContext(ctx)
 		defer func() {
 			if p := recover(); p != nil {
-				s.log.Error("panic", "request_id", id, "route", path, "panic", fmt.Sprint(p))
+				s.log.ErrorContext(ctx, "panic", "request_id", id, "route", path, "panic", fmt.Sprint(p))
 				if sw.code == 0 {
 					writeError(sw, r, http.StatusInternalServerError, "internal", "internal error")
 				}
@@ -311,10 +315,10 @@ func (s *Server) record(ctx context.Context, env audit.Envelope, p audit.Payload
 		return
 	}
 	env.Actor, _ = ctx.Value(actorKey).(string)
-	env.CorrelationID, _ = ctx.Value(requestIDKey).(string)
+	env.CorrelationID = logging.CorrelationID(ctx)
 	if err := s.audit.Write(env, p); err != nil {
 		s.m.Counter("grantd_audit_failures_total", "", "Audit records that could not be written.").Inc()
-		s.log.Error("audit write failed", "event", p.AuditEvent(), "request_id", env.CorrelationID, "error", err.Error())
+		s.log.ErrorContext(ctx, "audit write failed", "event", p.AuditEvent(), "request_id", ctx.Value(requestIDKey), "error", err.Error())
 		return
 	}
 	s.m.Counter("grantd_audit_records_total", fmt.Sprintf("event=%q", p.AuditEvent()), "Audit records written.").Inc()
@@ -359,10 +363,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, context.Canceled):
 		writeError(w, r, 499, "canceled", "the client went away")
 	case errors.Is(err, store.ErrUnavailable):
-		s.log.Error("store unavailable", "request_id", r.Context().Value(requestIDKey), "error", err.Error())
+		s.log.ErrorContext(r.Context(), "store unavailable", "request_id", r.Context().Value(requestIDKey), "error", err.Error())
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "storage is unavailable; retry later")
 	default:
-		s.log.Error("internal error", "request_id", r.Context().Value(requestIDKey), "error", err.Error())
+		s.log.ErrorContext(r.Context(), "internal error", "request_id", r.Context().Value(requestIDKey), "error", err.Error())
 		writeError(w, r, http.StatusInternalServerError, "internal", "internal error")
 	}
 }

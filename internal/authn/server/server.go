@@ -27,6 +27,7 @@ import (
 	"github.com/laiwf94/authz/internal/authn/session"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/jose"
+	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/seal"
 )
@@ -270,11 +271,14 @@ func (s *Server) route(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
 		hd.Set("Referrer-Policy", "no-referrer")
 		hd.Set("Strict-Transport-Security", "max-age=31536000")
 		hd.Set("Content-Security-Policy", contentSecurityPolicy)
+		// The correlation ID (the traceparent's trace ID, or a new one) goes
+		// into every log line written with ctx and every audit record.
+		r, _ = logging.Correlate(r)
 		ctx := context.WithValue(r.Context(), requestIDKey, id)
 		r = r.WithContext(ctx)
 		defer func() {
 			if p := recover(); p != nil {
-				s.log.Error("panic", "request_id", id, "route", path, "panic", fmt.Sprint(p))
+				s.log.ErrorContext(ctx, "panic", "request_id", id, "route", path, "panic", fmt.Sprint(p))
 				if sw.code == 0 {
 					writeError(sw, r, http.StatusInternalServerError, "internal", "internal error")
 				}
@@ -329,8 +333,9 @@ func (s *Server) limited(h http.HandlerFunc) http.HandlerFunc {
 
 // audit records one event: an "audit" log line with attrs, as wicket wrote
 // it, and, with Options.Audit, a typed record in the hash chain carrying the
-// request ID as its correlation ID. A record that can't be written is
-// counted and logged; the request it describes has already happened.
+// request's correlation ID (see logging.Correlate). A record that can't be
+// written is counted and logged; the request it describes has already
+// happened.
 func (s *Server) audit(ctx context.Context, env audit.Envelope, p audit.Payload, attrs ...slog.Attr) {
 	event := strings.TrimPrefix(p.AuditEvent(), "authn.")
 	rid := requestIDFrom(ctx)
@@ -343,10 +348,10 @@ func (s *Server) audit(ctx context.Context, env audit.Envelope, p audit.Payload,
 	}
 	env.Actor = audit.Clean(env.Actor, audit.MaxEnvelopeBytes)
 	env.Subject = audit.Clean(env.Subject, audit.MaxEnvelopeBytes)
-	env.CorrelationID = rid
+	env.CorrelationID = logging.CorrelationID(ctx)
 	if err := al.Write(env, p); err != nil {
 		s.m.Counter("wicket_audit_failures_total", "", "Audit records that could not be written.").Inc()
-		s.log.Error("audit write failed", "event", event, "request_id", rid, "error", err.Error())
+		s.log.ErrorContext(ctx, "audit write failed", "event", event, "request_id", rid, "error", err.Error())
 		return
 	}
 	s.m.Counter("wicket_audit_records_total", `event="`+event+`"`, "Audit records written.").Inc()

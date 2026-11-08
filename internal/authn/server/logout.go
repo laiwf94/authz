@@ -70,7 +70,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	clearCookie(w, sessionCookieName(rt), rt.cfg.CookieDomain, http.SameSiteLaxMode)
 	if _, err := s.sessions.Revoke(sess.ID); err != nil {
-		s.log.Error("persisting logout", "request_id", requestIDFrom(r.Context()), "error", err.Error())
+		s.log.ErrorContext(r.Context(), "persisting logout", "request_id", requestIDFrom(r.Context()), "error", err.Error())
 	}
 	s.audit(r.Context(), audit.Envelope{Actor: sess.Identity.Subject, Subject: "session:" + sess.ID, Action: "logout"},
 		audit.Logout{Provider: sess.Identity.Provider, Session: sess.ID},

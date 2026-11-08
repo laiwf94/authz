@@ -246,3 +246,28 @@ run in order, which is why the stripping is a filter placed before ext_authz.
 The nginx configuration is exercised live by the demo. The Traefik and Envoy
 snippets follow those proxies' documented forward-auth behavior; the gateway's side
 of both (`?redirect=1` and `/auth/envoy/`) is covered by the end-to-end tests.
+
+## Correlation IDs and `traceparent`
+
+Every request the gateway answers gets a correlation ID: the trace ID of the
+request's W3C `traceparent` header when it is valid, otherwise a new random
+trace ID. The ID is the `correlation_id` of the request's log lines and of the
+audit records it writes (`WICKET_AUDIT_LOG`), and `authz serve` and `authz mcp`
+do the same, so one trace ID follows a sign-in, the checks an app makes and
+the tool calls an agent makes.
+
+When a proxy that traces sends a `traceparent` with a forward-auth request,
+an allowed answer carries a `traceparent` back: the same trace ID under the
+gateway's own parent ID. Copy it upstream with the identity headers, for
+example in nginx:
+
+```nginx
+auth_request_set $auth_traceparent $upstream_http_traceparent;
+proxy_set_header traceparent $auth_traceparent;
+```
+
+Traefik takes it with `authResponseHeaders: [..., "Traceparent"]` and Envoy
+with an `allowed_upstream_headers` pattern `{exact: traceparent}` (Envoy also
+needs `traceparent` in `allowed_headers`). Without a `traceparent` on the
+request the answer has none and is byte for byte the one wicket gave; the
+gateway's generated ID is then only in its own logs and audit records.

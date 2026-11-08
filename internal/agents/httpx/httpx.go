@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
@@ -106,11 +107,15 @@ func (s *Server) Wrap(route string, next http.HandlerFunc) http.Handler {
 		hdr.Set(HeaderRequestID, id)
 		hdr.Set("Cache-Control", "no-store")
 		hdr.Set("X-Content-Type-Options", "nosniff")
+		// The correlation ID (the traceparent's trace ID, or a new one) goes
+		// into every log line written with ctx, every audit record and the
+		// traceparent of every upstream call made with ctx.
+		r, _ = logging.Correlate(r)
 		ctx := WithRequestID(r.Context(), id)
 		r = r.WithContext(ctx)
 		defer func() {
 			if p := recover(); p != nil {
-				s.Log.Error("panic", "request_id", id, "route", route, "panic", fmt.Sprint(p))
+				s.Log.ErrorContext(ctx, "panic", "request_id", id, "route", route, "panic", fmt.Sprint(p))
 				if sw.Code == 0 {
 					WriteError(sw, r, http.StatusInternalServerError, "internal", "internal error")
 				}

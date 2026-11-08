@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/logging/logtest"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 )
@@ -50,7 +50,7 @@ func newAuditHarness(t *testing.T) *auditHarness {
 	tok, _ := token.NewIssuer(bytes.Repeat([]byte{7}, token.KeySize))
 	h := &auditHarness{t: t, log: l, path: path, m: metrics.New(), logs: &lockedBuffer{}, tok: tok}
 	s, err := New(Config{Store: st, Tokens: tok, APIKeys: []string{apiKey, secondKey}, Metrics: h.m,
-		Logger: slog.New(slog.NewJSONHandler(h.logs, nil)), Audit: l})
+		Logger: logging.NewLogger(h.logs, logging.Options{}), Audit: l})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +59,8 @@ func newAuditHarness(t *testing.T) *auditHarness {
 	return h
 }
 
+// do sends one request. rid, when set, is sent as the traceparent when it
+// is one ("00-…") and as the X-Request-Id otherwise.
 func (h *auditHarness) do(method, path, key, rid string, body any) (int, map[string]any) {
 	h.t.Helper()
 	var rd io.Reader
@@ -71,7 +73,9 @@ func (h *auditHarness) do(method, path, key, rid string, body any) (int, map[str
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	if rid != "" {
+	if strings.HasPrefix(rid, "00-") {
+		req.Header.Set("Traceparent", rid)
+	} else if rid != "" {
 		req.Header.Set("X-Request-Id", rid)
 	}
 	resp, err := http.DefaultClient.Do(req)
@@ -107,6 +111,28 @@ func (h *auditHarness) records() []audit.Record {
 	return out
 }
 
+// traceSchema is the traceparent the schema write is sent with.
+const traceSchema = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+// logged reports whether a request line with request ID rid carries
+// correlation ID corr, a trace ID.
+func (h *auditHarness) logged(rid, corr string) bool {
+	if logging.Traceparent(corr) == "" {
+		return false
+	}
+	for _, l := range strings.Split(h.logs.String(), "\n") {
+		var m struct {
+			Msg           string `json:"msg"`
+			RequestID     string `json:"request_id"`
+			CorrelationID string `json:"correlation_id"`
+		}
+		if json.Unmarshal([]byte(l), &m) == nil && m.Msg == "request" && m.RequestID == rid && m.CorrelationID == corr {
+			return true
+		}
+	}
+	return false
+}
+
 func TestKeyID(t *testing.T) {
 	a, b := KeyID(apiKey), KeyID(secondKey)
 	if a == b || !strings.HasPrefix(a, "api_key:") || len(a) != len("api_key:")+8 || KeyID(apiKey) != a {
@@ -122,14 +148,14 @@ func TestKeyID(t *testing.T) {
 
 // TestAuditSchemaAndWrites: schema changes and relationship writes are
 // typed records in a chain that verifies, with the key's ID as the actor and
-// the request ID as the correlation ID; reads, checks and refused requests
-// write nothing.
+// the request's correlation ID (its traceparent's trace ID, or the generated
+// one on its log line); reads, checks and refused requests write nothing.
 func TestAuditSchemaAndWrites(t *testing.T) {
 	h := newAuditHarness(t)
 	scan := logtest.Check(t).Known(apiKey, secondKey)
 	scan.File(h.path)
 	defer func() { scan.Bytes("serve log", []byte(h.logs.String())) }()
-	code, out := h.do("PUT", "/v1/schema", apiKey, "req-schema-1", map[string]string{"schema": schemaSrc})
+	code, out := h.do("PUT", "/v1/schema", apiKey, traceSchema, map[string]string{"schema": schemaSrc})
 	if code != 200 {
 		t.Fatalf("schema: %d %v", code, out)
 	}
@@ -177,19 +203,19 @@ func TestAuditSchemaAndWrites(t *testing.T) {
 	json.Unmarshal(sr.Data, &sp)
 	sum := sha256.Sum256([]byte(schemaText(t, h)))
 	if sr.Event != audit.EventSchemaWritten || sr.Actor != KeyID(apiKey) || sr.Action != "schema.write" ||
-		sr.CorrelationID != "req-schema-1" || sp.Revision != schemaAt || sp.SHA256 != hex.EncodeToString(sum[:]) || sp.Bytes == 0 {
+		sr.CorrelationID != "0af7651916cd43dd8448eb211c80319c" || sp.Revision != schemaAt || sp.SHA256 != hex.EncodeToString(sum[:]) || sp.Bytes == 0 {
 		t.Errorf("schema record: %+v %+v", sr.Envelope, sp)
 	}
 	wr := recs[1]
 	var wp audit.RelationshipsWritten
 	json.Unmarshal(wr.Data, &wp)
 	if wr.Event != audit.EventRelationshipsWritten || wr.Actor != KeyID(secondKey) || wr.Action != "relationships.write" ||
-		len(wr.CorrelationID) != 24 || wp != (audit.RelationshipsWritten{Revision: writeAt, Touch: 2, Create: 1}) {
+		logging.Traceparent(wr.CorrelationID) == "" || wp != (audit.RelationshipsWritten{Revision: writeAt, Touch: 2, Create: 1}) {
 		t.Errorf("write record: %+v %+v", wr.Envelope, wp)
 	}
 	var dp audit.RelationshipsWritten
 	json.Unmarshal(recs[2].Data, &dp)
-	if recs[2].CorrelationID != "req-delete" || dp.Delete != 1 || dp.Preconditions != 1 || dp.Touch+dp.Create != 0 {
+	if !h.logged("req-delete", recs[2].CorrelationID) || dp.Delete != 1 || dp.Preconditions != 1 || dp.Touch+dp.Create != 0 {
 		t.Errorf("delete record: %+v %+v", recs[2].Envelope, dp)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,7 +28,34 @@ func withAudit(t *testing.T, h *harness) (path string, l *audit.Log) {
 	}
 	t.Cleanup(func() { l.Close() })
 	h.srv.auditLog.Store(l)
+	// The platform handler, as authz gateway logs, so request lines carry
+	// the correlation ID their audit records do.
+	h.srv.log = logging.NewLogger(h.logs, logging.Options{Level: slog.LevelDebug})
 	return path, l
+}
+
+// tracedCallback is the traceparent the proxy sends with alice's callback.
+const tracedCallback = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+// loggedCorrelations returns the correlation_id of every request line in
+// logs, keyed by its request_id.
+func loggedCorrelations(t *testing.T, logs string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(logs), "\n") {
+		var m struct {
+			Msg           string `json:"msg"`
+			RequestID     string `json:"request_id"`
+			CorrelationID string `json:"correlation_id"`
+		}
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("log line %q: %v", l, err)
+		}
+		if m.Msg == "request" {
+			out[m.RequestID] = m.CorrelationID
+		}
+	}
+	return out
 }
 
 // readAudit verifies the log against the platform schemas and returns its
@@ -64,8 +92,9 @@ func byEvent(recs []audit.Record, event string) []audit.Record {
 
 // TestAuditChain drives every audit event the gateway emits and requires
 // each one in the hash chain as its typed authn event, with the envelope
-// filled in, the request ID as the correlation ID, and no cookie, secret or
-// key in the file.
+// filled in, the request's correlation ID (its traceparent's trace ID, or a
+// generated one that its log lines also carry), and no cookie, secret or key
+// in the file.
 func TestAuditChain(t *testing.T) {
 	var cfg map[string]any
 	h := newHarness(t, harnessOpts{cfgMutate: func(c map[string]any) { cfg = c }})
@@ -73,7 +102,7 @@ func TestAuditChain(t *testing.T) {
 	scan := logtest.Check(t).Known(clientSecret, string(h.cookieKey))
 	scan.File(path)
 
-	// A sign-in under a request ID the proxy chose.
+	// A sign-in under a request ID and a traceparent the proxy chose.
 	alice := h.browser()
 	req, _ := http.NewRequest(http.MethodGet, h.public+"/login?app=whoami&provider=corp", nil)
 	resp := alice.do(req)
@@ -88,6 +117,7 @@ func TestAuditChain(t *testing.T) {
 	resp, _ = alice.post(action, fields)
 	cb, _ := http.NewRequest(http.MethodGet, resp.Header.Get("Location"), nil)
 	cb.Header.Set("X-Request-Id", "trace-4bf92f3577b34da6")
+	cb.Header.Set("Traceparent", tracedCallback)
 	if resp := alice.do(cb); resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback: %d\n%s", resp.StatusCode, h.logs.String())
 	}
@@ -168,14 +198,32 @@ func TestAuditChain(t *testing.T) {
 			t.Errorf("no %s record", ev)
 		}
 	}
-	// Every record has a correlation ID: the one the proxy sent, or the one
-	// the gateway generated and logged.
+	// Every record has a correlation ID in trace ID form, and it is the one
+	// on the request line of the request that wrote it: the record's audit
+	// log line names the request ID.
+	corr := loggedCorrelations(t, h.logs.String())
+	seen := map[string]bool{}
 	for _, r := range recs {
-		if r.CorrelationID == "" {
-			t.Errorf("seq %d %s: no correlation ID", r.Seq, r.Event)
-		} else if !strings.Contains(h.logs.String(), `"request_id":"`+r.CorrelationID+`"`) {
-			t.Errorf("seq %d %s: correlation ID %q is not a logged request ID", r.Seq, r.Event, r.CorrelationID)
+		if logging.Traceparent(r.CorrelationID) == "" {
+			t.Errorf("seq %d %s: correlation ID %q is not a trace ID", r.Seq, r.Event, r.CorrelationID)
+			continue
 		}
+		var rid string
+		for id, c := range corr {
+			if c == r.CorrelationID {
+				rid = id
+			}
+		}
+		if rid == "" {
+			t.Errorf("seq %d %s: correlation ID %q is on no request line", r.Seq, r.Event, r.CorrelationID)
+		} else if !strings.Contains(h.logs.String(), `"msg":"audit","correlation_id":"`+r.CorrelationID+`"`) {
+			t.Errorf("seq %d %s: no audit line carries correlation ID %q", r.Seq, r.Event, r.CorrelationID)
+		}
+		seen[r.CorrelationID] = true
+	}
+	// Two revocations, two reloads and the sign-ins are separate requests.
+	if len(seen) < 10 {
+		t.Errorf("%d distinct correlation IDs over %d records", len(seen), len(recs))
 	}
 
 	ok := byEvent(recs, audit.EventLoginSucceeded)
@@ -187,7 +235,7 @@ func TestAuditChain(t *testing.T) {
 	if err := json.Unmarshal(first.Data, &p); err != nil {
 		t.Fatal(err)
 	}
-	if first.CorrelationID != "trace-4bf92f3577b34da6" || first.Action != "login" || first.Decision != audit.Allow ||
+	if first.CorrelationID != "4bf92f3577b34da6a3ce929d0e0e4736" || first.Action != "login" || first.Decision != audit.Allow ||
 		first.Subject != "app:whoami" || first.Actor == "" || p.Provider != "corp" || p.Email != "alice@example.org" ||
 		len(p.Session) != 32 || p.ClientIP == "" {
 		t.Errorf("login_succeeded: %+v %+v", first.Envelope, p)
@@ -305,4 +353,43 @@ func (h *harness) metrics() string {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return string(b)
+}
+
+// TestForwardAuthTraceparent: a proxy that sends a traceparent gets one back
+// on an allowed forward-auth answer, to copy upstream: the same trace ID
+// under the gateway's own parent ID, which is also the request's logged
+// correlation ID. Without one the answer has none, as wicket's had.
+func TestForwardAuthTraceparent(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	withAudit(t, h)
+	alice := h.browser()
+	alice.loginOIDC("alice", "alice-pass", "")
+
+	resp := alice.auth("/", http.Header{"Traceparent": {tracedCallback}, "X-Request-Id": {"fwd-1"}})
+	tp := resp.Header.Get("Traceparent")
+	id, ok := logging.ParseTraceparent(tp)
+	if resp.StatusCode != 200 || !ok || id != "4bf92f3577b34da6a3ce929d0e0e4736" || tp == tracedCallback {
+		t.Fatalf("traced forward-auth: %d traceparent %q", resp.StatusCode, tp)
+	}
+	if got := loggedCorrelations(t, h.logs.String())["fwd-1"]; got != id {
+		t.Errorf("request line correlation ID %q, want %q", got, id)
+	}
+
+	for _, hdr := range []http.Header{{"X-Request-Id": {"fwd-2"}}, {"Traceparent": {"garbage"}, "X-Request-Id": {"fwd-3"}}} {
+		resp := alice.auth("/", hdr)
+		if resp.StatusCode != 200 || resp.Header.Values("Traceparent") != nil {
+			t.Errorf("untraced forward-auth: %d traceparent %q", resp.StatusCode, resp.Header.Values("Traceparent"))
+		}
+	}
+	corr := loggedCorrelations(t, h.logs.String())
+	if c2, c3 := corr["fwd-2"], corr["fwd-3"]; logging.Traceparent(c2) == "" || logging.Traceparent(c3) == "" || c2 == c3 || c2 == id {
+		t.Errorf("generated correlation IDs %q %q", c2, c3)
+	}
+
+	// A denied answer carries no traceparent: the proxy sends nothing on.
+	bob := h.browser()
+	bob.loginOIDC("bob", "bob-pass", "")
+	if resp := bob.auth("/", http.Header{"Traceparent": {tracedCallback}}); resp.StatusCode != 403 || resp.Header.Get("Traceparent") != "" {
+		t.Errorf("denied: %d traceparent %q", resp.StatusCode, resp.Header.Get("Traceparent"))
+	}
 }

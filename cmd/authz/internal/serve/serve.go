@@ -45,6 +45,7 @@ import (
 	"github.com/laiwf94/authz/internal/platform/audit"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
@@ -288,7 +289,10 @@ func serve(ctx context.Context, getenv func(string) string, path string, logOut 
 	}
 	loaded := cfg // before a random token key is filled in
 	level.Set(cfg.logLevel)
-	log := slog.New(slog.NewJSONHandler(logOut, &slog.HandlerOptions{Level: level}))
+	// The platform handler: request lines carry the correlation ID their
+	// audit records do, and its tap feeds the secret scan. No subcommand
+	// attribute, so every other line stays byte for byte as recorded.
+	log := logging.NewLogger(logOut, logging.Options{Level: level})
 	if watcher != nil {
 		if ignored := grantdVars(getenv); len(ignored) > 0 {
 			log.Warn("GRANTD_ variables are ignored with a configuration file; use its AUTHZ_SERVE_ overrides",

@@ -99,13 +99,23 @@ func FromRequest(r *http.Request) string {
 	return NewCorrelationID()
 }
 
+// Correlate returns r with a correlation ID in its context and that ID: the
+// one the context already carries, otherwise FromRequest's. The request
+// wrappers of serve, gateway and mcp call it first, so their log lines,
+// audit envelopes and upstream traceparent headers share the ID.
+func Correlate(r *http.Request) (*http.Request, string) {
+	if id := CorrelationID(r.Context()); id != "" {
+		return r, id
+	}
+	id := FromRequest(r)
+	return r.WithContext(WithCorrelationID(r.Context(), id)), id
+}
+
 // Middleware gives every request a correlation ID (see FromRequest) in its
 // context, unless the context already has one, and passes it on to next.
 func Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if CorrelationID(r.Context()) == "" {
-			r = r.WithContext(WithCorrelationID(r.Context(), FromRequest(r)))
-		}
+		r, _ = Correlate(r)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -126,6 +136,18 @@ func Traceparent(id string) string {
 		}
 	}
 	return "00-" + id + "-" + hex.EncodeToString(b[:]) + "-00"
+}
+
+// Propagate sets h's traceparent to carry ctx's correlation ID to an
+// upstream (see Traceparent), replacing any value h had, and reports
+// whether it did. A context whose ID is not a trace ID leaves h alone.
+func Propagate(ctx context.Context, h http.Header) bool {
+	tp := Traceparent(CorrelationID(ctx))
+	if tp == "" {
+		return false
+	}
+	h.Set(HeaderTraceparent, tp)
+	return true
 }
 
 func lowerHex(s string) bool {

@@ -150,3 +150,39 @@ func TestContextAccessors(t *testing.T) {
 		t.Fatal("values lost")
 	}
 }
+
+func TestCorrelate(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set(HeaderTraceparent, validTP)
+	r2, id := Correlate(r)
+	if id != "4bf92f3577b34da6a3ce929d0e0e4736" || CorrelationID(r2.Context()) != id {
+		t.Fatalf("Correlate = %q, context %q", id, CorrelationID(r2.Context()))
+	}
+	// Already correlated: the same request comes back.
+	if r3, id3 := Correlate(r2); r3 != r2 || id3 != id {
+		t.Fatalf("second Correlate = %p %q, want %p %q", r3, id3, r2, id)
+	}
+	r4, gen := Correlate(httptest.NewRequest("GET", "/", nil))
+	if len(gen) != 32 || CorrelationID(r4.Context()) != gen || Traceparent(gen) == "" {
+		t.Fatalf("generated %q", gen)
+	}
+}
+
+func TestPropagate(t *testing.T) {
+	const id = "4bf92f3577b34da6a3ce929d0e0e4736"
+	h := http.Header{}
+	h.Set(HeaderTraceparent, "00-11111111111111111111111111111111-2222222222222222-01")
+	if !Propagate(WithCorrelationID(context.Background(), id), h) {
+		t.Fatal("Propagate refused a trace ID")
+	}
+	got, ok := ParseTraceparent(h.Get(HeaderTraceparent))
+	if !ok || got != id || len(h.Values(HeaderTraceparent)) != 1 {
+		t.Fatalf("traceparent = %q", h.Values(HeaderTraceparent))
+	}
+	for _, ctx := range []context.Context{context.Background(), WithCorrelationID(context.Background(), "req-1")} {
+		h := http.Header{}
+		if Propagate(ctx, h) || len(h) != 0 {
+			t.Fatalf("Propagate(%q) set %v", CorrelationID(ctx), h)
+		}
+	}
+}

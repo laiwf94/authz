@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/logging/logtest"
 )
+
+const reloadTrace = "4bf92f3577b34da6a3ce929d0e0e4736"
 
 // TestRunAuditLog: WICKET_AUDIT_LOG gives the gateway a hash-chained audit
 // log that verifies against the platform schemas and survives a restart.
@@ -26,11 +29,12 @@ func TestRunAuditLog(t *testing.T) {
 	if s, err := loadSettings(env(e)); err != nil || s.auditLog != path {
 		t.Fatalf("settings: %+v %v", s, err)
 	}
+	logged := &syncBuf{}
 	for i := 0; i < 2; i++ { // the second run appends to the first one's chain
 		ctx, cancel := context.WithCancel(context.Background())
 		addrs := make(chan [2]string, 1)
 		done := make(chan error, 1)
-		logs := scan.Writer(&syncBuf{})
+		logs := scan.Writer(io.MultiWriter(logged, &syncBuf{}))
 		go func() { done <- run(ctx, env(e), logs, nil, func(p, a string) { addrs <- [2]string{p, a} }) }()
 		var a [2]string
 		select {
@@ -40,6 +44,7 @@ func TestRunAuditLog(t *testing.T) {
 		}
 		req, _ := http.NewRequest("POST", "http://"+a[1]+"/admin/reload", nil)
 		req.Header.Set("X-Request-Id", "reload-1")
+		req.Header.Set("Traceparent", "00-"+reloadTrace+"-00f067aa0ba902b7-01")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil || resp.StatusCode != 200 {
 			t.Fatalf("reload: %v %v", resp, err)
@@ -58,10 +63,14 @@ func TestRunAuditLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Each run: the load at start and the reload.
+	// Each run: the load at start and the reload, under the reload's trace
+	// ID, which its request line carries too.
 	if res.Records != 4 || strings.Count(string(raw), `"event":"authn.config_loaded"`) != 4 ||
-		strings.Count(string(raw), `"correlation_id":"reload-1"`) != 2 {
+		strings.Count(string(raw), `"correlation_id":"`+reloadTrace+`"`) != 2 {
 		t.Fatalf("%d records:\n%s", res.Records, raw)
+	}
+	if n := strings.Count(logged.String(), `"msg":"request","correlation_id":"`+reloadTrace+`","request_id":"reload-1"`); n != 2 {
+		t.Fatalf("%d reload request lines with the trace ID:\n%s", n, logged.String())
 	}
 }
 

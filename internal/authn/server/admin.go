@@ -55,7 +55,7 @@ func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 		audit.SessionRevoked{Session: id, Count: 1, By: "admin"},
 		slog.String("session", id), slog.String("by", "admin"))
 	if err != nil {
-		s.log.Error("persisting revocation", "request_id", requestIDFrom(r.Context()), "error", err.Error())
+		s.log.ErrorContext(r.Context(), "persisting revocation", "request_id", requestIDFrom(r.Context()), "error", err.Error())
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "revoked now, but not saved; it may come back after a restart")
 		return
 	}
@@ -84,7 +84,7 @@ func (s *Server) handleRevokeSubject(w http.ResponseWriter, r *http.Request) {
 			slog.Int("count", n), slog.String("by", "admin"))
 	}
 	if err != nil {
-		s.log.Error("persisting revocation", "request_id", requestIDFrom(r.Context()), "error", err.Error())
+		s.log.ErrorContext(r.Context(), "persisting revocation", "request_id", requestIDFrom(r.Context()), "error", err.Error())
 		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "revoked now, but not saved; it may come back after a restart")
 		return
 	}

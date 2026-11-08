@@ -326,7 +326,7 @@ func (s *Server) handleACS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime, st *loginState, id policy.Identity, notAfter time.Time, status int) {
 	if old, _ := s.currentSession(r, rt); old != nil {
 		if _, err := s.sessions.Revoke(old.ID); err != nil {
-			s.log.Error("revoking the previous session", "request_id", requestIDFrom(r.Context()), "error", err.Error())
+			s.log.ErrorContext(r.Context(), "revoking the previous session", "request_id", requestIDFrom(r.Context()), "error", err.Error())
 		}
 	}
 	secret, sess, err := s.sessions.Create(id, notAfter)

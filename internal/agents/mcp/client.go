@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/internal/agents/jsonrpc"
+	"github.com/laiwf94/authz/internal/platform/logging"
 )
 
 // Client errors.
@@ -313,6 +314,9 @@ func (c *Client) newRequest(ctx context.Context, body []byte, h http.Header) (*h
 	for k, vs := range h {
 		req.Header[k] = vs
 	}
+	// The calling request's correlation ID goes upstream as the trace ID
+	// of a traceparent, replacing any configured one.
+	logging.Propagate(ctx, req.Header)
 	return req, nil
 }
 

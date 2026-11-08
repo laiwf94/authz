@@ -30,7 +30,8 @@ func TestRunAuditLog(t *testing.T) {
 	defer cancel()
 	addrs := make(chan string, 1)
 	done := make(chan error, 1)
-	logs := scan.Writer(&bytes.Buffer{})
+	logged := &bytes.Buffer{}
+	logs := scan.Writer(logged)
 	go func() { done <- run(ctx, env(e), logs, func(a string) { addrs <- a }) }()
 	var addr string
 	select {
@@ -38,12 +39,14 @@ func TestRunAuditLog(t *testing.T) {
 	case err := <-done:
 		t.Fatal(err)
 	}
+	traces := map[string]string{"PUT": "0af7651916cd43dd8448eb211c80319c", "POST": "4bf92f3577b34da6a3ce929d0e0e4736"}
 	post := func(method, path, body string) {
 		t.Helper()
 		req, _ := http.NewRequest(method, "http://"+addr+path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+apiKey)
-		req.Header.Set("X-Request-Id", "corr-"+method)
+		req.Header.Set("X-Request-Id", "req-"+method)
+		req.Header.Set("Traceparent", "00-"+traces[method]+"-00f067aa0ba902b7-01")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil || resp.StatusCode != 200 {
 			t.Fatalf("%s %s: %v %v", method, path, resp, err)
@@ -65,10 +68,16 @@ func TestRunAuditLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(raw)
-	if res.Records != 2 || !strings.Contains(s, `"event":"authz.schema_written","actor":"`+api.KeyID(apiKey)+`","action":"schema.write","correlation_id":"corr-PUT"`) ||
-		!strings.Contains(s, `"event":"authz.relationships_written"`) || !strings.Contains(s, `"correlation_id":"corr-POST"`) ||
+	if res.Records != 2 || !strings.Contains(s, `"event":"authz.schema_written","actor":"`+api.KeyID(apiKey)+`","action":"schema.write","correlation_id":"`+traces["PUT"]+`"`) ||
+		!strings.Contains(s, `"event":"authz.relationships_written"`) || !strings.Contains(s, `"correlation_id":"`+traces["POST"]+`"`) ||
 		strings.Contains(s, apiKey) {
 		t.Fatalf("audit log:\n%s", s)
+	}
+	// The request lines carry the same IDs.
+	for m, id := range traces {
+		if !strings.Contains(logged.String(), `"msg":"request","correlation_id":"`+id+`","request_id":"req-`+m+`"`) {
+			t.Errorf("no %s request line with correlation ID %s:\n%s", m, id, logged.String())
+		}
 	}
 }
 
