@@ -39,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/authz/api"
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
@@ -46,7 +47,6 @@ import (
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/logging"
-	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
 
@@ -271,6 +271,20 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 // serve serves until ctx ends, configured by the serve section of the file
 // at path, or by the GRANTD_ variables when path is empty.
 func serve(ctx context.Context, getenv func(string) string, path string, logOut io.Writer, ready func(addr string)) error {
+	return serveIn(ctx, part.Host{}, getenv, path, logOut, ready)
+}
+
+// Part runs authz serve as one part of a process that runs several
+// subcommands ("authz run"): its listener joins the host's group, its
+// metrics go to the host's registry and its log lines say "serve". It is
+// configured as Run is, by the serve section of the file at path, or by
+// the GRANTD_ variables when path is empty.
+func Part(ctx context.Context, h part.Host, getenv func(string) string, path string, logOut io.Writer) error {
+	return serveIn(ctx, h, getenv, path, logOut, nil)
+}
+
+// serveIn is serve with the process's listeners and registry.
+func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path string, logOut io.Writer, ready func(addr string)) error {
 	var (
 		cfg     config
 		err     error
@@ -292,7 +306,7 @@ func serve(ctx context.Context, getenv func(string) string, path string, logOut 
 	// The platform handler: request lines carry the correlation ID their
 	// audit records do, and its tap feeds the secret scan. No subcommand
 	// attribute, so every other line stays byte for byte as recorded.
-	log := logging.NewLogger(logOut, logging.Options{Level: level})
+	log := logging.NewLogger(logOut, logging.Options{Level: level, Subcommand: h.Name})
 	if watcher != nil {
 		if ignored := grantdVars(getenv); len(ignored) > 0 {
 			log.Warn("GRANTD_ variables are ignored with a configuration file; use its AUTHZ_SERVE_ overrides",
@@ -323,11 +337,11 @@ func serve(ctx context.Context, getenv func(string) string, path string, logOut 
 	}
 
 	srv, err := api.New(api.Config{Store: st, Tokens: tokens, APIKeys: cfg.apiKeys, Logger: log,
-		Metrics: metrics.New(), CacheSize: cfg.cacheSize, Audit: auditLog, KeyLimit: cfg.keyLimit})
+		Metrics: h.Registry(), CacheSize: cfg.cacheSize, Audit: auditLog, KeyLimit: cfg.keyLimit})
 	if err != nil {
 		return err
 	}
-	g, err := httpserver.Listen(cfg.http, httpserver.Spec{
+	g, err := h.Binder()(cfg.http, httpserver.Spec{
 		Name:    "api",
 		Addr:    cfg.addr,
 		Handler: srv,

@@ -819,3 +819,55 @@ timeout), the probe before and during a drain, a request in flight across
 the drain, the bound, a listener failing during the delay, certificate
 renewal and a failed renewal, and mutual TLS; each subcommand has a test
 that serves over TLS, sees `/readyz` turn 503 on shutdown and stops cleanly.
+
+### Several subcommands in one process (authz run)
+
+`authz run` starts `authz serve`, `authz gateway` and `authz mcp serve` in
+one process (#77). The subcommands' startup code is the same code that runs
+alone; what changes is what each takes from its process, a `part.Host`:
+
+- **One listener group.** `httpserver.Shared` is one Group that several
+  parts join. Each part binds through `Shared.Part(i)`, a `Binder` with the
+  same signature as `httpserver.Bind`, and waits there until every part has
+  joined; the last one to join binds every listener in one `Listen`, in
+  part order whatever order they joined in, so either all five listeners
+  (the API, the gateway's public and admin listeners, the agent and admin
+  listeners of mcp) are bound or none is. The process then calls
+  `Shared.Serve` once: one readiness flip, one drain delay and one drain
+  bound for every listener. Each part's `Serve` returns when that drain is
+  over, so a part closes its store, session log or approval log only after
+  the last request that could write to it has been answered.
+- **One metrics registry.** Every part writes to the same
+  `metrics.Registry`, so `/metrics` on the API, on the gateway's admin
+  listener and on mcp's admin listener all answer with the union of the
+  three tracks' families. The family names never collided: each track's
+  metrics carry its own prefix (`grantd_`, `wicket_`, `toolgate_`), and
+  `internal/platform/metrics/testdata/tracks.golden` holds the union.
+- **One log output.** Every line carries `subcommand` (`serve`, `gateway`,
+  `mcp`, or `run` for the process's own `running` and `stopped` lines).
+  Alone, a subcommand adds nothing, so its lines and the golden replays are
+  unchanged.
+- **Settings set once.** TLS and draining are per process, from
+  `AUTHZ_TLS_*` and `AUTHZ_DRAIN_*`. A part's own setting (`GRANTD_TLS_CERT`,
+  a section's `tls_cert`, `WICKET_DRAIN_DELAY`) is refused, by the command
+  for the variables and by `Shared` for anything else, rather than ignored:
+  ignoring a TLS setting would serve plain HTTP where TLS was asked for.
+- **Failure.** A part that cannot start aborts the group: the parts waiting
+  to join fail with `ErrAborted`, nothing is bound, and the command prints
+  the one error that caused it. A part that stops after binding ends the
+  process context, which drains the others as SIGTERM does.
+
+SIGHUP goes to the gateway, which reloads its configuration, and to mcp,
+which reloads its policy.
+
+`TestRunSurvivesSIGKILLMidWrite` (cmd/authz) holds the shared process to
+the crash guarantees each part has alone. Four times, while all three parts
+are writing (relationship writes to `grantd.wal`, SAML sign-ins to the
+session log, approval decisions to `approvals.wal`), the process is killed
+with SIGKILL once every part has acknowledged writes in that round, and
+restarted on the same files. After every restart each relationship serve
+answered 200 for is checked allowed at a fully consistent snapshot, each
+session cookie the gateway set still passes forward-auth, each approval and
+denial mcp acknowledged is still decided that way, and each request left
+undecided is still pending. The MCP audit chain verifies at the end. Run
+with the session file removed, the test fails on the first lost session.

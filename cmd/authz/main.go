@@ -41,6 +41,7 @@ import (
 	"github.com/laiwf94/authz/cmd/authz/internal/gateway"
 	"github.com/laiwf94/authz/cmd/authz/internal/mcp"
 	"github.com/laiwf94/authz/cmd/authz/internal/mcpfake"
+	"github.com/laiwf94/authz/cmd/authz/internal/runcmd"
 	"github.com/laiwf94/authz/cmd/authz/internal/serve"
 )
 
@@ -64,6 +65,7 @@ var commands = []command{
 	{name: "gateway", summary: gateway.Summary, run: gateway.Run},
 	{name: "fakeidp", summary: fakeidp.Summary, hidden: true, run: fakeidp.Run},
 	{name: "check", summary: checkcmd.Summary, run: checkcmd.Run},
+	{name: "run", summary: runcmd.Summary, run: runcmd.Run},
 	{name: "ctl", summary: ctl.Summary, run: ctl.Run},
 	{name: "mcp", summary: mcp.Summary, run: mcp.Run},
 	{name: "mcpfake", summary: mcpfake.Summary, hidden: true, run: mcpfake.Run},

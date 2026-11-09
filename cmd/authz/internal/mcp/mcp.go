@@ -56,6 +56,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/agents/gateway"
 	"github.com/laiwf94/authz/internal/agents/identity"
 	"github.com/laiwf94/authz/internal/agents/pins"
@@ -63,7 +64,6 @@ import (
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/logging"
-	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
 // Summary is the one-line description shown in "authz help".
@@ -305,6 +305,24 @@ func readGatewayConfig(path string, getenv func(string) string) (*gateway.Config
 
 // run serves until ctx ends. ready, when set, receives the bound addresses.
 func run(ctx context.Context, getenv func(string) string, logOut io.Writer, ready func(gw, admin string)) error {
+	return runIn(ctx, part.Host{}, getenv, logOut, ready)
+}
+
+// Part runs "authz mcp serve" as one part of a process that runs several
+// subcommands ("authz run"): its listeners join the host's group, its
+// metrics go to the host's registry and its log lines say "mcp". It is
+// configured as Run is, by the TOOLGATE_ variables or their AUTHZ_MCP_
+// names.
+func Part(ctx context.Context, h part.Host, getenv func(string) string, logOut io.Writer) error {
+	env, err := compatEnv(getenv, gatewayEnv)
+	if err != nil {
+		return err
+	}
+	return runIn(ctx, h, env, logOut, nil)
+}
+
+// runIn is run with the process's listeners and registry.
+func runIn(ctx context.Context, h part.Host, getenv func(string) string, logOut io.Writer, ready func(gw, admin string)) error {
 	cfg, err := loadConfig(getenv)
 	if err != nil {
 		return err
@@ -312,7 +330,7 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 	// The platform handler: request lines carry the correlation ID their
 	// audit records do, and its tap feeds the secret scan. No subcommand
 	// attribute, so every other line stays byte for byte as recorded.
-	log := logging.NewLogger(logOut, logging.Options{Level: cfg.logLevel})
+	log := logging.NewLogger(logOut, logging.Options{Level: cfg.logLevel, Subcommand: h.Name})
 	gc, err := readGatewayConfig(cfg.configPath, getenv)
 	if err != nil {
 		return err
@@ -343,7 +361,7 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 	}
 	defer pinStore.Close()
 	gw, err := gateway.New(gateway.Options{Config: gc, Auth: auth, Policy: pol, Audit: auditLog, Pins: pinStore,
-		ApprovalLog: approvalPath, AuditKey: cfg.auditKey, AllowedOrigins: cfg.origins, Log: log, Metrics: metrics.New()})
+		ApprovalLog: approvalPath, AuditKey: cfg.auditKey, AllowedOrigins: cfg.origins, Log: log, Metrics: h.Registry()})
 	if err != nil {
 		return err
 	}
@@ -353,7 +371,7 @@ func run(ctx context.Context, getenv func(string) string, logOut io.Writer, read
 	// plus an approval wait (60 s), a slot wait (1 s) and the call itself
 	// (120 s), at the configuration maximums.
 	lim := httpserver.Limits{WriteTimeout: 6 * time.Minute, MaxHeaderBytes: 32 << 10}
-	g, err := httpserver.Listen(cfg.http,
+	g, err := h.Binder()(cfg.http,
 		httpserver.Spec{Name: "agent", Addr: cfg.addr, Handler: gw.Handler(), Limits: lim},
 		httpserver.Spec{Name: "admin", Addr: cfg.adminAddr, Handler: gw.AdminHandler(cfg.adminToken), Limits: lim, ReadyPath: "/readyz"})
 	if err != nil {

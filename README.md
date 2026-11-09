@@ -112,6 +112,24 @@ API key and log level changes while it runs, and `authz gateway -config
 authz.json` from its gateway section, applying cookie key, provider, app and
 log level changes while it runs.
 
+`authz run` starts `serve`, `gateway` and `mcp serve` in one process. Each
+part reads the configuration its own subcommand reads (the `GRANTD_`,
+`WICKET_` and `TOOLGATE_` variables, or the serve and gateway sections of
+`-config authz.json`), and they share one listener group and one metrics
+registry: every listener is bound together or not at all, `/metrics` on any
+part shows the metrics of all three, SIGTERM flips every `/readyz` at once
+and drains every listener within one bound, and each log line says which
+part wrote it. TLS and draining are set once for every listener with
+`AUTHZ_TLS_CERT`, `AUTHZ_TLS_KEY`, `AUTHZ_TLS_CLIENT_CA`, `AUTHZ_DRAIN_DELAY`
+and `AUTHZ_DRAIN_TIMEOUT`; a part's own TLS or drain setting is refused.
+`-parts serve,gateway` runs a subset. If a part cannot start, nothing is
+bound and the command exits 1 naming that part.
+
+```console
+$ authz run -config authz.json
+$ authz run -parts serve,mcp
+```
+
 Nothing changes for an existing grantd deployment: the same variables, data
 directory (`grantd.wal`), tokens, endpoints, error codes, metric names and
 logs. CI holds that to a recording made from the grantd binary before the
@@ -259,6 +277,8 @@ cmd/authz                   the one binary: subcommand dispatcher and version
 cmd/authz/internal/serve    authz serve (formerly grantd): configuration and startup
 cmd/authz/internal/ctl      authz ctl: HTTP client for schema, relationships, checks
 cmd/authz/internal/checkcmd authz check: validate the config file, environment, schema and relationship files
+cmd/authz/internal/runcmd   authz run: serve, gateway and mcp in one process, one listener group and one registry
+cmd/authz/internal/part     what a serving subcommand takes from its process: listeners, registry, log name
 internal/authz/schema       schema language: lexer, parser, validation, canonical printer
 internal/authz/store        multi-version relationship store and write-ahead log
 internal/authz/check        check engine, result cache, lookups
@@ -276,6 +296,8 @@ internal/platform/keys      key rings with rotation, JWKS and the old key files
 internal/platform/jose      JWS/JWK/JWT: verification, ES256 signing, HS256 agent tokens
 internal/platform/seal      AES-256-GCM cookie sealing with key rotation
 internal/platform/metrics   one metrics registry: counters, gauges, histograms, series caps
+internal/platform/httpserver one HTTP server setup: listeners, TLS, limits, readiness, drain, shared groups
+internal/platform/storage/wal one append log: typed record streams, CRC32C, fsync policy, recovery
 ```
 
 ## License

@@ -46,6 +46,18 @@ link the roadmap issue they come from.
   `DRAIN_DELAY` keeps accepting after SIGTERM while `/readyz` answers 503,
   and `DRAIN_TIMEOUT` (default 20s) bounds the drain. Both gateways now
   answer `/readyz` on their admin listener.
+- **`authz run`: serve, gateway and mcp in one process**
+  ([#77](https://github.com/laiwf94/authz/issues/77)). Each part reads the
+  configuration its own subcommand reads. They share one listener group
+  (bound all or none, one readiness flip and one drain on SIGTERM) and one
+  metrics registry (`/metrics` on any part shows all three tracks'
+  metrics), and each log line has a `subcommand` attribute. TLS and drain
+  settings come from `AUTHZ_TLS_CERT`, `AUTHZ_TLS_KEY`, `AUTHZ_TLS_CLIENT_CA`,
+  `AUTHZ_DRAIN_DELAY` and `AUTHZ_DRAIN_TIMEOUT`; a part's own TLS or drain
+  setting is refused (exit 2). `-parts` runs a subset. A part that cannot
+  start stops the others before anything is bound (exit 1). Killed with
+  SIGKILL while all three parts write and restarted, no acknowledged
+  relationship, session or approval decision is lost.
 
 ### Sign-on (authn)
 

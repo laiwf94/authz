@@ -66,6 +66,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/authn/config"
 	"github.com/laiwf94/authz/internal/authn/server"
 	"github.com/laiwf94/authz/internal/authn/session"
@@ -74,7 +75,6 @@ import (
 	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/jose"
 	"github.com/laiwf94/authz/internal/platform/logging"
-	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/seal"
 )
 
@@ -365,6 +365,21 @@ func serve(ctx context.Context, getenv func(string) string, logOut io.Writer, hu
 // the wicket file they name when path is empty.
 func serveFrom(ctx context.Context, getenv func(string) string, path string, logOut io.Writer, hup <-chan os.Signal,
 	ready func(public, admin string), now func() time.Time) error {
+	return serveIn(ctx, part.Host{}, getenv, path, logOut, hup, ready, now)
+}
+
+// Part runs authz gateway as one part of a process that runs several
+// subcommands ("authz run"): its listeners join the host's group, its
+// metrics go to the host's registry and its log lines say "gateway". It is
+// configured as Run is, by the gateway section of the file at path, or by
+// the WICKET_ variables when path is empty; hup reloads it as SIGHUP does.
+func Part(ctx context.Context, h part.Host, getenv func(string) string, path string, logOut io.Writer, hup <-chan os.Signal) error {
+	return serveIn(ctx, h, getenv, path, logOut, hup, nil, nil)
+}
+
+// serveIn is serveFrom with the process's listeners and registry.
+func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path string, logOut io.Writer, hup <-chan os.Signal,
+	ready func(public, admin string), now func() time.Time) error {
 	var (
 		st      settings
 		err     error
@@ -385,7 +400,7 @@ func serveFrom(ctx context.Context, getenv func(string) string, path string, log
 	// The platform handler: request lines carry the correlation ID their
 	// audit records do, and its tap feeds the secret scan. No subcommand
 	// attribute, so every other line stays byte for byte as recorded.
-	log := logging.NewLogger(logOut, logging.Options{Level: level})
+	log := logging.NewLogger(logOut, logging.Options{Level: level, Subcommand: h.Name})
 	if watcher != nil {
 		if ignored := wicketVars(getenv); len(ignored) > 0 {
 			log.Warn("WICKET_ variables are ignored with a configuration file; use its AUTHZ_GATEWAY_ overrides",
@@ -455,7 +470,7 @@ func serveFrom(ctx context.Context, getenv func(string) string, path string, log
 			}
 			return load()
 		},
-		Sessions: sessions, Keys: keys, Signers: signers, Logger: log, Metrics: metrics.New(),
+		Sessions: sessions, Keys: keys, Signers: signers, Logger: log, Metrics: h.Registry(),
 		AdminToken: st.adminToken, TrustedProxies: st.trusted, LoginRate: st.loginRate, Now: now,
 		Audit: auditLog,
 	})
@@ -463,7 +478,7 @@ func serveFrom(ctx context.Context, getenv func(string) string, path string, log
 		return err
 	}
 
-	g, err := httpserver.Listen(st.http,
+	g, err := h.Binder()(st.http,
 		httpserver.Spec{Name: "public", Addr: st.addr, Handler: srv.Handler(),
 			Limits: httpserver.Limits{WriteTimeout: 45 * time.Second, MaxHeaderBytes: 32 << 10}},
 		httpserver.Spec{Name: "admin", Addr: st.adminAddr, Handler: srv.AdminHandler(), ReadyPath: "/readyz"})
