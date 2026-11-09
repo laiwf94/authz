@@ -460,6 +460,58 @@ writers' records the same way first, so `/admin/audit/head` reports the
 file's head and `authz mcp audit verify -head` holds for a shared file. Windows has no `flock` in the standard library,
 so there a log keeps one writer.
 
+### Segments
+
+A log that only grows is hard to ship, keep or prune, so `Options.Rotation`
+cuts it into segments once the active one reaches `MaxBytes` (the record
+that reaches the limit is its last) or its first record is `MaxAge` old
+(checked on the next append). The configured path is always the active
+segment, the only file written to. An older segment is named for its first
+record, `audit.jsonl.00000000000000001205`, padded to 20 digits so names
+sort in chain order and every `uint64` fits. Each segment after the first
+opens with an `audit.segment_started` record (track `audit`, action
+`audit.rotate`): an ordinary link of the chain, its `prev` the hash of the
+previous segment's last record, whose payload names that segment, its first
+record and why it ended (`size`, `age` or `manual` for `Log.Rotate`). It is
+only valid as a file's first line.
+
+A rotation happens under the active file's lock, after reading what other
+writers appended: fsync the active file; write the segment start record to
+`audit.jsonl.next`, lock it and fsync it; hard-link `audit.jsonl` to its
+segment name; rename `.next` over `audit.jsonl`; fsync the directory. The
+path never stops naming a complete log, so a writer opening it at any
+moment finds either the old file or the new one, and `Open` retries when the
+file it locked is no longer the one the path names. A crash leaves at worst
+a `.next` file or a segment name that is a second link to the active file;
+`Open` removes both under the lock. A rotation that fails before its rename
+(the segment name is taken, the directory is not writable) fails that
+append and leaves the active segment as it was, so the next append tries
+again; a failed fsync stops the log as it does anywhere else.
+
+Writers sharing the file keep the old one open. Under the lock each append
+compares the file it holds with the one the path names (one `stat`); when
+they differ it reads the rest of the old segment, then opens the segment
+that starts at its next record (the path's file, or, if that was rotated
+again meanwhile, the segment named for that record), locks it and reads on
+from its segment start record, which must continue its head; it repeats
+until it holds the path's file. `TestFollowSeveralRotations` idles a writer
+through three rotations, and `TestRotateWriterProcesses` has four processes
+with different limits rotate one file. The rotating writer fsynced the old segment, records of the others
+included, so their pending appends need no fsync of their own; the old
+file is closed by the next group commit, which may still be fsyncing it.
+Offsets for the group commit run on across segments. `BenchmarkAppendRotating`
+(64 KiB segments, a rotation every few hundred records) costs about 33 µs
+per append against 31 µs without rotation on the 4-core test machine.
+
+`VerifyChain` checks a rotated log: each file's own chain, then the links
+between them. The oldest segment must start at record 1, each later one
+must be named for its first record, follow the previous one without a gap,
+name it, and link to its last record, so a segment that was removed,
+renamed, swapped, copied over another or edited at its end is named in the
+error. `authz mcp audit verify` uses it whenever segments are present, and
+for a never-rotated log prints exactly what toolgate printed. Rotation
+needs `flock`, so it is refused on Windows.
+
 `TestMainOneChain` (cmd/authz) runs it end to end as a deployment would:
 serve, gateway and mcp as three processes of the binary with one
 `*_AUDIT_LOG` file, a fake identity provider, and a proxy configured like

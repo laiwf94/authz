@@ -123,7 +123,8 @@ different values is an error:
 Logs are JSON lines on standard output. SIGHUP reloads the policy; SIGINT or
 SIGTERM drains requests and stops. Exit codes: 0 success, 1 failure (a failed
 verification or policy case, or a gateway that cannot start), 2 usage or
-unreadable input for "audit verify" and "policy test".
+unreadable input for "audit verify" and "policy test". "audit verify" checks a
+rotated log across its segments (FILE.<first record number> beside FILE).
 `
 
 // Run is the "authz mcp" subcommand. It takes toolgate's arguments after
@@ -530,24 +531,61 @@ func auditVerify(prog string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: "+prog+" audit verify [-head HASH] FILE")
 		return 2
 	}
-	f, err := os.Open(fs.Arg(0))
-	if err != nil {
-		fmt.Fprintln(stderr, prog+":", err)
-		return 2
+	path := fs.Arg(0)
+	// A rotated log is verified across its segments (FILE.<first record>
+	// beside it); one never rotated is the one file, checked as toolgate
+	// checked it.
+	segs, _ := audit.Segments(path)
+	var records uint64
+	var last, in string
+	if len(segs) == 0 {
+		f, err := os.Open(path)
+		if err != nil {
+			fmt.Fprintln(stderr, prog+":", err)
+			return 2
+		}
+		res, err := audit.Verify(f)
+		f.Close()
+		if err != nil {
+			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, err)
+			return 1
+		}
+		if res.Records > 0 && res.Start != audit.Genesis {
+			// A later segment without the ones before it.
+			_, err = audit.VerifyChain(path, nil)
+			if err == nil {
+				err = errors.New("the segments before this one are missing")
+			}
+			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, chainError(path, err))
+			return 1
+		}
+		records, last = res.Records, res.Head
+	} else {
+		res, err := audit.VerifyChain(path, nil)
+		if err != nil {
+			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, chainError(path, err))
+			return 1
+		}
+		records, last = res.Records, res.Head
+		in = fmt.Sprintf(" in %d segments", len(res.Segments))
 	}
-	defer f.Close()
-	res, err := audit.Verify(f)
-	if err != nil {
-		fmt.Fprintf(stdout, "FAIL %s: %v\n", fs.Arg(0), err)
-		return 1
-	}
-	if *head != "" && *head != res.Head {
+	if *head != "" && *head != last {
 		fmt.Fprintf(stdout, "FAIL %s: chain is intact but ends at %s, not the expected head %s (records were removed from the end or the last one was changed)\n",
-			fs.Arg(0), res.Head, *head)
+			path, last, *head)
 		return 1
 	}
-	fmt.Fprintf(stdout, "OK %s: %d records, head %s\n", fs.Arg(0), res.Records, res.Head)
+	fmt.Fprintf(stdout, "OK %s: %d records%s, head %s\n", path, records, in, last)
 	return 0
+}
+
+// chainError drops the segment's path from an error about the file the
+// user named, which the FAIL line already shows.
+func chainError(path string, err error) error {
+	var se *audit.SegmentError
+	if errors.As(err, &se) && se.Path == path {
+		return se.Err
+	}
+	return err
 }
 
 // policyTest runs a case file against a policy. It exits 0 when every case

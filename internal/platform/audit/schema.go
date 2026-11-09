@@ -120,7 +120,7 @@ func schemaOf(d Def) (*Schema, error) {
 		return nil, err
 	}
 	switch d.Track {
-	case TrackAuthz, TrackAuthn, TrackAgents:
+	case TrackAuthz, TrackAuthn, TrackAgents, TrackAudit:
 	default:
 		return nil, fmt.Errorf("audit: %s: unknown track %q", event, d.Track)
 	}

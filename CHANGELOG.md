@@ -152,6 +152,18 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **Audit log segments** ([#81](https://github.com/laiwf94/authz/issues/81)).
+  `internal/platform/audit` can cut the log into segments by size or age
+  (`Options.Rotation`; off unless set). The configured path stays the
+  newest segment; older ones sit beside it as `FILE.<first record number>`,
+  and each later segment opens with an `audit.segment_started` record that
+  continues the chain and names the segment before it. Rotation runs under
+  the append lock and fsyncs the old file, the new file and the directory;
+  other processes sharing the file follow it into the new segment, and a
+  crashed rotation is cleaned up on open. `authz mcp audit verify` checks a
+  rotated log across all its segments and names a segment that was removed,
+  renamed, reordered or replaced; a log that was never rotated prints as
+  before.
 - **One audit chain for the platform** ([#78](https://github.com/laiwf94/authz/issues/78)).
   toolgate's hash-chained log is now `internal/platform/audit`, and
   `authz serve` (`GRANTD_AUDIT_LOG`), `authz gateway` (`WICKET_AUDIT_LOG`) and

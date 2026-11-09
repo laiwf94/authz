@@ -34,6 +34,11 @@
 // lock too, so a torn final line is only cut off when no live writer can be
 // in the middle of it. On systems without flock (Windows) a log must have one
 // writer.
+//
+// With Options.Rotation the log is cut into segments by size or age (see
+// rotate.go): the file at the configured path is always the newest segment,
+// the older ones sit beside it named for their first record, and the chain
+// runs on from one into the next. VerifyChain checks it across all of them.
 package audit
 
 import (
@@ -105,6 +110,17 @@ type Log struct {
 	// lock it and read their records first. nil where flock is missing.
 	osf *os.File
 
+	// Segments (rotate.go). size above is the active segment's; base adds
+	// the segments this Log wrote or followed before it, so the offsets
+	// syncTo compares run on across segments.
+	path    string
+	rot     Rotation
+	first   uint64    // sequence of the active segment's first record; 0 while it is empty
+	started time.Time // when the active segment's first record was written
+	base    int64     // bytes of the earlier segments since this Log opened
+	floor   int64     // offset known durable because a rotation fsynced it
+	retired []file    // earlier segments' files, closed by the next syncTo
+
 	syncMu sync.Mutex // serializes fsyncs
 	synced int64      // file size known durable; guarded by syncMu
 }
@@ -118,6 +134,8 @@ type Options struct {
 	// already in the file are checked by the chain only; VerifyWith checks
 	// their payloads.
 	Schemas *Schemas
+	// Rotation, if set, cuts the log into segments by size or age.
+	Rotation Rotation
 }
 
 // Open opens or creates the log at path. An existing log is verified first; a
@@ -133,15 +151,14 @@ func OpenWith(path string, o Options) (*Log, error) {
 	if now == nil {
 		now = time.Now
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err := o.Rotation.check(); err != nil {
+		return nil, err
+	}
+	f, err := openActive(path)
 	if err != nil {
-		return nil, fmt.Errorf("audit: %w", err)
+		return nil, err
 	}
 	if canLock {
-		if err := lockFile(f); err != nil {
-			f.Close()
-			return nil, fmt.Errorf("audit: locking %s: %w", path, err)
-		}
 		// Closing the file would drop the lock too, but the open's own
 		// failures close it only after this returns.
 		defer unlockFile(f)
@@ -165,9 +182,16 @@ func OpenWith(path string, o Options) (*Log, error) {
 		f.Close()
 		return nil, fmt.Errorf("audit: %w", err)
 	}
-	l := &Log{f: f, seq: res.Records, head: res.Head, size: res.Size, synced: res.Size, now: now, sch: o.Schemas}
+	l := &Log{f: f, seq: res.Records, head: res.Head, size: res.Size, synced: res.Size, now: now, sch: o.Schemas,
+		path: path, rot: o.Rotation, first: res.First, started: parseTime(res.FirstTime, now)}
 	if canLock {
 		l.osf = f
+		// Under the lock no rotation of this file can be under way, so
+		// what a crashed one left behind can go.
+		if err := cleanRotation(path, f, res.First); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 	return l, nil
 }
@@ -269,8 +293,15 @@ func (l *Log) write(event string, env Envelope, data any) (int64, error) {
 			l.broken = true
 			return 0, fmt.Errorf("audit: lock: %v: %w", err, ErrBroken)
 		}
-		defer unlockFile(l.osf)
-		if err := l.catchUp(); err != nil {
+		// A rotation moves the lock to the new segment's file: unlock
+		// whichever file is held at the end.
+		defer func() { unlockFile(l.osf) }()
+		if err := l.refresh(); err != nil {
+			return 0, err
+		}
+	}
+	if reason := l.due(); reason != "" {
+		if err := l.rotate(reason); err != nil {
 			return 0, err
 		}
 	}
@@ -296,9 +327,12 @@ func (l *Log) write(event string, env Envelope, data any) (int64, error) {
 	l.seq++
 	l.head = hex.EncodeToString(sum[:])
 	l.size += int64(len(line)) + 1
+	if l.first == 0 {
+		l.first, l.started = l.seq, l.now()
+	}
 	// Under the lock, so watchers see records in chain order.
 	logging.Observe(logging.SourceAudit, line)
-	return l.size, nil
+	return l.base + l.size, nil
 }
 
 // catchUp takes in the records other writers appended to a shared file
@@ -321,8 +355,8 @@ func (l *Log) catchUp() error {
 		l.broken = true
 		return fmt.Errorf("audit: the file shrank from %d to %d bytes under this writer: %w", l.size, size, ErrBroken)
 	}
-	start := Result{Records: l.seq, Head: l.head, Size: l.size}
-	res, err := verifyFrom(io.NewSectionReader(l.osf, l.size, size-l.size), true, nil, start)
+	start := Result{Records: l.seq, Head: l.head, Size: l.size, First: l.first}
+	res, err := verifyFrom(io.NewSectionReader(l.osf, l.size, size-l.size), true, nil, start, l.lines())
 	if err != nil {
 		l.broken = true
 		return fmt.Errorf("audit: records another writer appended do not verify: %v: %w", err, ErrBroken)
@@ -338,7 +372,18 @@ func (l *Log) catchUp() error {
 		return fmt.Errorf("audit: %v: %w", err, ErrBroken)
 	}
 	l.seq, l.head, l.size = res.Records, res.Head, res.Size
+	if l.first == 0 && res.First != 0 {
+		l.first, l.started = res.First, parseTime(res.FirstTime, l.now)
+	}
 	return nil
+}
+
+// lines is the number of records in the active segment.
+func (l *Log) lines() int {
+	if l.first == 0 {
+		return 0
+	}
+	return int(l.seq - l.first + 1)
 }
 
 // syncTo returns once the file is durable up to offset end. Whoever holds
@@ -351,12 +396,23 @@ func (l *Log) syncTo(end int64) error {
 		return nil
 	}
 	l.mu.Lock()
-	target, broken := l.size, l.broken
+	target, broken, f, floor, old := l.base+l.size, l.broken, l.f, l.floor, l.retired
+	l.retired = nil
 	l.mu.Unlock()
+	// No other fsync can be using an earlier segment's file: they all
+	// hold syncMu, and rotations only retire files.
+	for _, o := range old {
+		o.Close()
+	}
 	if broken {
 		return ErrBroken
 	}
-	if err := l.f.Sync(); err != nil {
+	if end <= floor {
+		// A rotation fsynced the segment this record is in.
+		l.synced = floor
+		return nil
+	}
+	if err := f.Sync(); err != nil {
 		// After a failed fsync the page cache can no longer be trusted to
 		// reach the disk, so stop rather than retry (as PostgreSQL does).
 		l.mu.Lock()
@@ -378,7 +434,7 @@ func (l *Log) Head() (uint64, string) {
 		// A failure leaves the head as this writer last knew it, and
 		// marks the log broken like a failed append would.
 		if lockFile(l.osf) == nil {
-			_ = l.catchUp()
+			_ = l.refresh()
 			unlockFile(l.osf)
 		}
 	}
@@ -393,7 +449,15 @@ func (l *Log) Healthy() bool {
 }
 
 // Close closes the file.
-func (l *Log) Close() error { return l.f.Close() }
+func (l *Log) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, o := range l.retired {
+		o.Close()
+	}
+	l.retired = nil
+	return l.f.Close()
+}
 
 // Result summarizes a verified log.
 type Result struct {
@@ -401,6 +465,17 @@ type Result struct {
 	Head      string // hash of the last record, or Genesis for an empty log
 	Size      int64  // bytes of complete, verified records
 	TornBytes int64  // bytes of an incomplete final line (only with allowTorn)
+
+	// First is the sequence number of the file's first record (0 for an
+	// empty file) and Start the hash that record links to: Genesis where
+	// the chain begins, the previous segment's head in a later segment.
+	First uint64
+	Start string
+	// FirstTime is the first record's time as written.
+	FirstTime string
+	// Previous is the file name of the segment a later segment's first
+	// record names as the one before it; empty for the chain's beginning.
+	Previous string
 }
 
 // LineError locates a verification failure.
@@ -425,15 +500,21 @@ func VerifyWith(r io.Reader, s *Schemas) (Result, error) {
 }
 
 func verify(r io.Reader, allowTorn bool, s *Schemas) (Result, error) {
-	return verifyFrom(r, allowTorn, s, Result{Head: Genesis})
+	return verifyFrom(r, allowTorn, s, Result{Head: Genesis}, 0)
 }
 
 // verifyFrom verifies records that continue the chain res describes: r
-// starts at byte res.Size, after res.Records records ending in res.Head.
-// Line numbers in errors count from the start of the file.
-func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result) (Result, error) {
+// starts at byte res.Size of a file, after lines of its records, and the
+// chain so far has res.Records records ending in res.Head. Line numbers in
+// errors count from the start of the file.
+//
+// A file whose first record is a segment start (EventSegmentStarted) that
+// links to an earlier record is a later segment: when res is the empty
+// chain, its chain is taken to run on from that record, which VerifyChain
+// checks against the segment before it.
+func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result, lines int) (Result, error) {
 	br := bufio.NewReaderSize(r, 64<<10)
-	for n := int(res.Records) + 1; ; n++ {
+	for n := lines + 1; ; n++ {
 		line, err := readLine(br)
 		if err == io.EOF {
 			return res, nil
@@ -454,6 +535,22 @@ func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result) (Result, er
 		if err := dec.Decode(&rec); err != nil || dec.More() {
 			return res, &LineError{n, "not a valid record; it was modified or damaged"}
 		}
+		if rec.Event == EventSegmentStarted {
+			if n != 1 || rec.Prev == Genesis {
+				return res, &LineError{n, "a segment start record is only valid as the first line of a later segment; it was moved or added"}
+			}
+			if res.Records == 0 && res.Head == Genesis {
+				if rec.Seq < 2 {
+					return res, &LineError{n, fmt.Sprintf("segment start record has sequence %d", rec.Seq)}
+				}
+				res.Records, res.Head = rec.Seq-1, rec.Prev
+			}
+			var ss SegmentStarted
+			if json.Unmarshal(rec.Data, &ss) != nil || !validSegmentFile(ss.Previous) {
+				return res, &LineError{n, "segment start record does not name the segment before it"}
+			}
+			res.Previous = ss.Previous
+		}
 		if rec.Prev != res.Head {
 			if n == 1 {
 				return res, &LineError{n, "first record does not start the chain (records before it were removed?)"}
@@ -467,6 +564,9 @@ func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result) (Result, er
 			if err := s.Check(rec.Event, rec.Envelope, rec.Data); err != nil {
 				return res, &LineError{n, err.Error()}
 			}
+		}
+		if res.First == 0 {
+			res.First, res.Start, res.FirstTime = rec.Seq, rec.Prev, rec.Time
 		}
 		sum := sha256.Sum256(line)
 		res.Head = hex.EncodeToString(sum[:])

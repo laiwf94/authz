@@ -269,6 +269,9 @@ func Defs() []Def {
 		{TrackAgents, ToolQuarantined{}, 0},
 		{TrackAgents, PolicyApplied{}, 0},
 		{TrackAgents, PolicyRejected{}, 0},
+
+		// The log's own records (rotate.go).
+		{TrackAudit, SegmentStarted{}, NeedAction},
 	}
 }
 
