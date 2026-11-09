@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/laiwf94/authz/internal/platform/clock"
 )
 
 // reloadSection is valid only when its key file holds "key-<gen>", so a
@@ -183,6 +185,69 @@ func TestNewWatcherRefuses(t *testing.T) {
 	f.write(f.config, f.doc(1, f.key))
 	if _, err := NewWatcher(reloadSchema(t), f.config, WatchOptions{}); err == nil || !strings.Contains(err.Error(), "another generation") {
 		t.Errorf("invalid file: %v", err)
+	}
+}
+
+// TestWatcherRunClock drives Run with a fake clock: a change is picked up
+// on the first tick after it and not before, whatever the wall clock does.
+func TestWatcherRunClock(t *testing.T) {
+	f := newFiles(t)
+	f.write(f.key, "key-1")
+	f.write(f.config, f.doc(1, f.key))
+	c := clock.NewFake(time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC))
+	reloaded := make(chan int, 4)
+	refused := make(chan error, 4)
+	w, err := NewWatcher(reloadSchema(t), f.config, WatchOptions{
+		Interval: 5 * time.Second,
+		Clock:    c,
+		OnReload: func(_, cur *Config, _ Problems) { reloaded <- Get[reloadSection](cur, "app").Gen },
+		OnError:  func(err error) { refused <- err },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	wait, cancelWait := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelWait()
+	if err := c.BlockUntil(wait, 1); err != nil {
+		t.Fatal("Run never started its ticker")
+	}
+
+	f.write(f.key, "key-2")
+	f.write(f.config, f.doc(2, f.key))
+	c.Advance(5*time.Second - time.Nanosecond)
+	select {
+	case g := <-reloaded:
+		t.Fatalf("reloaded to %d before the interval passed", g)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if gen(w) != 1 {
+		t.Fatalf("gen %d before the first tick", gen(w))
+	}
+	c.Advance(time.Nanosecond)
+	if g := <-reloaded; g != 2 {
+		t.Errorf("reloaded to %d, want 2", g)
+	}
+
+	// An invalid change is refused on the next tick and the old
+	// configuration kept.
+	f.write(f.config, f.doc(3, f.key))
+	c.Advance(5 * time.Second)
+	if err := <-refused; !strings.Contains(err.Error(), "another generation") {
+		t.Errorf("refused with %v", err)
+	}
+	if gen(w) != 2 {
+		t.Errorf("gen %d after a refused change, want 2", gen(w))
+	}
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v", err)
+	}
+	if c.Pending() != 0 {
+		t.Error("Run left its ticker running")
 	}
 }
 

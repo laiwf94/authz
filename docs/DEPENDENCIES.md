@@ -16,11 +16,11 @@ not move with the tree.
 |---|---|---|---|---|
 | github.com/beevik/etree | v1.8.1 | SAML (internal/authn/saml, internal/authn/fakeidp) | wicket, carried in week 1 | none planned |
 | github.com/russellhaering/goxmldsig | v1.6.1 | SAML signature verification and signing (same packages) | wicket, carried in week 1 | none planned |
-| github.com/jonboulle/clockwork | v0.5.0 | one call in internal/authn/saml/signature.go | wicket, carried in week 1 | removed in week 2 |
 
 grantd (now the module root) and toolgate brought no third-party
-requirements. The three requirements above are exactly wicket's, at the
-versions wicket pinned; `go.sum` is wicket's `go.sum` unchanged.
+requirements. The two requirements above are wicket's, at the versions
+wicket pinned; wicket's third, github.com/jonboulle/clockwork, is indirect
+since week 2 (below), and `go.sum` is wicket's `go.sum` unchanged.
 
 ### github.com/beevik/etree
 
@@ -53,20 +53,28 @@ duplicated IDs.
 
 Confinement: imported only by the SAML packages.
 
+## Indirect and test-only modules
+
 ### github.com/jonboulle/clockwork
 
-A fake clock. goxmldsig checks certificate validity against a clock it
-takes as `*dsig.Clock`, whose only constructor that accepts a fixed time
-needs a `clockwork.Clock`. wicket uses it in one place
-(`dsig.NewFakeClock(clockwork.NewFakeClockAt(now))`) so that signature
-checks use the same `now` as the rest of assertion validation.
+A fake clock, v0.5.0, now `// indirect`. goxmldsig checks certificate
+validity against a `*dsig.Clock`, and its own root package
+(`clock.go`) imports clockwork to build one. wicket called clockwork
+directly, `dsig.NewFakeClock(clockwork.NewFakeClockAt(now))`, so that
+signature checks use the same `now` as the rest of assertion validation.
 
-Exit: week 2 (authn track) introduces the platform's injectable clock and
-removes this requirement from `go.mod`, with the SAML suite passing
-unchanged as the proof that certificate lifetimes are still checked
-against the assertion's `now`.
+Since week 2 (authn track) no authz package imports clockwork: the platform
+has its own injectable clock, internal/platform/clock, and the SAML package
+asks goxmldsig for a fixed clock with `dsig.NewFakeClockAt(now)`, with the
+SAML suite passing unchanged as the proof that certificate lifetimes are
+still checked against the assertion's `now`. The roadmap had it leaving
+`go.mod` altogether that week; it cannot while authz imports goxmldsig's
+root package, which is where its signature verification lives, so the
+requirement stays as goxmldsig's and goes when goxmldsig drops it or the
+SAML packages stop importing it. It is compiled into the binary only
+through goxmldsig.
 
-## Indirect and test-only modules
+### Test-only modules
 
 `go list -m all` also shows github.com/stretchr/testify,
 github.com/davecgh/go-spew, github.com/pmezard/go-difflib,

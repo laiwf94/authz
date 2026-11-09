@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/laiwf94/authz/internal/platform/clock"
 )
 
 // DefaultInterval is how often a Watcher looks at its files. A change is
@@ -23,6 +25,9 @@ type WatchOptions struct {
 	// Interval is how often the files are compared with what was loaded;
 	// zero means DefaultInterval.
 	Interval time.Duration
+	// Clock drives the polling ticker; nil is the wall clock. Tests pass a
+	// *clock.Fake and advance it one interval at a time.
+	Clock clock.Clock
 	// Validate, if set, is a last check on a configuration that has no
 	// errors, before it is put in place: an error refuses it as a problem
 	// in the document would. A subcommand uses it to require its section.
@@ -77,13 +82,13 @@ func (w *Watcher) Current() *Config { return w.cur.Load() }
 // Run polls the files every interval until ctx is done, and returns
 // ctx.Err().
 func (w *Watcher) Run(ctx context.Context) error {
-	t := time.NewTicker(w.opts.Interval)
+	t := clock.Or(w.opts.Clock).NewTicker(w.opts.Interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-t.C:
+		case <-t.C():
 			w.Poll()
 		}
 	}

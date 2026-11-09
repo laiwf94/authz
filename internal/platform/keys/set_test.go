@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/laiwf94/authz/internal/platform/clock"
 	"github.com/laiwf94/authz/internal/platform/jose"
 )
 
@@ -121,24 +121,41 @@ func TestJWKSRoles(t *testing.T) {
 	}
 }
 
+// waitTicker returns once the scheduler's ticker is on the fake clock.
+func waitTicker(t *testing.T, c *clock.Fake) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.BlockUntil(ctx, 1); err != nil {
+		t.Fatal("the scheduler never started its ticker")
+	}
+}
+
 func TestSchedulerTicks(t *testing.T) {
 	s := NewSet()
 	r := newRing(t, HS256, Policy{RotateEvery: time.Minute, Overlap: time.Minute})
 	_ = s.Add("agent", r)
-	ticks := make(chan time.Time)
-	var at atomic.Int64
-	at.Store(t0.UnixNano())
+	c := clock.NewFake(t0)
 	got := make(chan []string, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error)
-	sc := &Scheduler{Set: s, Ticks: ticks, Now: func() time.Time { return time.Unix(0, at.Load()) },
+	sc := &Scheduler{Set: s, Every: 10 * time.Second, Clock: c,
 		OnChange: func(c []string) error { got <- c; return nil }}
 	go func() { done <- sc.Run(ctx) }()
-	ticks <- time.Time{} // not due: no change
-	at.Add(int64(time.Minute))
-	ticks <- time.Time{}
-	if c := <-got; strings.Join(c, ",") != "agent" {
-		t.Errorf("changed %v", c)
+	waitTicker(t, c)
+	// Five ticks inside the rotation period change nothing.
+	for range 5 {
+		c.Advance(10 * time.Second)
+	}
+	select {
+	case ch := <-got:
+		t.Fatalf("changed %v before the ring was due", ch)
+	case <-time.After(20 * time.Millisecond):
+	}
+	// The sixth tick lands on RotateEvery.
+	c.Advance(10 * time.Second)
+	if ch := <-got; strings.Join(ch, ",") != "agent" {
+		t.Errorf("changed %v", ch)
 	}
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
@@ -147,6 +164,9 @@ func TestSchedulerTicks(t *testing.T) {
 	if len(got) != 0 {
 		t.Error("OnChange called for a tick that changed nothing")
 	}
+	if c.Pending() != 0 {
+		t.Error("Run left its ticker running")
+	}
 }
 
 func TestSchedulerErrors(t *testing.T) {
@@ -154,14 +174,15 @@ func TestSchedulerErrors(t *testing.T) {
 	r := newRing(t, HS256, Policy{RotateEvery: time.Second, Overlap: time.Second})
 	_ = s.Add("agent", r)
 	errSave := errors.New("disk full")
-	ticks := make(chan time.Time, 1)
-	clock := t0
-	now := func() time.Time { clock = clock.Add(time.Second); return clock }
+	c := clock.NewFake(t0)
 
 	// Without OnError the first failure stops Run.
-	ticks <- time.Time{}
-	sc := &Scheduler{Set: s, Ticks: ticks, Now: now, OnChange: func([]string) error { return errSave }}
-	if err := sc.Run(context.Background()); !errors.Is(err, errSave) {
+	sc := &Scheduler{Set: s, Clock: c, OnChange: func([]string) error { return errSave }}
+	done := make(chan error)
+	go func() { done <- sc.Run(context.Background()) }()
+	waitTicker(t, c)
+	c.Advance(time.Second)
+	if err := <-done; !errors.Is(err, errSave) {
 		t.Fatalf("Run = %v", err)
 	}
 
@@ -169,12 +190,11 @@ func TestSchedulerErrors(t *testing.T) {
 	r.gen = failAfter(0)
 	reported := make(chan error, 2)
 	ctx, cancel := context.WithCancel(context.Background())
-	sc = &Scheduler{Set: s, Ticks: ticks, Now: now, OnError: func(err error) { reported <- err }}
-	done := make(chan error)
+	sc = &Scheduler{Set: s, Clock: c, OnError: func(err error) { reported <- err }}
 	go func() { done <- sc.Run(ctx) }()
-	ticks <- time.Time{}
-	ticks <- time.Time{}
+	waitTicker(t, c)
 	for i := 0; i < 2; i++ {
+		c.Advance(time.Second)
 		if err := <-reported; !errors.Is(err, errGen) {
 			t.Errorf("reported %v", err)
 		}
@@ -185,14 +205,15 @@ func TestSchedulerErrors(t *testing.T) {
 
 func TestSchedulerRealTicker(t *testing.T) {
 	s := NewSet()
+	// The ring was made at t0, so on the wall clock it is long overdue.
 	r := newRing(t, HS256, Policy{RotateEvery: time.Second, Overlap: time.Second})
 	_ = s.Add("agent", r)
 	first := r.Current()
 	changed := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	clock := t0
-	sc := &Scheduler{Set: s, Every: time.Millisecond, Now: func() time.Time { clock = clock.Add(time.Second); return clock },
+	// Clock nil is the wall clock.
+	sc := &Scheduler{Set: s, Every: time.Millisecond,
 		OnChange: func([]string) error {
 			select {
 			case changed <- struct{}{}:
@@ -209,7 +230,7 @@ func TestSchedulerRealTicker(t *testing.T) {
 	if r.Current() == first {
 		t.Error("ring did not rotate")
 	}
-	// Every <= 0 falls back to one second; Now nil is the wall clock.
+	// Every <= 0 falls back to one second.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel2()
 	if err := (&Scheduler{Set: NewSet()}).Run(ctx2); !errors.Is(err, context.DeadlineExceeded) {

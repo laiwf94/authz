@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/beevik/etree"
-	"github.com/jonboulle/clockwork"
 	dsig "github.com/russellhaering/goxmldsig"
 	"github.com/russellhaering/goxmldsig/etreeutils"
 )
@@ -81,7 +80,9 @@ func verifySigned(root, el *etree.Element, certs []*x509.Certificate, now time.T
 		return nil, err
 	}
 	vc := dsig.NewDefaultValidationContext(&dsig.MemoryX509CertificateStore{Roots: certs})
-	vc.Clock = dsig.NewFakeClock(clockwork.NewFakeClockAt(now))
+	// Certificate lifetimes are checked at the assertion's now, the same
+	// instant every other validity check uses.
+	vc.Clock = dsig.NewFakeClockAt(now)
 	verified, err := vc.Validate(detached)
 	if err != nil {
 		return nil, fmt.Errorf("signature invalid: %v", err)

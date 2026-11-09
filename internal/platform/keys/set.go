@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/laiwf94/authz/internal/platform/clock"
 )
 
 // Ring names used by the platform. A Set may hold others.
@@ -132,11 +134,9 @@ type Scheduler struct {
 	Set *Set
 	// Every is how often rings are checked. Zero means once a second.
 	Every time.Duration
-	// Now is the clock; nil is time.Now.
-	Now func() time.Time
-	// Ticks, when set, replaces the ticker: tests drive the scheduler by
-	// sending on it.
-	Ticks <-chan time.Time
+	// Clock tells the time and drives the ticker; nil is the wall clock.
+	// Tests pass a *clock.Fake and advance it.
+	Clock clock.Clock
 	// OnChange is called after a tick that changed rings, with their names:
 	// the place to save the ring file and refresh published JWKS.
 	OnChange func(changed []string) error
@@ -147,27 +147,20 @@ type Scheduler struct {
 
 // Run checks the rings until ctx ends, then returns ctx.Err().
 func (sc *Scheduler) Run(ctx context.Context) error {
-	now := sc.Now
-	if now == nil {
-		now = time.Now
+	c := clock.Or(sc.Clock)
+	every := sc.Every
+	if every <= 0 {
+		every = time.Second
 	}
-	ticks := sc.Ticks
-	if ticks == nil {
-		every := sc.Every
-		if every <= 0 {
-			every = time.Second
-		}
-		t := time.NewTicker(every)
-		defer t.Stop()
-		ticks = t.C
-	}
+	t := c.NewTicker(every)
+	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticks:
+		case <-t.C():
 		}
-		changed, err := sc.Set.Tick(now())
+		changed, err := sc.Set.Tick(c.Now())
 		if len(changed) > 0 && sc.OnChange != nil {
 			err = errors.Join(err, sc.OnChange(changed))
 		}

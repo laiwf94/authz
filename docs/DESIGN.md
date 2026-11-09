@@ -869,6 +869,33 @@ allocations on a 4-core 2.1 GHz Xeon (190 ns across 4 goroutines on one
 mutex), and inserting new keys into a full table, sweeps and evictions
 included, about 470 ns.
 
+## One clock (internal/platform/clock)
+
+Code that reads the time or waits on it takes a `clock.Clock` (week 2,
+#76): `Now`, `Since`, `NewTimer`, `AfterFunc` and `NewTicker`.
+`clock.Real()` is the wall clock and measures durations on Go's monotonic
+clock; `clock.Or(c)` turns an optional `Clock` field into the wall clock
+when it is nil. It replaced jonboulle/clockwork, which wicket used for one
+call into goxmldsig.
+
+`clock.Fake` only moves when a test calls `Advance` or `Set`, and never
+backwards. Timers, tickers and `AfterFunc` calls come due in deadline order
+as it moves, ties in creation order, with `Now` reading each deadline as it
+fires, so one `Advance(time.Hour)` over a ten-second ticker sees each tick
+at its own instant. Channels hold one value and drop the rest, as
+`time.Ticker` does, and `Stop` and `Reset` drain them, as Go's timers have
+since 1.23. `AfterFunc` functions that come due run on the goroutine
+calling `Advance`, before it returns, so a test that advances the clock
+knows their effects are in place. `BlockUntil(ctx, n)` waits until n timers
+are pending: a test starts a goroutine, waits for its ticker, then advances,
+without a sleep.
+
+The key rotation scheduler (`keys.Scheduler.Clock`) and the configuration
+watcher (`config.WatchOptions.Clock`) run on it; their tests step through
+rotation periods and reload intervals one tick at a time. Packages that
+took a `now func() time.Time` before week 2 keep it; a `Clock`'s `Now`
+method value fits it.
+
 ## One HTTP server (internal/platform/httpserver)
 
 `authz serve`, `authz gateway` and `authz mcp` each built their own

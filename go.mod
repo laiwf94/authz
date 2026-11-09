@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/beevik/etree v1.8.1
-	github.com/jonboulle/clockwork v0.5.0
 	github.com/russellhaering/goxmldsig v1.6.1
 )
+
+require github.com/jonboulle/clockwork v0.5.0 // indirect
