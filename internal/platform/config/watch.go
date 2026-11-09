@@ -55,6 +55,7 @@ type Watcher struct {
 
 	mu      sync.Mutex // serializes polls
 	watched []Source   // what the last load attempt read
+	refused error      // why the last load attempt was refused; nil once one succeeds
 }
 
 // NewWatcher loads the file at path. It fails if the first load does: a
@@ -116,11 +117,13 @@ func (w *Watcher) Poll() error {
 		err = w.validate(r)
 	}
 	if err != nil {
+		w.refused = err
 		if w.opts.OnError != nil {
 			w.opts.OnError(err)
 		}
 		return err
 	}
+	w.refused = nil
 	old := w.cur.Swap(r.Config)
 	if w.opts.OnReload != nil {
 		var warnings Problems
@@ -132,6 +135,17 @@ func (w *Watcher) Poll() error {
 		w.opts.OnReload(old, r.Config, warnings)
 	}
 	return nil
+}
+
+// Refused returns the error that refused the files as they were last read,
+// or nil when the configuration in place is the one they hold. A Poll that
+// finds the files unchanged returns ErrUnchanged either way, so a reload
+// someone asked for checks Refused to tell "nothing to do" from "still
+// broken".
+func (w *Watcher) Refused() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.refused
 }
 
 // validate returns the errors of a loaded document, then Validate's.

@@ -188,14 +188,16 @@ func (r *reloader) config(w *pcfg.Watcher, getenv func(string) string) (*config.
 }
 
 // poll looks at the watcher's files at once, for a reload the server
-// asked for.
+// asked for. Files the watcher's own poll already refused are unchanged
+// since, but the reload still fails with the reason (#238).
 func (r *reloader) poll(w *pcfg.Watcher) error {
 	r.polling.Store(true)
 	defer r.polling.Store(false)
-	if err := w.Poll(); err != nil && !errors.Is(err, pcfg.ErrUnchanged) {
-		return err
+	err := w.Poll()
+	if errors.Is(err, pcfg.ErrUnchanged) {
+		return w.Refused()
 	}
-	return nil
+	return err
 }
 
 // stale reports whether the watcher holds a configuration the server's
