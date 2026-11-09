@@ -110,7 +110,9 @@ file of relationships against a schema before you load it, and
 `authz serve -config authz.json` starts from its serve section, applying
 API key and log level changes while it runs, and `authz gateway -config
 authz.json` from its gateway section, applying cookie key, provider, app and
-log level changes while it runs.
+log level changes while it runs, and `authz mcp serve -config authz.json`
+from its mcp section, applying agent, signing key, policy and log level
+changes while it runs.
 
 `authz run` starts `serve`, `gateway` and `mcp serve` in one process. Each
 part reads the configuration its own subcommand reads (the `GRANTD_`,

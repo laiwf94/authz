@@ -34,6 +34,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -89,7 +90,7 @@ type Gateway struct {
 	log       *slog.Logger
 	m         *metrics.Registry
 	now       func() time.Time
-	limits    map[string]Limits
+	agents    atomic.Pointer[agentSet]
 	limiter   *ratelimit.Limiter
 	quota     *ratelimit.Quota
 	approvals *approval.Store
@@ -160,17 +161,12 @@ func New(opt Options) (*Gateway, error) {
 		}
 	}
 	g := &Gateway{opt: opt, cfg: c, log: opt.Log, m: opt.Metrics, now: opt.Now,
-		limits:    map[string]Limits{},
 		limiter:   ratelimit.NewLimiter(opt.Now),
 		quota:     ratelimit.NewQuota(opt.Now),
 		approvals: approvals,
 		ups:       map[string]*upstream{},
 	}
-	for _, a := range c.Agents {
-		if a.Limits != nil {
-			g.limits[a.ID] = *a.Limits
-		}
-	}
+	g.agents.Store(newAgentSet(c, opt.Auth))
 	for _, uc := range c.Upstreams {
 		h := http.Header{}
 		switch {
@@ -227,25 +223,61 @@ func (g *Gateway) healthz(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (g *Gateway) limitsFor(agent string) Limits {
-	if l, ok := g.limits[agent]; ok {
+// agentSet is the part of the configuration that can change while the
+// gateway runs: who the agents are, how they authenticate and their limits.
+// Each request reads it once.
+type agentSet struct {
+	auth     *identity.Authenticator
+	limits   map[string]Limits
+	defaults Limits
+}
+
+func newAgentSet(c *Config, auth *identity.Authenticator) *agentSet {
+	s := &agentSet{auth: auth, limits: map[string]Limits{}, defaults: c.Limits}
+	for _, a := range c.Agents {
+		if a.Limits != nil {
+			s.limits[a.ID] = *a.Limits
+		}
+	}
+	return s
+}
+
+func (s *agentSet) limitsFor(agent string) Limits {
+	if l, ok := s.limits[agent]; ok {
 		return l
 	}
-	return g.cfg.Limits
+	return s.defaults
 }
+
+// SetAgents puts the agents, the token settings and the limits of c in
+// force, with auth the authenticator built from c (and the signing keys).
+// Requests that have already authenticated finish under the set they
+// started with; rate-limit buckets and daily quotas are kept per agent, so
+// an agent that stays keeps what it has used. The upstreams and approval
+// settings of c are not used: they are fixed when the gateway is built.
+func (g *Gateway) SetAgents(c *Config, auth *identity.Authenticator) error {
+	if c == nil || auth == nil {
+		return errors.New("gateway: SetAgents needs a config and an authenticator")
+	}
+	g.agents.Store(newAgentSet(c, auth))
+	return nil
+}
+
+func (g *Gateway) limitsFor(agent string) Limits { return g.agents.Load().limitsFor(agent) }
 
 func (g *Gateway) count(name, labels, help string) { g.m.Counter(name, labels, help).Inc() }
 
 // Authenticate implements mcp.Handler: it checks the credential and the
 // agent's overall request rate.
 func (g *Gateway) Authenticate(r *http.Request) (any, string, error) {
-	id, err := g.opt.Auth.Authenticate(httpx.Bearer(r))
+	set := g.agents.Load()
+	id, err := set.auth.Authenticate(httpx.Bearer(r))
 	if err != nil {
 		g.count("toolgate_auth_failures_total", "", "Requests with a missing or invalid credential.")
 		g.log.Warn("authentication failed", "request_id", httpx.RequestID(r.Context()), "reason", err.Error())
 		return nil, "", mcp.NewError(http.StatusUnauthorized, mcp.CodeUnauthenticated, "missing or invalid credential")
 	}
-	if ok, wait := g.limiter.Take(platformlimit.Key("agent", id.AgentID), g.limitsFor(id.AgentID).agent()); !ok {
+	if ok, wait := g.limiter.Take(platformlimit.Key("agent", id.AgentID), set.limitsFor(id.AgentID).agent()); !ok {
 		g.count("toolgate_rate_limited_total", `scope="agent"`, "Requests refused by a rate limit.")
 		return nil, "", &mcp.Error{RPC: jsonrpc.NewError(mcp.CodeRateLimited, "rate limit exceeded for agent %s", id.AgentID).
 			WithData(map[string]any{"scope": "agent", "retry_after_ms": wait.Milliseconds()}),

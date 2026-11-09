@@ -133,6 +133,22 @@ link the roadmap issue they come from.
   listeners and signing keys are logged as applying on restart. Without a
   file the `WICKET_*` variables and wicket files work as before; with one
   they are ignored, and the log names them.
+- **`authz mcp serve -config file`** ([#76](https://github.com/laiwf94/authz/issues/76)),
+  or `AUTHZ_CONFIG=file`, starts the MCP gateway from the mcp section, with
+  the serve and gateway sections skipped. The file, its secret files, the
+  agents config and the policy are watched: changes to the agents, token
+  settings and limits in the agents config, to `signing_keys` (a token from
+  a removed key stops verifying), to the policy and to `log_level` apply
+  within about a second with no failed requests, and SIGHUP reads them at
+  once. An invalid change, a broken policy included, is logged and refused
+  and the running configuration kept; upstreams, approvals, the listeners
+  and the other members are logged as applying on restart. Without a file
+  the `TOOLGATE_*` and `AUTHZ_MCP_*` variables work as before; with one the
+  `TOOLGATE_*` names are ignored, the log names them, and the `AUTHZ_MCP_*`
+  names override the section's members.
+- `config.Checker.ReadFile`: a file a section's check reads (the mcp
+  section's agents config and policy) becomes one of the configuration's
+  watched sources.
 
 ### Agent gateway (agents)
 

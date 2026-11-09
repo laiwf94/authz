@@ -3,8 +3,6 @@ package mcp
 import (
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -12,6 +10,7 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/internal/agents/gateway"
+	"github.com/laiwf94/authz/internal/agents/identity"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
@@ -65,6 +64,11 @@ type Settings struct {
 	DrainDelay pcfg.Duration `json:"drain_delay"`
 	// DrainTimeout is TOOLGATE_DRAIN_TIMEOUT.
 	DrainTimeout pcfg.Duration `json:"drain_timeout"`
+
+	// What the check built from the files the section names, so the
+	// gateway starts, and reloads, from exactly what was checked.
+	agents *gateway.Config
+	auth   *identity.Authenticator
 }
 
 // Section describes the mcp section with toolgate's defaults and the rules
@@ -101,14 +105,14 @@ func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
 	var gc *gateway.Config
 	if s.Config == "" {
 		c.Errorf(c.Field("config"), "is required")
-	} else if src, err := readFile(s.Config, gateway.MaxConfigBytes); err != nil {
+	} else if src, err := c.ReadFile(s.Config, gateway.MaxConfigBytes); err != nil {
 		c.Errorf(c.Field("config"), "%v", err)
 	} else if gc, err = gateway.ParseConfig(src, getenv); err != nil {
 		c.Errorf(c.Field("config"), "%s: %s", s.Config, strings.TrimPrefix(err.Error(), "config: "))
 	}
 	if s.Policy == "" {
 		c.Errorf(c.Field("policy"), "is required")
-	} else if src, err := readFile(s.Policy, policy.MaxBytes); err != nil {
+	} else if src, err := c.ReadFile(s.Policy, policy.MaxBytes); err != nil {
 		c.Errorf(c.Field("policy"), "%v", err)
 	} else if _, err := policy.Parse(src); err != nil {
 		c.Errorf(c.Field("policy"), "%s: %s", s.Policy, strings.TrimPrefix(err.Error(), "policy: "))
@@ -148,12 +152,15 @@ func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
 	if gc != nil && keysOK {
 		// The agents config and the signing keys must make an
 		// authenticator, as they must when the gateway starts.
-		if _, err := gc.NewAuthenticator(keys, active); err != nil {
+		auth, err := gc.NewAuthenticator(keys, active)
+		if err != nil {
 			path := c.Field("config")
 			if len(keys) > 0 {
 				path = c.Field("signing_keys")
 			}
 			c.Errorf(path, "%v", err)
+		} else {
+			s.agents, s.auth = gc, auth
 		}
 	}
 	if err := new(slog.Level).UnmarshalText([]byte(s.LogLevel)); err != nil {
@@ -186,23 +193,6 @@ func checkHTTP(s *Settings, c *pcfg.Checker) {
 
 // defaultPolicyPoll is how often the policy file is checked by default.
 const defaultPolicyPoll = 2 * time.Second
-
-// readFile reads a file of at most limit bytes.
-func readFile(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("%s is larger than %d bytes", path, limit)
-	}
-	return b, nil
-}
 
 // blankSecret reports a secret set directly, by an environment override,
 // to nothing but white space. An empty file or variable reference is

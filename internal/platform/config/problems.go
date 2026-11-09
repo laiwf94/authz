@@ -93,6 +93,19 @@ type Checker struct {
 	Path string
 
 	r *report
+	l *loader
+}
+
+// ReadFile reads a file the section names, such as a policy or a list of
+// clients, of at most limit bytes. The file becomes one of the
+// configuration's sources: a Watcher loads the configuration again, and
+// checks the section again, when it changes, so a check that reads a file
+// with ReadFile makes that file reload live as the configuration does.
+func (c *Checker) ReadFile(path string, limit int64) ([]byte, error) {
+	if limit <= 0 || limit > MaxFileBytes {
+		limit = MaxFileBytes
+	}
+	return c.l.read(path, limit)
 }
 
 // Errorf records an error at path.

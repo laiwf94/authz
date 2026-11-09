@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Version is the document version this build reads. A document must say
@@ -178,13 +179,16 @@ type Config struct {
 }
 
 // Source is one file a configuration was read from: the configuration file
-// itself, then the secret files it references, in the order they were read.
+// itself, then the secret files it references and the files the section
+// checks read with Checker.ReadFile, in the order they were read.
 type Source struct {
 	Path string
 	// Sum is the SHA-256 of the contents read; zero when reading failed.
 	Sum [sha256.Size]byte
 	// Err is why the file could not be read; empty when it was.
 	Err string
+
+	limit int64 // the size the file was read with, for the Watcher
 }
 
 // Has reports whether the named section is present.
@@ -329,7 +333,7 @@ func (sc *Schema) check(src []byte, l *loader) *Result {
 			r.unplaced[path] = true
 		}
 		l.resolve(reflect.ValueOf(v).Elem(), path, r)
-		s.check(v, &Checker{Path: path, r: r})
+		s.check(v, &Checker{Path: path, r: r, l: l})
 		cfg.sections[name] = v
 	}
 	cfg.sources = l.sources
@@ -348,19 +352,23 @@ func envMap(environ []string) map[string]string {
 
 // loader reads files and remembers what it read.
 type loader struct {
-	env     map[string]string
+	env map[string]string
+
+	mu      sync.Mutex // section checks may read files concurrently
 	sources []Source
 }
 
 func (l *loader) read(path string, limit int64) ([]byte, error) {
 	b, err := readLimited(path, limit)
-	src := Source{Path: path}
+	src := Source{Path: path, limit: limit}
 	if err != nil {
 		src.Err = err.Error()
 	} else {
 		src.Sum = sha256.Sum256(b)
 	}
+	l.mu.Lock()
 	l.sources = append(l.sources, src)
+	l.mu.Unlock()
 	return b, err
 }
 

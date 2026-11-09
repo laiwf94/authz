@@ -82,6 +82,17 @@ func (s *Store) Reload() ReloadResult {
 	return s.reloadLocked(true)
 }
 
+// Poll reads the file and applies it if its contents differ from the last
+// contents looked at, as one tick of Watch does: a policy already in force,
+// or one already rejected, is not applied or reported again. Something
+// else that watches the file, such as the platform configuration watcher,
+// calls it when it sees the file change.
+func (s *Store) Poll() ReloadResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reloadLocked(false)
+}
+
 // reloadLocked reads and applies the file. Unless force is set, contents
 // already looked at (valid or not) are skipped silently.
 func (s *Store) reloadLocked(force bool) ReloadResult {

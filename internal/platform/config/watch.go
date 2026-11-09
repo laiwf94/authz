@@ -144,11 +144,7 @@ func (w *Watcher) validate(r *Result) error {
 // differently: other contents, or readable when it was not or the reverse.
 func (w *Watcher) changed() bool {
 	for _, s := range w.watched {
-		limit := int64(MaxSecretBytes)
-		if s.Path == w.path {
-			limit = MaxFileBytes
-		}
-		b, err := readLimited(s.Path, limit)
+		b, err := readLimited(s.Path, s.limit)
 		if (err != nil) != (s.Err != "") {
 			return true
 		}

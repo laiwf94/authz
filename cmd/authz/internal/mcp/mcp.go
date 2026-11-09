@@ -3,6 +3,7 @@
 // audit format are toolgate's, unchanged:
 //
 //	authz mcp [serve]                          run the gateway (configured from the environment)
+//	authz mcp serve -config FILE               run the gateway from the mcp section of the platform file
 //	authz mcp audit verify [-head HASH] FILE   check an audit log's hash chain
 //	authz mcp policy test [-v] POLICY CASES    check a policy against a file of expected decisions
 //	authz mcp token new                        print a new static agent key and its SHA-256 for the config
@@ -10,9 +11,13 @@
 //	authz mcp token mint -sub ID [-owner NAME] [-scope "a b"] [-ttl 15m]
 //	                                           print a signed token (needs the config and signing keys)
 //
-// The gateway reads its configuration from the environment. Every variable
-// has the toolgate name and an AUTHZ_MCP_ name; either may be used, and
-// setting both to different values is an error (see env.go):
+// "authz mcp serve -config file" (or AUTHZ_CONFIG=file) starts the gateway
+// from the mcp section of the platform configuration file instead, and
+// reloads the agents, signing keys, policy and log level when the file or
+// the files it names change (see section.go and reload.go). Without a
+// file, the gateway reads its configuration from the environment. Every
+// variable has the toolgate name and an AUTHZ_MCP_ name; either may be
+// used, and setting both to different values is an error (see env.go):
 //
 //	TOOLGATE_ADDR             AUTHZ_MCP_ADDR             agent listener (default "127.0.0.1:8080")
 //	TOOLGATE_ADMIN_ADDR       AUTHZ_MCP_ADMIN_ADDR       admin listener (default "127.0.0.1:8081")
@@ -62,6 +67,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/pins"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/logging"
 )
@@ -70,14 +76,27 @@ import (
 const Summary = "run the MCP gateway for AI agents, verify its audit log, test policies and issue agent tokens"
 
 const usage = `usage: authz mcp [serve]
+       authz mcp serve -config file
        authz mcp audit verify [-head HASH] FILE
        authz mcp policy test [-v] POLICY CASES
        authz mcp token new | hash | mint -sub ID [-owner NAME] [-scope "a b"] [-ttl 15m]
 
 Runs the MCP gateway (formerly toolgate) with no arguments or "serve".
-Configuration comes from the environment. Each variable may be given by its
-toolgate name or its AUTHZ_MCP_ name; setting both to different values is an
-error:
+
+  -config file  read the mcp section of the platform configuration file
+                (default: $AUTHZ_CONFIG); the serve and gateway sections are
+                skipped. Every member can be overridden by its AUTHZ_MCP_
+                variable, and the TOOLGATE_ variables are ignored. The file,
+                the secret files it names, the agents config and the policy
+                are watched: changes to the agents, token settings and limits
+                in the agents config, signing_keys, the policy and log_level
+                apply within seconds, an invalid change is refused and the
+                running configuration kept, and the other members apply on
+                restart. SIGHUP reads them at once.
+
+Without a file, configuration comes from the environment. Each variable may
+be given by its toolgate name or its AUTHZ_MCP_ name; setting both to
+different values is an error:
 
   TOOLGATE_ADDR             AUTHZ_MCP_ADDR             agent listener (default "127.0.0.1:8080")
   TOOLGATE_ADMIN_ADDR       AUTHZ_MCP_ADMIN_ADDR       admin listener (default "127.0.0.1:8081")
@@ -135,6 +154,22 @@ func runAs(ctx context.Context, prog string, args []string, getenv func(string) 
 	if len(args) > 0 && strings.HasPrefix(args[0], "-") {
 		fmt.Fprintf(stderr, "%[1]s: flag %[2]s is not defined; flags follow the subcommand (\"%[1]s token mint -sub ID\")\n%[3]s", prog, args[0], usageFor(prog))
 		return 2
+	}
+	if len(args) == 0 || args[0] == "serve" {
+		path, code, ok := serveArgs(prog, args, getenv, stderr)
+		if !ok {
+			return code
+		}
+		if path != "" {
+			// The file replaces the TOOLGATE_ variables, so they are not
+			// merged with their AUTHZ_MCP_ names: those override the
+			// file's members, and a TOOLGATE_ name means nothing here.
+			if err := serveFile(ctx, path, getenv, stdout, nil); err != nil {
+				fmt.Fprintln(stderr, prog+":", err)
+				return 1
+			}
+			return 0
+		}
 	}
 	env, err := compatEnv(getenv, gatewayEnv)
 	if err != nil {
@@ -303,7 +338,8 @@ func readGatewayConfig(path string, getenv func(string) string) (*gateway.Config
 	return gateway.ParseConfig(src, getenv)
 }
 
-// run serves until ctx ends. ready, when set, receives the bound addresses.
+// run serves from the TOOLGATE_ variables until ctx ends. ready, when set,
+// receives the bound addresses.
 func run(ctx context.Context, getenv func(string) string, logOut io.Writer, ready func(gw, admin string)) error {
 	return runIn(ctx, part.Host{}, getenv, logOut, ready)
 }
@@ -327,10 +363,6 @@ func runIn(ctx context.Context, h part.Host, getenv func(string) string, logOut 
 	if err != nil {
 		return err
 	}
-	// The platform handler: request lines carry the correlation ID their
-	// audit records do, and its tap feeds the secret scan. No subcommand
-	// attribute, so every other line stays byte for byte as recorded.
-	log := logging.NewLogger(logOut, logging.Options{Level: cfg.logLevel, Subcommand: h.Name})
 	gc, err := readGatewayConfig(cfg.configPath, getenv)
 	if err != nil {
 		return err
@@ -338,6 +370,47 @@ func runIn(ctx context.Context, h part.Host, getenv func(string) string, logOut 
 	auth, err := gc.NewAuthenticator(cfg.keys, cfg.activeKey)
 	if err != nil {
 		return err
+	}
+	level := new(slog.LevelVar)
+	level.Set(cfg.logLevel)
+	return serveGateway(ctx, h, cfg, gc, auth, level, logOut, ready, nil)
+}
+
+// fileMode is a gateway started from the platform configuration file.
+type fileMode struct {
+	path    string
+	watcher *pcfg.Watcher
+	rl      *reloader
+	getenv  func(string) string
+}
+
+// serveFile serves until ctx ends, configured by the mcp section of the
+// platform configuration file at path, which is watched for changes.
+func serveFile(ctx context.Context, path string, getenv func(string) string, logOut io.Writer, ready func(gw, admin string)) error {
+	level := new(slog.LevelVar)
+	rl := &reloader{level: level}
+	w, s, cfg, err := watchFile(path, getenv, rl)
+	if err != nil {
+		return err
+	}
+	level.Set(cfg.logLevel)
+	return serveGateway(ctx, part.Host{}, cfg, s.agents, s.auth, level, logOut, ready, &fileMode{path: path, watcher: w, rl: rl, getenv: getenv})
+}
+
+// serveGateway runs the gateway until ctx ends. fm is nil when it was
+// configured from the environment. h is the process the gateway is a part
+// of; its zero value is a process of its own.
+func serveGateway(ctx context.Context, h part.Host, cfg config, gc *gateway.Config, auth *identity.Authenticator, level *slog.LevelVar,
+	logOut io.Writer, ready func(gw, admin string), fm *fileMode) error {
+	// The platform handler: request lines carry the correlation ID their
+	// audit records do, and its tap feeds the secret scan. No subcommand
+	// attribute, so every other line stays byte for byte as recorded.
+	log := logging.NewLogger(logOut, logging.Options{Level: level, Subcommand: h.Name})
+	if fm != nil {
+		if ignored := toolgateVars(fm.getenv); len(ignored) > 0 {
+			log.Warn("TOOLGATE_ variables are ignored with a configuration file; use its AUTHZ_MCP_ overrides",
+				"config", fm.path, "ignored", ignored)
+		}
 	}
 	pol, err := policy.OpenStore(cfg.policyPath, nil)
 	if err != nil {
@@ -352,6 +425,8 @@ func runIn(ctx context.Context, h part.Host, getenv func(string) string, logOut 
 	if cfg.stateDir != "" {
 		pinPath = filepath.Join(cfg.stateDir, "pins.json")
 		approvalPath = filepath.Join(cfg.stateDir, "approvals.wal")
+	} else if fm != nil {
+		log.Warn("$.mcp.state_dir not set; trusted tool definitions and approvals are kept in memory and reset on restart")
 	} else {
 		log.Warn("TOOLGATE_STATE_DIR not set; trusted tool definitions and approvals are kept in memory and reset on restart")
 	}
@@ -377,6 +452,13 @@ func runIn(ctx context.Context, h part.Host, getenv func(string) string, logOut 
 	if err != nil {
 		return err
 	}
+	bg, cancelBG := context.WithCancel(ctx)
+	defer cancelBG()
+	if fm != nil {
+		fm.rl.start(log, gw, pol, cfg, gc)
+		go func() { _ = fm.watcher.Run(bg) }()
+		log.Info("configuration loaded", "config", fm.path, "sources", len(fm.watcher.Current().Sources()))
+	}
 	addrs := g.Addrs()
 	n, head := auditLog.Head()
 	log.Info("listening", "addr", addrs[0], "admin_addr", addrs[1],
@@ -385,8 +467,6 @@ func runIn(ctx context.Context, h part.Host, getenv func(string) string, logOut 
 		ready(addrs[0], addrs[1])
 	}
 
-	bg, cancelBG := context.WithCancel(ctx)
-	defer cancelBG()
 	if cfg.poll > 0 {
 		go pol.Watch(bg, cfg.poll)
 	}
@@ -399,6 +479,11 @@ func runIn(ctx context.Context, h part.Host, getenv func(string) string, logOut 
 			case <-bg.Done():
 				return
 			case <-hup:
+				if fm != nil {
+					// The file first: a change to the agents, the keys
+					// or the level applies with the policy.
+					_ = fm.watcher.Poll()
+				}
 				pol.Reload()
 			}
 		}

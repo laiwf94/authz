@@ -553,7 +553,47 @@ version lists, while the keys rotate, an app changes and the key file and
 the document are broken and fixed, no request fails (about 74,000 requests
 in the test), and a key or app change applies within about a second.
 
-`authz mcp` starts from its section the same way in the next task of #76.
+`authz mcp serve -config file` (or `AUTHZ_CONFIG=file`) starts the MCP
+gateway from the mcp section the same way, with serve and gateway skipped.
+Without either, the `TOOLGATE_*` variables and their `AUTHZ_MCP_*` names
+work exactly as before. With a file the `TOOLGATE_*` names are ignored, with
+a warning naming them, and are not merged with the `AUTHZ_MCP_*` names,
+which override the section's members; so two spellings that disagree are
+no longer a start-up error. A test compares the configuration a section
+starts with to the one the same values as variables give.
+
+The mcp section names two files that are not secrets but change as often:
+the agents config and the policy. Its check reads them with
+`Checker.ReadFile`, which makes each one a source of the configuration, so
+the watcher loads and checks the whole section again when either changes,
+as it does for a secret file. The check keeps what it built (the parsed
+agents config and the authenticator for it and the signing keys) in
+unexported members of the section, so the gateway starts and reloads from
+exactly what was checked, not from a second read. A reload applies:
+
+- the agents, the token settings and the limits of the agents config, and
+  `signing_keys`, through `gateway.SetAgents`, which swaps the
+  authenticator and the limits behind one atomic pointer. Each request
+  reads it once; rate-limit buckets and daily quotas are kept per agent,
+  so an agent that stays keeps what it has used. A token signed by a key
+  that was removed stops verifying.
+- the policy, through `policy.Store.Poll`, the unforced read one tick of
+  the store's own watch makes: a version the store has already applied or
+  rejected is not reported twice, so the store's `policy_poll` and the
+  configuration watcher can both look at the file. A broken policy is
+  refused by the watcher, and the store rejects it too, with its log line,
+  metric and `policy_rejected` audit record.
+- `log_level`, as serve does.
+
+The upstreams and approval settings of the agents config, the listeners,
+`admin_token`, the policy path, `audit_log`, `audit_key`, `state_dir`,
+`allowed_origins`, `policy_poll`, TLS and drain are logged as applying on
+restart. SIGHUP polls the files first, then reloads the policy as it always
+has. Under eight clients calling a tool as an agent that every version
+keeps, while agents are added and removed, signing keys rotate, the policy
+changes, and the agents config, the policy and the file are rewritten in
+place or broken, no call fails (about 5,000 audited calls in the test), and
+an agent, key or policy change applies about a second after it is written.
 
 ## One log handler (internal/platform/logging)
 

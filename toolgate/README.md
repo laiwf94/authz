@@ -166,6 +166,25 @@ Every `TOOLGATE_` variable can also be spelled `AUTHZ_MCP_` (and every
 `MCPFAKE_` one `AUTHZ_MCPFAKE_`); setting both spellings to different values
 stops the command at start.
 
+The same settings can instead live in the `mcp` section of the platform
+configuration file, `authz mcp serve -config authz.json` (or
+`AUTHZ_CONFIG=authz.json`), with secrets given as `{"file": ...}` or
+`{"env": ...}`:
+
+```json
+{"version": 1,
+ "mcp": {"config": "examples/config.json", "policy": "examples/policy.json",
+         "audit_log": "audit.jsonl", "audit_key": {"file": "/run/secrets/mcp-audit-key"},
+         "admin_token": {"file": "/run/secrets/mcp-admin-token"}, "state_dir": "."}}
+```
+
+The file, its secret files, the agents config and the policy are watched:
+agents, signing keys, the policy and the log level change within about a
+second, and an invalid change is refused with the running configuration
+kept. With a file the `TOOLGATE_` variables are ignored and the
+`AUTHZ_MCP_` ones override its members. `authz check -config authz.json`
+validates it without starting.
+
 Then point any MCP client at `http://127.0.0.1:8080/mcp` with
 `Authorization: Bearer <agent key>`. Configuration is documented in
 `authz mcp -h` and [cmd/authz/internal/mcp/mcp.go](../cmd/authz/internal/mcp/mcp.go); the config and policy formats in
