@@ -47,6 +47,8 @@ type Settings struct {
 	LogLevel string `json:"log_level"`
 	// AuditLog is GRANTD_AUDIT_LOG.
 	AuditLog string `json:"audit_log"`
+	// AuditChecks is GRANTD_AUDIT_CHECKS.
+	AuditChecks bool `json:"audit_checks"`
 	// KeyRate is GRANTD_KEY_RATE: requests per second per API key; 0 sets
 	// no limit.
 	KeyRate float64 `json:"key_rate"`
@@ -141,6 +143,9 @@ func checkSettings(s *Settings, c *pcfg.Checker) {
 	if err := new(slog.Level).UnmarshalText([]byte(s.LogLevel)); err != nil {
 		c.Errorf(c.Field("log_level"), "%q is not debug, info, warn or error", s.LogLevel)
 	}
+	if s.AuditChecks && s.AuditLog == "" {
+		c.Errorf(c.Field("audit_checks"), "needs audit_log")
+	}
 	if s.KeyRate < 0 {
 		c.Errorf(c.Field("key_rate"), "must not be negative (0 sets no limit)")
 	}
@@ -184,7 +189,7 @@ func (s *Settings) tlsFiles() *httpserver.TLSFiles {
 // settingsConfig is the configuration a checked section starts the server
 // with, the same one loadConfig builds from the GRANTD_ variables.
 func settingsConfig(s *Settings) (config, error) {
-	c := config{addr: s.Addr, dataDir: s.DataDir, auditLog: s.AuditLog, cacheSize: s.CacheSize,
+	c := config{addr: s.Addr, dataDir: s.DataDir, auditLog: s.AuditLog, auditChk: s.AuditChecks, cacheSize: s.CacheSize,
 		retention: store.Revision(s.Retention), apiKeys: splitList(s.APIKeys.Value())}
 	if len(c.apiKeys) == 0 {
 		return c, errors.New("$.serve.api_keys holds no key")

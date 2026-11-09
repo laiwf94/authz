@@ -36,6 +36,12 @@ type auditHarness struct {
 
 func newAuditHarness(t *testing.T) *auditHarness {
 	t.Helper()
+	return newAuditHarnessWith(t, false)
+}
+
+// newAuditHarnessWith also records check decisions when checks is set.
+func newAuditHarnessWith(t *testing.T, checks bool) *auditHarness {
+	t.Helper()
 	st, err := store.Open(store.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +56,7 @@ func newAuditHarness(t *testing.T) *auditHarness {
 	tok, _ := token.NewIssuer(bytes.Repeat([]byte{7}, token.KeySize))
 	h := &auditHarness{t: t, log: l, path: path, m: metrics.New(), logs: &lockedBuffer{}, tok: tok}
 	s, err := New(Config{Store: st, Tokens: tok, APIKeys: []string{apiKey, secondKey}, Metrics: h.m,
-		Logger: logging.NewLogger(h.logs, logging.Options{}), Audit: l})
+		Logger: logging.NewLogger(h.logs, logging.Options{}), Audit: l, AuditChecks: checks})
 	if err != nil {
 		t.Fatal(err)
 	}

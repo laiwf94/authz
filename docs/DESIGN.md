@@ -421,6 +421,64 @@ so a failed append is counted (`grantd_audit_failures_total`,
 After that, `/healthz` answers 503 until the process restarts, the way
 `authz mcp`'s does.
 
+Check decisions are the exception. With `GRANTD_AUDIT_CHECKS=true` (or
+`audit_checks` in the serve section), every answered check, single or bulk,
+is an `authz.check_decided` record: the resource as the subject, the
+permission as the action, allow or deny, the principal and the zed token it
+was checked at, and the item count for a bulk check. Nothing is committed
+by a check, so the order is the other way round: the record is durable
+before the answer is sent, and a check whose record cannot be written is
+answered 503 `unavailable` rather than given unrecorded. A check that fails
+(a bad request, an unknown permission in a bulk item) records nothing. It is
+off by default because each check waits for an fsync, shared with every
+other append under group commit; a bulk check's records are written with
+`WriteAll`, which waits for one fsync for all of them.
+
+`authz mcp` opens its log with the default schemas too, so a record the
+gateway writes that does not match its agents schema is refused before it
+reaches the file, as serve's and the gateway's are.
+
+### One file, three writers
+
+The three subcommands usually run as separate processes on one host, and
+one chain means one file. Each `Log` therefore takes an exclusive `flock` on
+the file around each write. Under the lock it compares the file's size with
+the end of its own last record; if another writer has appended since, it
+reads just those records, checks that they continue the chain from its own
+head (sequence and `prev`), and moves its head past them before writing its
+own. A torn final line found that way belongs to a writer that died
+mid-write (its lock died with it) and is cut off, as `Open` does; anything
+else that does not continue the chain, or a file that shrank, stops the
+writer for good like a failed write, since it can no longer know where its
+record belongs. `Open` takes the lock as well, so it never cuts off a line a
+live writer is still writing. The lock is released before the fsync, so
+group commit still covers every append, from this process or another,
+written before it; `BenchmarkAppend` and `BenchmarkAppendParallel` read the
+same with and without the lock (about 140 µs and 28 µs per append on the
+4-core test machine, both bound by the fsync). `Head` reads the other
+writers' records the same way first, so `/admin/audit/head` reports the
+file's head and `authz mcp audit verify -head` holds for a shared file. Windows has no `flock` in the standard library,
+so there a log keeps one writer.
+
+`TestMainOneChain` (cmd/authz) runs it end to end as a deployment would:
+serve, gateway and mcp as three processes of the binary with one
+`*_AUDIT_LOG` file, a fake identity provider, and a proxy configured like
+the nginx example in docs/proxies.md in front of an app. A traced browser
+signs in through the gateway; the proxy's forward-auth subrequest carries
+the browser's `traceparent`, the gateway's allowed answer hands one back,
+and the app passes it on to the check it asks serve and to the tool call it
+then makes through mcp, which passes it to the tool's server. The file must
+pass `VerifyWith` with records from all three writers, and under the
+browser's trace ID it must hold, in order, `authn.login_succeeded` (alice,
+`app:docs`), `authz.check_decided` (`doc:readme` `view` allow for
+`user:alice`) and the call's two `tool_call` records (alice's agent,
+`read_file`, allowed by `files-read`). A sign-in spans several browser
+requests, so in production the sign-in shares a trace ID with what follows
+only when the client keeps one trace across them; otherwise the session ID
+in `authn.login_succeeded` and the user in the later records tie them.
+`TestSharedWriterProcesses` has four processes append 600 records at once
+and requires one chain with each record once.
+
 ## One configuration file (internal/platform/config)
 
 Every subcommand reads its part of one versioned JSON document. A section

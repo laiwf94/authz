@@ -152,6 +152,48 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **One audit chain for the platform** ([#78](https://github.com/laiwf94/authz/issues/78)).
+  toolgate's hash-chained log is now `internal/platform/audit`, and
+  `authz serve` (`GRANTD_AUDIT_LOG`), `authz gateway` (`WICKET_AUDIT_LOG`) and
+  `authz mcp` (`TOOLGATE_AUDIT_LOG`) all write it. They may point at the same
+  file: appends lock it, read what the other processes wrote and chain after
+  it, so one host keeps one chain. Records may carry an envelope (tenant,
+  actor, subject, action, decision, correlation ID) and each event type has
+  a typed payload schema, which all three enforce before writing and
+  `VerifyWith` checks afterwards. Logs written by toolgate keep their bytes
+  and head and are continued.
+  - serve records schema changes (hash and size, never the text) and
+    relationship writes, with the API key's `api_key:` ID as the actor.
+  - `GRANTD_AUDIT_CHECKS=true` (section: `audit_checks`) also records every
+    answered check as an `authz.check_decided` decision record before
+    answering; a check whose record cannot be written gets 503.
+  - The gateway records sign-ins, failed and refused sign-ins, logouts,
+    admin revocations, forward-auth denials and config loads, and keeps its
+    log lines as wicket wrote them.
+  - A failed append after a committed write is counted
+    (`grantd_audit_failures_total`, `wicket_audit_failures_total`) and turns
+    `/healthz` to 503.
+- **Correlation IDs across serve, gateway and mcp.** Each request's ID is the
+  trace ID of its `traceparent`, or a new one. It is on the request's log
+  lines and in its audit records, `authz mcp` sends it upstream as a
+  `traceparent` with its own parent ID, and the gateway's allowed
+  forward-auth answer returns one when the proxy sent one (docs/proxies.md
+  shows the nginx, Traefik and Envoy settings to pass it on).
+- **One log handler** (`internal/platform/logging`): JSON lines with the
+  correlation ID and tenant from the request, live level changes, and
+  redaction of secret values, secret-named keys and struct fields tagged
+  `log:"secret"`. With no request values its output is the same as before,
+  so no existing log line changed.
+- **One rate limiter** (`internal/platform/ratelimit`): GCRA with bounded
+  memory, now behind wicket's login limit and toolgate's per-agent and
+  per-tool buckets, with their old tests passing against it. `authz serve`
+  gains an optional per-API-key limit (`GRANTD_KEY_RATE`,
+  `GRANTD_KEY_BURST`): over it a request gets 429 `resource_exhausted` with
+  `Retry-After`, counted in `grantd_rate_limited_total`.
+- **Secret scan in CI.** Every suite runs again with every log line and
+  audit record scanned for keys, tokens and passwords; a finding fails the
+  test that wrote it.
+
 - **toolgate is now `authz mcp`** ([#75](https://github.com/laiwf94/authz/issues/75)).
   The toolgate packages live at `internal/agents/*` in the root module, and
   `cmd/toolgate` and `cmd/mcpfake` are the `authz mcp` and `authz mcpfake`

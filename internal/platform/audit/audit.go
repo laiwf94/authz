@@ -24,6 +24,16 @@
 //
 // Appends are durable before they return: the line is written and the file
 // fsynced. Concurrent appends share fsyncs (group commit).
+//
+// Several processes may append to one file, so authz serve, gateway and mcp
+// on one host can keep a single chain: point their audit log settings at the
+// same path. Each append takes an exclusive flock on the file, first reads
+// any records other writers added since its own last append (checking that
+// they continue the chain), and writes its record after them. The lock is
+// held for the write only; the fsync is shared as before. Opening takes the
+// lock too, so a torn final line is only cut off when no live writer can be
+// in the middle of it. On systems without flock (Windows) a log must have one
+// writer.
 package audit
 
 import (
@@ -91,6 +101,9 @@ type Log struct {
 	broken bool
 	now    func() time.Time
 	sch    *Schemas // nil: payloads are not checked
+	// osf is the file itself when other processes may share it: appends
+	// lock it and read their records first. nil where flock is missing.
+	osf *os.File
 
 	syncMu sync.Mutex // serializes fsyncs
 	synced int64      // file size known durable; guarded by syncMu
@@ -124,6 +137,15 @@ func OpenWith(path string, o Options) (*Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: %w", err)
 	}
+	if canLock {
+		if err := lockFile(f); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("audit: locking %s: %w", path, err)
+		}
+		// Closing the file would drop the lock too, but the open's own
+		// failures close it only after this returns.
+		defer unlockFile(f)
+	}
 	res, err := verify(f, true, nil)
 	if err != nil {
 		f.Close()
@@ -143,7 +165,11 @@ func OpenWith(path string, o Options) (*Log, error) {
 		f.Close()
 		return nil, fmt.Errorf("audit: %w", err)
 	}
-	return &Log{f: f, seq: res.Records, head: res.Head, size: res.Size, synced: res.Size, now: now, sch: o.Schemas}, nil
+	l := &Log{f: f, seq: res.Records, head: res.Head, size: res.Size, synced: res.Size, now: now, sch: o.Schemas}
+	if canLock {
+		l.osf = f
+	}
+	return l, nil
 }
 
 // Append writes one record without an envelope and returns once it is on
@@ -164,6 +190,50 @@ func (l *Log) Write(env Envelope, p Payload) error {
 // disk. The event type and envelope are checked, and with Options.Schemas
 // so is the payload, before anything is written.
 func (l *Log) AppendWith(event string, env Envelope, data any) error {
+	if err := l.check(event, env, data); err != nil {
+		return err
+	}
+	end, err := l.write(event, env, data)
+	if err != nil {
+		return err
+	}
+	return l.syncTo(end)
+}
+
+// WriteAll appends typed payloads in order, each under its envelope, and
+// returns once all of them are on disk: one fsync covers them all, where
+// Write would wait for one each. Every record is checked before any is
+// written. Records of other appends may fall between them. On an error the
+// records before the failing one may have been written.
+func (l *Log) WriteAll(envs []Envelope, ps []Payload) error {
+	if len(envs) != len(ps) {
+		return errors.New("audit: WriteAll needs one envelope per payload")
+	}
+	for i, p := range ps {
+		if p == nil {
+			return errors.New("audit: nil payload")
+		}
+		if err := l.check(p.AuditEvent(), envs[i], p); err != nil {
+			return err
+		}
+	}
+	var end int64
+	for i, p := range ps {
+		e, err := l.write(p.AuditEvent(), envs[i], p)
+		if err != nil {
+			return err
+		}
+		end = e
+	}
+	if len(ps) == 0 {
+		return nil
+	}
+	return l.syncTo(end)
+}
+
+// check refuses a record before anything is written: a bad event type or
+// envelope, and with Options.Schemas a payload that does not match.
+func (l *Log) check(event string, env Envelope, data any) error {
 	if err := checkEvent(event); err != nil {
 		return err
 	}
@@ -179,20 +249,38 @@ func (l *Log) AppendWith(event string, env Envelope, data any) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// write appends the record under the log's mutex and, for a shared file,
+// its flock, and returns the file offset the record ends at. Both are
+// released before the fsync, so appends from this process and others share
+// it.
+func (l *Log) write(event string, env Envelope, data any) (int64, error) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.broken {
-		l.mu.Unlock()
-		return ErrBroken
+		return 0, ErrBroken
+	}
+	if l.osf != nil {
+		if err := lockFile(l.osf); err != nil {
+			// Without the lock another writer may be mid-line, so the end
+			// of the file is unknown (a closed file ends up here too).
+			l.broken = true
+			return 0, fmt.Errorf("audit: lock: %v: %w", err, ErrBroken)
+		}
+		defer unlockFile(l.osf)
+		if err := l.catchUp(); err != nil {
+			return 0, err
+		}
 	}
 	line, err := marshal(record{Seq: l.seq + 1, Time: l.now().UTC().Format(time.RFC3339Nano),
 		Prev: l.head, Event: event, Envelope: env, Data: data})
 	if err != nil {
-		l.mu.Unlock()
-		return fmt.Errorf("audit: encoding record: %w", err)
+		return 0, fmt.Errorf("audit: encoding record: %w", err)
 	}
 	if len(line)+1 > MaxLineBytes {
-		l.mu.Unlock()
-		return fmt.Errorf("audit: record is larger than %d bytes", MaxLineBytes)
+		return 0, fmt.Errorf("audit: record is larger than %d bytes", MaxLineBytes)
 	}
 	if _, err := l.f.Write(append(line, '\n')); err != nil {
 		// Cut off whatever part was written so the chain stays valid; if that
@@ -202,18 +290,55 @@ func (l *Log) AppendWith(event string, env Envelope, data any) error {
 		} else if _, serr := l.f.Seek(l.size, io.SeekStart); serr != nil {
 			l.broken = true
 		}
-		l.mu.Unlock()
-		return fmt.Errorf("audit: write: %w", err)
+		return 0, fmt.Errorf("audit: write: %w", err)
 	}
 	sum := sha256.Sum256(line)
 	l.seq++
 	l.head = hex.EncodeToString(sum[:])
 	l.size += int64(len(line)) + 1
-	end := l.size
 	// Under the lock, so watchers see records in chain order.
 	logging.Observe(logging.SourceAudit, line)
-	l.mu.Unlock()
-	return l.syncTo(end)
+	return l.size, nil
+}
+
+// catchUp takes in the records other writers appended to a shared file
+// since this writer's last append, so the next record follows them. The
+// caller holds the flock, so no live writer is mid-line: a torn final line
+// is one a writer that died never acknowledged, and is cut off as Open
+// does. Records that do not continue the chain make the log unusable, like
+// a failed write.
+func (l *Log) catchUp() error {
+	fi, err := l.osf.Stat()
+	if err != nil {
+		l.broken = true
+		return fmt.Errorf("audit: %v: %w", err, ErrBroken)
+	}
+	size := fi.Size()
+	if size == l.size {
+		return nil
+	}
+	if size < l.size {
+		l.broken = true
+		return fmt.Errorf("audit: the file shrank from %d to %d bytes under this writer: %w", l.size, size, ErrBroken)
+	}
+	start := Result{Records: l.seq, Head: l.head, Size: l.size}
+	res, err := verifyFrom(io.NewSectionReader(l.osf, l.size, size-l.size), true, nil, start)
+	if err != nil {
+		l.broken = true
+		return fmt.Errorf("audit: records another writer appended do not verify: %v: %w", err, ErrBroken)
+	}
+	if res.TornBytes > 0 {
+		if err := l.f.Truncate(res.Size); err != nil {
+			l.broken = true
+			return fmt.Errorf("audit: cutting a torn final line: %v: %w", err, ErrBroken)
+		}
+	}
+	if _, err := l.f.Seek(res.Size, io.SeekStart); err != nil {
+		l.broken = true
+		return fmt.Errorf("audit: %v: %w", err, ErrBroken)
+	}
+	l.seq, l.head, l.size = res.Records, res.Head, res.Size
+	return nil
 }
 
 // syncTo returns once the file is durable up to offset end. Whoever holds
@@ -243,10 +368,20 @@ func (l *Log) syncTo(end int64) error {
 	return nil
 }
 
-// Head returns the number of records and the hash of the last one.
+// Head returns the number of records and the hash of the last one. For a
+// shared file it first reads the records other writers appended, so the
+// head is the file's, as "authz mcp audit verify -head" expects.
 func (l *Log) Head() (uint64, string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.osf != nil && !l.broken {
+		// A failure leaves the head as this writer last knew it, and
+		// marks the log broken like a failed append would.
+		if lockFile(l.osf) == nil {
+			_ = l.catchUp()
+			unlockFile(l.osf)
+		}
+	}
 	return l.seq, l.head
 }
 
@@ -290,9 +425,15 @@ func VerifyWith(r io.Reader, s *Schemas) (Result, error) {
 }
 
 func verify(r io.Reader, allowTorn bool, s *Schemas) (Result, error) {
+	return verifyFrom(r, allowTorn, s, Result{Head: Genesis})
+}
+
+// verifyFrom verifies records that continue the chain res describes: r
+// starts at byte res.Size, after res.Records records ending in res.Head.
+// Line numbers in errors count from the start of the file.
+func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result) (Result, error) {
 	br := bufio.NewReaderSize(r, 64<<10)
-	res := Result{Head: Genesis}
-	for n := 1; ; n++ {
+	for n := int(res.Records) + 1; ; n++ {
 		line, err := readLine(br)
 		if err == io.EOF {
 			return res, nil

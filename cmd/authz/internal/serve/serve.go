@@ -11,7 +11,10 @@
 //	GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
 //	GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
 //	GRANTD_AUDIT_LOG   the platform's hash-chained audit log for schema changes and
-//	                   relationship writes; empty keeps no audit log
+//	                   relationship writes; empty keeps no audit log. It may be the
+//	                   same file authz gateway and authz mcp write
+//	GRANTD_AUDIT_CHECKS true also records every answered check as a decision
+//	                   record in GRANTD_AUDIT_LOG (default false)
 //	GRANTD_KEY_RATE    requests per second allowed per API key; 0 or empty (the
 //	                   default) sets no limit. Requests over it get 429 and Retry-After
 //	GRANTD_KEY_BURST   requests an API key may make at once above the rate
@@ -75,7 +78,10 @@ Without a file, configuration comes from the environment, as grantd's did:
   GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
   GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
   GRANTD_AUDIT_LOG   hash-chained audit log of schema changes and relationship writes;
-                     empty keeps none
+                     empty keeps none. It may be the file authz gateway and authz mcp
+                     write, which makes one chain
+  GRANTD_AUDIT_CHECKS true also records every answered check as a decision record
+                     in GRANTD_AUDIT_LOG, before the answer (default false)
   GRANTD_KEY_RATE    requests per second allowed per API key; 0 or empty (the default)
                      sets no limit. Requests over it get 429 and Retry-After
   GRANTD_KEY_BURST   requests an API key may make at once above the rate
@@ -163,6 +169,7 @@ type config struct {
 	retention store.Revision
 	logLevel  slog.Level
 	auditLog  string
+	auditChk  bool // GRANTD_AUDIT_CHECKS
 	keyLimit  ratelimit.Limit
 	http      httpserver.Options // GRANTD_TLS_* and GRANTD_DRAIN_*
 }
@@ -174,6 +181,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 	c.dataDir = getenv("GRANTD_DATA_DIR")
 	c.auditLog = getenv("GRANTD_AUDIT_LOG")
+	if v := getenv("GRANTD_AUDIT_CHECKS"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return c, errors.New("GRANTD_AUDIT_CHECKS must be true or false")
+		}
+		if b && c.auditLog == "" {
+			return c, errors.New("GRANTD_AUDIT_CHECKS needs GRANTD_AUDIT_LOG")
+		}
+		c.auditChk = b
+	}
 	for _, k := range strings.Split(getenv("GRANTD_API_KEYS"), ",") {
 		if k = strings.TrimSpace(k); k != "" {
 			c.apiKeys = append(c.apiKeys, k)
@@ -337,7 +354,7 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 	}
 
 	srv, err := api.New(api.Config{Store: st, Tokens: tokens, APIKeys: cfg.apiKeys, Logger: log,
-		Metrics: h.Registry(), CacheSize: cfg.cacheSize, Audit: auditLog, KeyLimit: cfg.keyLimit})
+		Metrics: h.Registry(), CacheSize: cfg.cacheSize, Audit: auditLog, AuditChecks: cfg.auditChk, KeyLimit: cfg.keyLimit})
 	if err != nil {
 		return err
 	}

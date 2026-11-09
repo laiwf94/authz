@@ -207,6 +207,28 @@ policy language, approvals, pinning, both MCP eras and the move from the
 toolgate binary are in [toolgate/README.md](toolgate/README.md) and
 [toolgate/docs/DESIGN.md](toolgate/docs/DESIGN.md).
 
+## One audit chain
+
+`authz serve`, `authz gateway` and `authz mcp` append to the same
+hash-chained audit log, and may share one file on a host: each append locks
+the file, reads what the others wrote since and chains its record after
+them. Each record is checked against its event's typed schema before it is
+written, and carries the request's correlation ID: the trace ID of its
+`traceparent`, or a new one, which is also on the request's log lines and is
+passed on to upstreams.
+
+```console
+$ export GRANTD_AUDIT_LOG=/var/lib/authz/audit.jsonl GRANTD_AUDIT_CHECKS=true   # writes, schema changes and every check decision
+$ export WICKET_AUDIT_LOG=/var/lib/authz/audit.jsonl                            # sign-ins, logouts, admin actions, denials
+$ export AUTHZ_MCP_AUDIT_LOG=/var/lib/authz/audit.jsonl                         # tool calls, approvals, quarantines
+$ ./authz mcp audit verify /var/lib/authz/audit.jsonl
+```
+
+A sign-in, the check it leads to and the tool call that check allows then
+follow one another in one verified chain under one correlation ID; CI runs
+exactly that across the three processes. The format, the event types and
+the locking are in [docs/DESIGN.md](docs/DESIGN.md#one-audit-log-internalplatformaudit).
+
 ## HTTP API
 
 The authorization API (`authz serve`). All `/v1` endpoints take `Authorization: Bearer <key>` and JSON bodies.

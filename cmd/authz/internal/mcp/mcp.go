@@ -24,7 +24,8 @@
 //	TOOLGATE_ADMIN_TOKEN      AUTHZ_MCP_ADMIN_TOKEN      bearer token for the admin API, at least 32 characters (required)
 //	TOOLGATE_CONFIG           AUTHZ_MCP_CONFIG           path of the JSON config: agents, upstreams, limits (required)
 //	TOOLGATE_POLICY           AUTHZ_MCP_POLICY           path of the JSON policy, reloaded when it changes (required)
-//	TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        path of the append-only audit log (required)
+//	TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        path of the append-only audit log (required); may be
+//	                                                     the file authz serve and authz gateway write
 //	TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters; keys the argument digests in the audit log (required)
 //	TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        directory for trusted tool definitions and approvals; empty keeps them in memory only
 //	TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,kid=<64 hex>...] for signed agent tokens; the first signs new tokens
@@ -103,7 +104,8 @@ different values is an error:
   TOOLGATE_ADMIN_TOKEN      AUTHZ_MCP_ADMIN_TOKEN      admin API bearer token, at least 32 characters (required)
   TOOLGATE_CONFIG           AUTHZ_MCP_CONFIG           JSON config: agents, upstreams, limits (required)
   TOOLGATE_POLICY           AUTHZ_MCP_POLICY           JSON policy, reloaded when it changes (required)
-  TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        append-only audit log (required)
+  TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        append-only audit log (required); may be the
+                                                       file authz serve and authz gateway write
   TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters keying argument digests (required)
   TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        tool pins and approvals; empty keeps them in memory
   TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,...] for signed agent tokens
@@ -416,7 +418,9 @@ func serveGateway(ctx context.Context, h part.Host, cfg config, gc *gateway.Conf
 	if err != nil {
 		return err
 	}
-	auditLog, err := audit.Open(cfg.auditPath, nil)
+	// Every record must match its agents schema before it is written, and
+	// the file may be the one authz serve and authz gateway write too.
+	auditLog, err := audit.OpenWith(cfg.auditPath, audit.Options{Schemas: audit.Default()})
 	if err != nil {
 		return err
 	}

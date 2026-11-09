@@ -65,6 +65,13 @@ type Config struct {
 	// logging.Correlate). It should be opened with audit.Default() schemas.
 	// The server does not close it.
 	Audit *audit.Log
+	// AuditChecks also records every answered check, single or bulk, as an
+	// authz.check_decided decision record in Audit: the resource as the
+	// subject, the permission as the action, the result as the decision.
+	// The record is durable before the answer is sent, and a check whose
+	// record cannot be written is answered 503 instead, so every decision a
+	// client acted on is in the chain. Each record costs a shared fsync.
+	AuditChecks bool
 	// KeyLimit is the request rate allowed per API key, enforced with the
 	// platform limiter; requests over it get 429 with Retry-After. A zero
 	// Rate (the default) means no limit.
@@ -82,6 +89,7 @@ type Server struct {
 	keyLim  *ratelimit.Limiter
 	limit   ratelimit.Limit
 	audit   *audit.Log
+	checks  bool // record check decisions in audit
 	log     *slog.Logger
 	m       *metrics.Registry
 	quantum time.Duration
@@ -100,6 +108,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{st: cfg.Store, tokens: cfg.Tokens, log: cfg.Logger, m: cfg.Metrics,
 		quantum: cfg.Quantum, timeout: cfg.Timeout, audit: cfg.Audit, limit: cfg.KeyLimit}
+	if cfg.AuditChecks {
+		if cfg.Audit == nil {
+			return nil, errors.New("api: AuditChecks needs an audit log")
+		}
+		s.checks = true
+	}
 	if err := s.SetAPIKeys(cfg.APIKeys); err != nil {
 		return nil, err
 	}
@@ -322,6 +336,50 @@ func (s *Server) record(ctx context.Context, env audit.Envelope, p audit.Payload
 		return
 	}
 	s.m.Counter("grantd_audit_records_total", fmt.Sprintf("event=%q", p.AuditEvent()), "Audit records written.").Inc()
+}
+
+// errAuditUnavailable answers a check whose decision record could not be
+// written.
+var errAuditUnavailable = &apiError{status: http.StatusServiceUnavailable, code: "unavailable",
+	msg: "the audit log is unavailable, so the decision cannot be recorded; retry later"}
+
+// recordDecisions writes one authz.check_decided record per answered check
+// when check auditing is on. Unlike the records of writes, which describe
+// something already committed, a decision is only given once its record is
+// durable, so a failure is returned.
+func (s *Server) recordDecisions(ctx context.Context, rev store.Revision, items []checkItem, allowed []bool, answered []bool) error {
+	if !s.checks {
+		return nil
+	}
+	at := s.tokens.Encode(rev)
+	actor, _ := ctx.Value(actorKey).(string)
+	corr := logging.CorrelationID(ctx)
+	bulk := 0 // a single check
+	if answered != nil {
+		bulk = len(items)
+	}
+	envs := make([]audit.Envelope, 0, len(items))
+	ps := make([]audit.Payload, 0, len(items))
+	for i, it := range items {
+		if answered != nil && !answered[i] {
+			continue
+		}
+		d := audit.Deny
+		if allowed[i] {
+			d = audit.Allow
+		}
+		envs = append(envs, audit.Envelope{Actor: actor, Subject: audit.Clean(it.Resource, audit.MaxEnvelopeBytes),
+			Action: audit.Clean(it.Permission, audit.MaxEnvelopeBytes), Decision: d, CorrelationID: corr})
+		ps = append(ps, audit.CheckDecided{Principal: it.Subject, Revision: at, Bulk: bulk})
+	}
+	// A bulk check's records share one fsync.
+	if err := s.audit.WriteAll(envs, ps); err != nil {
+		s.m.Counter("grantd_audit_failures_total", "", "Audit records that could not be written.").Inc()
+		s.log.ErrorContext(ctx, "audit write failed", "event", audit.EventCheckDecided, "request_id", ctx.Value(requestIDKey), "error", err.Error())
+		return errAuditUnavailable
+	}
+	s.m.Counter("grantd_audit_records_total", fmt.Sprintf("event=%q", audit.EventCheckDecided), "Audit records written.").Add(uint64(len(ps)))
+	return nil
 }
 
 // apiError carries an HTTP status and stable code.
@@ -630,6 +688,9 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	if err := s.recordDecisions(r.Context(), rev, []checkItem{body.checkItem}, []bool{ok}, nil); err != nil {
+		return err
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"allowed": ok, "checked_at": s.tokens.Encode(rev)})
 	return nil
 }
@@ -670,6 +731,15 @@ func (s *Server) checkBulk(w http.ResponseWriter, r *http.Request) error {
 			continue
 		}
 		results[i].Allowed = ok
+	}
+	if s.checks {
+		allowed, answered := make([]bool, len(results)), make([]bool, len(results))
+		for i, res := range results {
+			allowed[i], answered[i] = res.Allowed, res.Error == ""
+		}
+		if err := s.recordDecisions(r.Context(), rev, body.Items, allowed, answered); err != nil {
+			return err
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results, "checked_at": s.tokens.Encode(rev)})
 	return nil

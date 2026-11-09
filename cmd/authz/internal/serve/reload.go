@@ -53,7 +53,7 @@ func grantdVars(getenv func(string) string) []string {
 		}
 	}
 	for _, k := range []string{"GRANTD_ADDR", "GRANTD_DATA_DIR", "GRANTD_API_KEYS", "GRANTD_TOKEN_KEY", "GRANTD_CACHE_SIZE",
-		"GRANTD_RETENTION", "GRANTD_LOG_LEVEL", "GRANTD_AUDIT_LOG", "GRANTD_KEY_RATE", "GRANTD_KEY_BURST"} {
+		"GRANTD_RETENTION", "GRANTD_LOG_LEVEL", "GRANTD_AUDIT_LOG", "GRANTD_AUDIT_CHECKS", "GRANTD_KEY_RATE", "GRANTD_KEY_BURST"} {
 		if getenv(k) != "" && !slices.Contains(out, k) {
 			out = append(out, k)
 		}
@@ -152,6 +152,9 @@ func restartOnly(a, b config) []string {
 	}
 	if a.auditLog != b.auditLog {
 		out = append(out, "audit_log")
+	}
+	if a.auditChk != b.auditChk {
+		out = append(out, "audit_checks")
 	}
 	if a.keyLimit.Rate != b.keyLimit.Rate {
 		out = append(out, "key_rate")
