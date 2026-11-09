@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/internal/authz/check"
-	"github.com/laiwf94/authz/internal/authz/schema"
+	"github.com/laiwf94/authz/internal/authz/engine"
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/platform/audit"
@@ -34,10 +34,10 @@ import (
 // Request limits.
 const (
 	MaxBodyBytes      = 1 << 20
-	MaxBulkChecks     = 100
+	MaxBulkChecks     = engine.MaxBulkChecks
 	DefaultTimeout    = 5 * time.Second
 	MaxWatchWait      = 30 * time.Second
-	DefaultQuantum    = 100 * time.Millisecond
+	DefaultQuantum    = engine.DefaultQuantum
 	maxWatchChanges   = 1000
 	requestIDHeader   = "X-Request-Id"
 	maxRequestIDBytes = 128
@@ -83,7 +83,7 @@ type Config struct {
 // Server is the HTTP API.
 type Server struct {
 	st      *store.Store
-	eng     *check.Engine
+	eng     *engine.Local
 	tokens  *token.Issuer
 	keys    atomic.Pointer[keySet]
 	keyLim  *ratelimit.Limiter
@@ -135,7 +135,12 @@ func New(cfg Config) (*Server, error) {
 	if s.timeout <= 0 {
 		s.timeout = DefaultTimeout
 	}
-	s.eng = check.New(cfg.Store, check.NewCache(cfg.CacheSize))
+	eng, err := engine.New(engine.Options{Store: cfg.Store, Tokens: cfg.Tokens, CacheSize: cfg.CacheSize,
+		Snapshot: s.quantizedHead, Metrics: s.m})
+	if err != nil {
+		return nil, err
+	}
+	s.eng = eng
 	s.m.Gauge("grantd_head_revision", "Newest committed revision.", func() float64 { return float64(cfg.Store.Head()) })
 
 	s.mux = http.NewServeMux()
@@ -347,11 +352,10 @@ var errAuditUnavailable = &apiError{status: http.StatusServiceUnavailable, code:
 // when check auditing is on. Unlike the records of writes, which describe
 // something already committed, a decision is only given once its record is
 // durable, so a failure is returned.
-func (s *Server) recordDecisions(ctx context.Context, rev store.Revision, items []checkItem, allowed []bool, answered []bool) error {
+func (s *Server) recordDecisions(ctx context.Context, at string, items []checkItem, allowed []bool, answered []bool) error {
 	if !s.checks {
 		return nil
 	}
-	at := s.tokens.Encode(rev)
 	actor, _ := ctx.Value(actorKey).(string)
 	corr := logging.CorrelationID(ctx)
 	bulk := 0 // a single check
@@ -403,7 +407,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, r, ae.status, ae.code, ae.msg)
 	case errors.As(err, &mbe):
 		writeError(w, r, http.StatusRequestEntityTooLarge, "invalid_argument", fmt.Sprintf("request body is larger than %d bytes", MaxBodyBytes))
-	case errors.Is(err, store.ErrInvalid), errors.Is(err, check.ErrUnknownType), errors.Is(err, check.ErrUnknownName),
+	case errors.Is(err, engine.ErrInvalidArgument), errors.Is(err, store.ErrInvalid), errors.Is(err, check.ErrUnknownType), errors.Is(err, check.ErrUnknownName),
 		errors.Is(err, token.ErrInvalid):
 		writeError(w, r, http.StatusBadRequest, "invalid_argument", err.Error())
 	case errors.Is(err, store.ErrNoSchema):
@@ -460,16 +464,17 @@ func (s *Server) withTimeout(r *http.Request) (context.Context, context.CancelFu
 	return context.WithTimeout(r.Context(), s.timeout)
 }
 
-// Consistency picks the snapshot a read uses.
-type Consistency struct {
-	// "minimize_latency" (default): a recent snapshot shared for up to Quantum.
-	// "at_least_as_fresh": a snapshot no older than Token.
-	// "at_exact_snapshot": exactly Token's snapshot.
-	// "fully_consistent": the newest committed revision.
-	Mode  string `json:"mode,omitempty"`
-	Token string `json:"token,omitempty"`
-}
+// Consistency picks the snapshot a read uses: engine.Consistency, whose
+// JSON form is the "consistency" member of every read.
+type Consistency = engine.Consistency
 
+// Engine returns the engine the handlers answer with, for callers in the
+// same process: they share its cache, its minimize_latency snapshot and
+// its consistency tokens with the HTTP API.
+func (s *Server) Engine() *engine.Local { return s.eng }
+
+// quantizedHead is the minimize_latency snapshot, shared between the HTTP
+// handlers and in-process callers of Engine for up to Quantum.
 func (s *Server) quantizedHead() store.Revision {
 	s.snapMu.Lock()
 	defer s.snapMu.Unlock()
@@ -477,44 +482,6 @@ func (s *Server) quantizedHead() store.Revision {
 		s.snapRev, s.snapTime = s.st.Head(), time.Now()
 	}
 	return s.snapRev
-}
-
-func (s *Server) resolve(c Consistency) (store.Revision, error) {
-	switch c.Mode {
-	case "", "minimize_latency":
-		if c.Token != "" {
-			return 0, badRequest("consistency.token is only used with at_least_as_fresh or at_exact_snapshot")
-		}
-		return s.quantizedHead(), nil
-	case "fully_consistent":
-		if c.Token != "" {
-			return 0, badRequest("consistency.token is only used with at_least_as_fresh or at_exact_snapshot")
-		}
-		return s.st.Head(), nil
-	case "at_least_as_fresh", "at_exact_snapshot":
-		if c.Token == "" {
-			return 0, badRequest("consistency mode %s needs a token", c.Mode)
-		}
-		rev, err := s.tokens.Decode(c.Token)
-		if err != nil {
-			return 0, err
-		}
-		head := s.st.Head()
-		if rev > head {
-			// A valid MAC with a future revision means the key is shared with a
-			// store that has more history (e.g. restored from an old backup).
-			return 0, badRequest("token is from a newer revision than this server has")
-		}
-		if c.Mode == "at_exact_snapshot" {
-			return rev, nil
-		}
-		if q := s.quantizedHead(); q >= rev {
-			return q, nil
-		}
-		return head, nil
-	default:
-		return 0, badRequest("unknown consistency mode %q", c.Mode)
-	}
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) error {
@@ -585,11 +552,11 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request) error {
 		}
 		updates[i] = store.Update{Op: store.Op(u.Op), Relationship: rel}
 	}
-	rev, err := s.st.Write(updates, body.Preconditions)
+	res, err := s.eng.Write(r.Context(), engine.WriteRequest{Updates: updates, Preconditions: body.Preconditions})
 	if err != nil {
 		return err
 	}
-	at := s.tokens.Encode(rev)
+	at := res.At.Token
 	p := audit.RelationshipsWritten{Revision: at, Preconditions: len(body.Preconditions)}
 	for _, u := range updates {
 		switch u.Op {
@@ -616,25 +583,16 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request) error {
 	if err := decode(r, &body); err != nil {
 		return err
 	}
-	if body.Limit < 0 || body.Limit > store.MaxReadLimit {
-		return badRequest("limit must be between 0 and %d (0 uses the default of %d)", store.MaxReadLimit, store.DefaultReadLimit)
-	}
-	if len(body.Cursor) > 1024 {
-		return badRequest("cursor is too long")
-	}
-	rev, err := s.resolve(body.Consistency)
+	res, err := s.eng.ReadRelationships(r.Context(), engine.ReadRequest{Filter: body.Filter, Consistency: body.Consistency,
+		Cursor: body.Cursor, Limit: body.Limit})
 	if err != nil {
 		return err
 	}
-	rels, next, err := s.st.Read(rev, body.Filter, body.Cursor, body.Limit)
-	if err != nil {
-		return err
-	}
-	out := make([]string, len(rels))
-	for i, rel := range rels {
+	out := make([]string, len(res.Relationships))
+	for i, rel := range res.Relationships {
 		out[i] = rel.String()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"relationships": out, "cursor": next, "read_at": s.tokens.Encode(rev)})
+	writeJSON(w, http.StatusOK, map[string]any{"relationships": out, "cursor": res.Cursor, "read_at": res.At.Token})
 	return nil
 }
 
@@ -644,29 +602,16 @@ type checkItem struct {
 	Subject    string `json:"subject"`    // type:id or type:id#relation
 }
 
-func (c checkItem) request() (check.Request, error) {
+func (c checkItem) item() (engine.CheckItem, error) {
 	rt, rid, ok := strings.Cut(c.Resource, ":")
 	if !ok || rt == "" || rid == "" {
-		return check.Request{}, badRequest("resource %q must be type:id", c.Resource)
+		return engine.CheckItem{}, badRequest("resource %q must be type:id", c.Resource)
 	}
 	subj, err := store.ParseSubject(c.Subject, false)
 	if err != nil {
-		return check.Request{}, err
+		return engine.CheckItem{}, err
 	}
-	return check.Request{ResourceType: rt, ResourceID: rid, Permission: c.Permission, Subject: subj}, nil
-}
-
-func (s *Server) runCheck(ctx context.Context, sc *schema.Schema, rev store.Revision, c checkItem) (bool, error) {
-	q, err := c.request()
-	if err != nil {
-		return false, err
-	}
-	start := time.Now()
-	ok, stats, err := s.eng.Check(ctx, sc, rev, q)
-	s.m.Histogram("grantd_check_duration_seconds", "", "Time to evaluate one check.").Observe(time.Since(start))
-	s.m.Counter("grantd_check_dispatches_total", "", "object#relation evaluations across all checks.").Add(uint64(stats.Dispatches))
-	s.m.Counter("grantd_check_cache_hits_total", "", "Check sub-results served from the cache.").Add(uint64(stats.CacheHits))
-	return ok, err
+	return engine.CheckItem{ResourceType: rt, ResourceID: rid, Permission: c.Permission, Subject: subj}, nil
 }
 
 func (s *Server) check(w http.ResponseWriter, r *http.Request) error {
@@ -677,21 +622,26 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request) error {
 	if err := decode(r, &body); err != nil {
 		return err
 	}
-	rev, err := s.resolve(body.Consistency)
+	it, err := body.item()
 	if err != nil {
+		// Consistency is resolved first, so a bad mode or token is
+		// reported ahead of a bad resource or subject.
+		if _, rerr := s.eng.Resolve(body.Consistency); rerr != nil {
+			return rerr
+		}
 		return err
 	}
-	sc, _ := s.st.Schema()
 	ctx, cancel := s.withTimeout(r)
 	defer cancel()
-	ok, err := s.runCheck(ctx, sc, rev, body.checkItem)
+	res, err := s.eng.Check(ctx, engine.CheckRequest{ResourceType: it.ResourceType, ResourceID: it.ResourceID,
+		Permission: it.Permission, Subject: it.Subject, Consistency: body.Consistency})
 	if err != nil {
 		return err
 	}
-	if err := s.recordDecisions(r.Context(), rev, []checkItem{body.checkItem}, []bool{ok}, nil); err != nil {
+	if err := s.recordDecisions(r.Context(), res.At.Token, []checkItem{body.checkItem}, []bool{res.Allowed}, nil); err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"allowed": ok, "checked_at": s.tokens.Encode(rev)})
+	writeJSON(w, http.StatusOK, map[string]any{"allowed": res.Allowed, "checked_at": res.At.Token})
 	return nil
 }
 
@@ -706,42 +656,47 @@ func (s *Server) checkBulk(w http.ResponseWriter, r *http.Request) error {
 	if len(body.Items) == 0 || len(body.Items) > MaxBulkChecks {
 		return badRequest("items must have between 1 and %d checks", MaxBulkChecks)
 	}
-	rev, err := s.resolve(body.Consistency)
-	if err != nil {
-		return err
-	}
-	sc, _ := s.st.Schema()
-	ctx, cancel := s.withTimeout(r)
-	defer cancel()
 	type result struct {
 		Allowed bool   `json:"allowed"`
 		Error   string `json:"error,omitempty"`
 	}
+	// An item that does not parse is answered with its error; the rest go
+	// to the engine together, at one snapshot.
 	results := make([]result, len(body.Items))
-	for i, it := range body.Items {
-		ok, err := s.runCheck(ctx, sc, rev, it)
+	items := make([]engine.CheckItem, 0, len(body.Items))
+	index := make([]int, 0, len(body.Items))
+	for i, c := range body.Items {
+		it, err := c.item()
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if errors.Is(err, store.ErrUnavailable) || errors.Is(err, store.ErrSnapshotExpired) {
-				return err
-			}
 			results[i].Error = err.Error()
 			continue
 		}
-		results[i].Allowed = ok
+		items = append(items, it)
+		index = append(index, i)
+	}
+	ctx, cancel := s.withTimeout(r)
+	defer cancel()
+	res, err := s.eng.CheckBulk(ctx, engine.CheckBulkRequest{Items: items, Consistency: body.Consistency})
+	if err != nil {
+		return err
+	}
+	for j, ir := range res.Results {
+		if ir.Err != nil {
+			results[index[j]].Error = ir.Err.Error()
+			continue
+		}
+		results[index[j]].Allowed = ir.Allowed
 	}
 	if s.checks {
 		allowed, answered := make([]bool, len(results)), make([]bool, len(results))
 		for i, res := range results {
 			allowed[i], answered[i] = res.Allowed, res.Error == ""
 		}
-		if err := s.recordDecisions(r.Context(), rev, body.Items, allowed, answered); err != nil {
+		if err := s.recordDecisions(r.Context(), res.At.Token, body.Items, allowed, answered); err != nil {
 			return err
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results, "checked_at": s.tokens.Encode(rev)})
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "checked_at": res.At.Token})
 	return nil
 }
 
@@ -757,6 +712,7 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) error {
 	if err := decode(r, &body); err != nil {
 		return err
 	}
+	// The page is checked before the subject, as it always was.
 	if body.Limit < 0 || body.Limit > check.MaxLookupLimit {
 		return badRequest("limit must be between 0 and %d (0 uses the default of %d)", check.MaxLookupLimit, check.DefaultLookupLimit)
 	}
@@ -767,22 +723,14 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	rev, err := s.resolve(body.Consistency)
-	if err != nil {
-		return err
-	}
-	sc, _ := s.st.Schema()
 	ctx, cancel := s.withTimeout(r)
 	defer cancel()
-	res, err := s.eng.LookupResources(ctx, sc, s.st, rev, body.ResourceType, body.Permission, subj, body.Cursor, body.Limit)
+	res, err := s.eng.LookupResources(ctx, engine.LookupResourcesRequest{ResourceType: body.ResourceType,
+		Permission: body.Permission, Subject: subj, Consistency: body.Consistency, Cursor: body.Cursor, Limit: body.Limit})
 	if err != nil {
 		return err
 	}
-	ids := res.IDs
-	if ids == nil {
-		ids = []string{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"resource_ids": ids, "cursor": res.Next, "looked_up_at": s.tokens.Encode(rev)})
+	writeJSON(w, http.StatusOK, map[string]any{"resource_ids": res.ResourceIDs, "cursor": res.Cursor, "looked_up_at": res.At.Token})
 	return nil
 }
 
