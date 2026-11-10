@@ -41,6 +41,9 @@ type Engine interface {
 	// LookupResources pages through the objects of a type on which a
 	// subject has a permission, in ID order.
 	LookupResources(ctx context.Context, req LookupResourcesRequest) (LookupResourcesResult, error)
+	// Expand returns the userset tree of a permission on one object: who
+	// holds it, through which relations and operators.
+	Expand(ctx context.Context, req ExpandRequest) (ExpandResult, error)
 	// ReadRelationships pages through the stored relationships matching a
 	// filter, in their text order.
 	ReadRelationships(ctx context.Context, req ReadRequest) (ReadResult, error)
@@ -166,6 +169,27 @@ type LookupResourcesResult struct {
 	ResourceIDs []string
 	Cursor      string
 	At          Snapshot
+}
+
+// ExpandRequest asks for the userset tree of Permission on
+// ResourceType:ResourceID. Recursive expands every userset and arrow
+// target the tree reaches; without it the tree stops at usersets, as
+// Zanzibar's Expand does. MaxNodes is at most check.MaxTraceNodes, and 0
+// means check.DefaultTraceNodes. check.Engine.Expand describes the tree.
+type ExpandRequest struct {
+	ResourceType string
+	ResourceID   string
+	Permission   string
+	Recursive    bool
+	MaxNodes     int
+	Consistency  Consistency
+}
+
+// ExpandResult is the tree an ExpandRequest asked for. Tree.Truncated
+// reports that it reached MaxNodes and is incomplete.
+type ExpandResult struct {
+	Tree *check.Trace
+	At   Snapshot
 }
 
 // ReadRequest pages through stored relationships. Limit is at most
@@ -404,6 +428,26 @@ func (e *Local) LookupResources(ctx context.Context, req LookupResourcesRequest)
 		ids = []string{}
 	}
 	return LookupResourcesResult{ResourceIDs: ids, Cursor: res.Next, At: e.at(rev)}, nil
+}
+
+// Expand implements Engine. Its dispatches count in
+// grantd_check_dispatches_total with the checks'.
+func (e *Local) Expand(ctx context.Context, req ExpandRequest) (ExpandResult, error) {
+	if req.MaxNodes < 0 || req.MaxNodes > check.MaxTraceNodes {
+		return ExpandResult{}, invalid("max_nodes must be between 0 and %d (0 uses the default of %d)", check.MaxTraceNodes, check.DefaultTraceNodes)
+	}
+	rev, err := e.resolve(req.Consistency)
+	if err != nil {
+		return ExpandResult{}, err
+	}
+	sc, _ := e.st.Schema()
+	tree, stats, err := e.eng.Expand(ctx, sc, rev, check.ExpandRequest{ResourceType: req.ResourceType, ResourceID: req.ResourceID,
+		Permission: req.Permission, Recursive: req.Recursive, MaxNodes: req.MaxNodes})
+	e.dispatches.Add(uint64(stats.Dispatches))
+	if err != nil {
+		return ExpandResult{}, err
+	}
+	return ExpandResult{Tree: tree, At: e.at(rev)}, nil
 }
 
 // ReadRelationships implements Engine.

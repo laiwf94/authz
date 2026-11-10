@@ -154,6 +154,7 @@ func New(cfg Config) (*Server, error) {
 	s.route("POST /v1/check", s.check, true)
 	s.route("POST /v1/check/bulk", s.checkBulk, true)
 	s.route("POST /v1/lookup/resources", s.lookup, true)
+	s.route("POST /v1/expand", s.expand, true)
 	s.route("POST /v1/watch", s.watch, true)
 	s.route("/", func(http.ResponseWriter, *http.Request) error {
 		return &apiError{http.StatusNotFound, "not_found", "no such endpoint"}
@@ -731,6 +732,57 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"resource_ids": res.ResourceIDs, "cursor": res.Cursor, "looked_up_at": res.At.Token})
+	return nil
+}
+
+// expandNode is the JSON form of one node of an expand tree:
+// check.TraceNode without the fields only a check fills in.
+type expandNode struct {
+	Kind     check.TraceKind `json:"kind"`
+	Object   string          `json:"object"`
+	Relation string          `json:"relation,omitempty"`
+	Expr     string          `json:"expr,omitempty"`
+	Subject  string          `json:"subject,omitempty"`
+	Memo     bool            `json:"memo,omitempty"`
+	Cut      bool            `json:"cut,omitempty"`
+	Omitted  int             `json:"omitted,omitempty"`
+	Children []*expandNode   `json:"children,omitempty"`
+}
+
+func toExpandNode(n *check.TraceNode) *expandNode {
+	out := &expandNode{Kind: n.Kind, Object: n.Object, Relation: n.Relation, Expr: n.Expr, Subject: n.Subject,
+		Memo: n.Memo, Cut: n.Cut, Omitted: n.Omitted}
+	for _, c := range n.Children {
+		out.Children = append(out.Children, toExpandNode(c))
+	}
+	return out
+}
+
+// expand answers who holds a permission on one object as a userset tree.
+func (s *Server) expand(w http.ResponseWriter, r *http.Request) error {
+	var body struct {
+		Resource    string      `json:"resource"`   // type:id
+		Permission  string      `json:"permission"` // relation or permission
+		Recursive   bool        `json:"recursive"`
+		MaxNodes    int         `json:"max_nodes"`
+		Consistency Consistency `json:"consistency"`
+	}
+	if err := decode(r, &body); err != nil {
+		return err
+	}
+	rt, rid, ok := strings.Cut(body.Resource, ":")
+	if !ok || rt == "" || rid == "" {
+		return badRequest("resource %q must be type:id", body.Resource)
+	}
+	ctx, cancel := s.withTimeout(r)
+	defer cancel()
+	res, err := s.eng.Expand(ctx, engine.ExpandRequest{ResourceType: rt, ResourceID: rid, Permission: body.Permission,
+		Recursive: body.Recursive, MaxNodes: body.MaxNodes, Consistency: body.Consistency})
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tree": toExpandNode(res.Tree.Root), "nodes": res.Tree.Nodes,
+		"truncated": res.Tree.Truncated, "expanded_at": res.At.Token})
 	return nil
 }
 

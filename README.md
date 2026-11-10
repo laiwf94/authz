@@ -242,6 +242,7 @@ The authorization API (`authz serve`). All `/v1` endpoints take `Authorization: 
 | `POST /v1/check` | One permission check. |
 | `POST /v1/check/bulk` | Up to 100 checks at one snapshot. |
 | `POST /v1/lookup/resources` | Objects of a type the subject can access, paged. |
+| `POST /v1/expand` | Who holds a permission on one object, as a userset tree; `recursive` follows usersets, `max_nodes` bounds it. |
 | `POST /v1/watch` | Changes after a token; waits up to 30 s for new ones. |
 | `GET /healthz`, `GET /metrics` | Health (no auth) and Prometheus metrics. |
 

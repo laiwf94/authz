@@ -167,6 +167,27 @@ This is linear in the number of objects of the type. For very large types the
 production answer is a reverse index (subject to resources), maintained from
 the watch stream, like Zanzibar's Leopard index for nested groups.
 
+## Expand
+
+`expand` answers the other question: who holds `doc:plan#view`? It returns
+the permission's userset tree, built from the node types an explain trace
+uses: a permission node over its rewrite, union, intersection and exclusion
+nodes over their operands, an arrow node over the objects its tupleset
+names, and relation nodes over their stored subjects (users, wildcards,
+usersets). By default the tree stops at the first object, as Zanzibar's
+Expand does: `group:eng#member` and `folder:specs#view` are leaves the
+caller can expand next. With `recursive` every userset and arrow target is
+expanded in place, so the tree names every subject.
+
+Each `object#relation` is expanded once per tree; a repeat is a `memo`
+node and a cycle back into its own expansion is a `cut` node, both without
+children. Read as one equation per expanded node, the tree's least solution
+is exactly the set of subjects `check` grants, and the tests hold it to
+that against the fixpoint reference on random graphs with cycles,
+wildcards, bans and intersections. A tree has at most `max_nodes` nodes
+(1,000 by default, 100,000 at most); expansion stops there and reports
+`truncated`, so its work is bounded like a check's.
+
 ## API security
 
 - API keys are compared as SHA-256 digests with `subtle.ConstantTimeCompare`

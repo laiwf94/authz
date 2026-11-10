@@ -385,6 +385,74 @@ func TestLookupResources(t *testing.T) {
 	}
 }
 
+func TestExpand(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.schema(t)
+	w := f.write(t, "touch doc:d#viewer@group:eng#member", "touch doc:d#viewer@user:*", "touch doc:d#owner@user:olga",
+		"touch doc:d#banned@user:bob", "touch group:eng#member@user:alice")
+	res, err := f.e.Expand(context.Background(), ExpandRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
+		Consistency: Consistency{Mode: AtLeastAsFresh, Token: w.Token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.At.Revision < w.Revision || res.At.Token == "" {
+		t.Fatalf("expand at %+v, older than the write %d", res.At, w.Revision)
+	}
+	subjects := func(tr *check.Trace) []string {
+		var out []string
+		var walk func(n *check.TraceNode)
+		walk = func(n *check.TraceNode) {
+			if n.Kind == check.KindSubject {
+				out = append(out, n.Subject)
+			}
+			if n.Kind == check.KindRelation && n.Object == "group:eng" {
+				out = append(out, "expanded group:eng")
+			}
+			for _, c := range n.Children {
+				walk(c)
+			}
+		}
+		walk(tr.Root)
+		return out
+	}
+	if got := strings.Join(subjects(res.Tree), " "); got != "group:eng#member user:* user:olga user:bob" || res.Tree.Truncated {
+		t.Fatalf("one-level subjects %q (truncated %v)", got, res.Tree.Truncated)
+	}
+	before := f.m.Counter("grantd_check_dispatches_total", "", "").Value()
+	res, err = f.e.Expand(context.Background(), ExpandRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
+		Recursive: true, Consistency: Consistency{Mode: AtExactSnapshot, Token: w.Token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(subjects(res.Tree), " "); got != "expanded group:eng user:alice user:* user:olga user:bob" || res.At.Revision != w.Revision {
+		t.Fatalf("recursive subjects %q at %d", got, res.At.Revision)
+	}
+	if after := f.m.Counter("grantd_check_dispatches_total", "", "").Value(); after-before != 5 {
+		t.Fatalf("expand counted %d dispatches, want 5 (view, viewer, group:eng#member, owner, banned)", after-before)
+	}
+	small, err := f.e.Expand(context.Background(), ExpandRequest{ResourceType: "doc", ResourceID: "d", Permission: "view", Recursive: true, MaxNodes: 3})
+	if err != nil || !small.Tree.Truncated || small.Tree.Nodes != 3 {
+		t.Fatalf("limited expand = %+v, %v", small.Tree, err)
+	}
+	for _, req := range []ExpandRequest{
+		{ResourceType: "doc", ResourceID: "d", Permission: "view", MaxNodes: -1},
+		{ResourceType: "doc", ResourceID: "d", Permission: "view", MaxNodes: check.MaxTraceNodes + 1},
+		{ResourceType: "doc", ResourceID: "d", Permission: "view", Consistency: Consistency{Mode: "sometime"}},
+	} {
+		if _, err := f.e.Expand(context.Background(), req); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("Expand(%+v) = %v", req, err)
+		}
+	}
+	if _, err := f.e.Expand(context.Background(), ExpandRequest{ResourceType: "doc", ResourceID: "d", Permission: "edit"}); !errors.Is(err, check.ErrUnknownName) {
+		t.Errorf("expand of an unknown permission = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.e.Expand(ctx, ExpandRequest{ResourceType: "doc", ResourceID: "d", Permission: "view"}); !errors.Is(err, context.Canceled) {
+		t.Errorf("canceled expand = %v", err)
+	}
+}
+
 func TestReadRelationships(t *testing.T) {
 	f := newFixture(t, Options{})
 	f.schema(t)
