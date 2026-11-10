@@ -529,9 +529,36 @@ between them. The oldest segment must start at record 1, each later one
 must be named for its first record, follow the previous one without a gap,
 name it, and link to its last record, so a segment that was removed,
 renamed, swapped, copied over another or edited at its end is named in the
-error. `authz mcp audit verify` uses it whenever segments are present, and
-for a never-rotated log prints exactly what toolgate printed. Rotation
-needs `flock`, so it is refused on Windows.
+error. `authz audit verify [-head HASH] FILE` runs it with the default
+schemas, so every record of every segment is also held to its event type;
+`authz mcp audit verify` checks the chain only, as toolgate did, uses
+`VerifyChain` whenever segments are present, and for a never-rotated log
+prints exactly what toolgate printed. Both print `OK FILE: N records in K
+segments, head H`. Rotation needs `flock`, so it is refused on Windows.
+
+The binary sets the limits per subcommand: `audit_rotate_bytes` and
+`audit_rotate_age` beside `audit_log` in the serve, gateway and mcp
+sections, or `GRANTD_AUDIT_ROTATE_BYTES`/`_AGE`,
+`WICKET_AUDIT_ROTATE_BYTES`/`_AGE` and `AUTHZ_MCP_AUDIT_ROTATE_BYTES`/`_AGE`
+(new, so without a `TOOLGATE_` name). Bytes are a whole number of at least
+4096 and the age a Go duration of at least `1m`; anything else, or a limit
+without an audit log, stops the subcommand at start and is reported by
+`authz check`. A change applies on restart. The library lets writers with
+different limits share a file, but a deployment should not: the writer with
+the smallest limits would cut segments for all of them. So each segment
+start record carries the rotating writer's limits (`max_bytes`, `max_age`),
+and the three subcommands open the log with `Options.SameRotation`, which
+refuses a file whose active segment a size or age rotation cut under other
+limits, naming both. `authz check -config` compares the sections that name
+one file (after `filepath.Abs`) and refuses differing limits before any of
+them starts. A manual rotation, the chain's first segment and segment
+records from before the limits were recorded constrain no one.
+`TestMainAuditRotationShared` (cmd/authz) runs serve and gateway from their
+variables and mcp from its section against one file rotating at 8 KiB:
+checks, denied forward-auth requests and tool calls interleave across ten
+segments, `authz audit verify` and `authz mcp audit verify` agree on the
+chain, a serve with other limits and a gateway with none are refused
+without writing anything, and a deleted middle segment is named.
 
 `TestMainOneChain` (cmd/authz) runs it end to end as a deployment would:
 serve, gateway and mcp as three processes of the binary with one

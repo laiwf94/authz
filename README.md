@@ -221,8 +221,15 @@ passed on to upstreams.
 $ export GRANTD_AUDIT_LOG=/var/lib/authz/audit.jsonl GRANTD_AUDIT_CHECKS=true   # writes, schema changes and every check decision
 $ export WICKET_AUDIT_LOG=/var/lib/authz/audit.jsonl                            # sign-ins, logouts, admin actions, denials
 $ export AUTHZ_MCP_AUDIT_LOG=/var/lib/authz/audit.jsonl                         # tool calls, approvals, quarantines
-$ ./authz mcp audit verify /var/lib/authz/audit.jsonl
+$ export GRANTD_AUDIT_ROTATE_BYTES=67108864 WICKET_AUDIT_ROTATE_BYTES=67108864 AUTHZ_MCP_AUDIT_ROTATE_BYTES=67108864
+$ ./authz audit verify /var/lib/authz/audit.jsonl                               # every segment, one chain
 ```
+
+With `*_AUDIT_ROTATE_BYTES` or `*_AUDIT_ROTATE_AGE` (or `audit_rotate_bytes`
+and `audit_rotate_age` in a section) the file is cut into segments, older
+ones beside it as `audit.jsonl.<first record number>`, each linked to the
+one before. Every process writing the file must set the same limits; one
+that does not is refused at start.
 
 A sign-in, the check it leads to and the tool call that check allows then
 follow one another in one verified chain under one correlation ID; CI runs
@@ -315,6 +322,7 @@ cmd/authz/internal/fakeidp  authz fakeidp: test OIDC and SAML identity provider
 internal/authn/...          sign-on: forward-auth server, OIDC, SAML, sessions, policy
 internal/authn/golden/e2e   the gateway's end-to-end golden transcripts
 cmd/authz/internal/mcp      authz mcp (formerly toolgate): config, serve, audit verify, policy test, tokens
+cmd/authz/internal/auditcmd authz audit verify: the platform's audit log across its segments, with schemas
 cmd/authz/internal/mcpfake  authz mcpfake: a small MCP server with a file sandbox, to try the gateway
 internal/agents/...         agent traffic: MCP and JSON-RPC, policy, approvals, pins, limits, audit chain
 internal/platform/keys      key rings with rotation, JWKS and the old key files

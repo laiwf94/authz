@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/agents/gateway"
 	"github.com/laiwf94/authz/internal/agents/identity"
 	"github.com/laiwf94/authz/internal/agents/policy"
@@ -41,6 +42,10 @@ type Settings struct {
 	Policy string `json:"policy"`
 	// AuditLog is TOOLGATE_AUDIT_LOG.
 	AuditLog string `json:"audit_log"`
+	// AuditRotateBytes is AUTHZ_MCP_AUDIT_ROTATE_BYTES; 0 sets no size limit.
+	AuditRotateBytes int64 `json:"audit_rotate_bytes"`
+	// AuditRotateAge is AUTHZ_MCP_AUDIT_ROTATE_AGE; 0 sets no age limit.
+	AuditRotateAge pcfg.Duration `json:"audit_rotate_age"`
 	// AuditKey is TOOLGATE_AUDIT_KEY.
 	AuditKey pcfg.Secret `json:"audit_key"`
 	// StateDir is TOOLGATE_STATE_DIR.
@@ -120,6 +125,7 @@ func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
 	if s.AuditLog == "" {
 		c.Errorf(c.Field("audit_log"), "is required")
 	}
+	part.CheckAuditRotation(c, s.AuditLog, s.AuditRotateBytes, s.AuditRotateAge)
 	if !s.AuditKey.IsSet() {
 		c.Errorf(c.Field("audit_key"), "is required")
 	} else if v := s.AuditKey.Value(); v != "" || blankSecret(s.AuditKey) {

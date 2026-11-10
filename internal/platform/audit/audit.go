@@ -136,6 +136,10 @@ type Options struct {
 	Schemas *Schemas
 	// Rotation, if set, cuts the log into segments by size or age.
 	Rotation Rotation
+	// SameRotation refuses to open a log whose active segment was started
+	// by a size or age rotation under limits other than Rotation, so the
+	// processes sharing one file rotate it alike (see CheckSameRotation).
+	SameRotation bool
 }
 
 // Open opens or creates the log at path. An existing log is verified first; a
@@ -167,6 +171,12 @@ func OpenWith(path string, o Options) (*Log, error) {
 	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("audit: %s failed verification: %w", path, err)
+	}
+	if o.SameRotation {
+		if err := CheckSameRotation(path, res.Started, o.Rotation); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 	if res.TornBytes > 0 {
 		if err := f.Truncate(res.Size); err != nil {
@@ -476,6 +486,9 @@ type Result struct {
 	// Previous is the file name of the segment a later segment's first
 	// record names as the one before it; empty for the chain's beginning.
 	Previous string
+	// Started is a later segment's segment start record; nil for the
+	// chain's beginning.
+	Started *SegmentStarted
 }
 
 // LineError locates a verification failure.
@@ -549,7 +562,7 @@ func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result, lines int) 
 			if json.Unmarshal(rec.Data, &ss) != nil || !validSegmentFile(ss.Previous) {
 				return res, &LineError{n, "segment start record does not name the segment before it"}
 			}
-			res.Previous = ss.Previous
+			res.Previous, res.Started = ss.Previous, &ss
 		}
 		if rec.Prev != res.Head {
 			if n == 1 {

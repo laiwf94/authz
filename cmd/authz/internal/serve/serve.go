@@ -15,6 +15,11 @@
 //	                   same file authz gateway and authz mcp write
 //	GRANTD_AUDIT_CHECKS true also records every answered check as a decision
 //	                   record in GRANTD_AUDIT_LOG (default false)
+//	GRANTD_AUDIT_ROTATE_BYTES  start a new segment of GRANTD_AUDIT_LOG once it
+//	                   holds this many bytes (at least 4096; default 0, no limit)
+//	GRANTD_AUDIT_ROTATE_AGE    start a new segment once its first record is this
+//	                   old (at least 1m; default 0, no limit). Every process
+//	                   writing one audit file must set the same limits
 //	GRANTD_KEY_RATE    requests per second allowed per API key; 0 or empty (the
 //	                   default) sets no limit. Requests over it get 429 and Retry-After
 //	GRANTD_KEY_BURST   requests an API key may make at once above the rate
@@ -82,6 +87,12 @@ Without a file, configuration comes from the environment, as grantd's did:
                      write, which makes one chain
   GRANTD_AUDIT_CHECKS true also records every answered check as a decision record
                      in GRANTD_AUDIT_LOG, before the answer (default false)
+  GRANTD_AUDIT_ROTATE_BYTES  start a new segment of GRANTD_AUDIT_LOG once it holds
+                     this many bytes (at least 4096; default 0, no limit)
+  GRANTD_AUDIT_ROTATE_AGE    start a new segment once its first record is this old,
+                     such as 24h (at least 1m; default 0, no limit). Every process
+                     writing one audit file must set the same limits; "authz audit
+                     verify" checks the segments as one chain
   GRANTD_KEY_RATE    requests per second allowed per API key; 0 or empty (the default)
                      sets no limit. Requests over it get 429 and Retry-After
   GRANTD_KEY_BURST   requests an API key may make at once above the rate
@@ -169,7 +180,8 @@ type config struct {
 	retention store.Revision
 	logLevel  slog.Level
 	auditLog  string
-	auditChk  bool // GRANTD_AUDIT_CHECKS
+	auditChk  bool           // GRANTD_AUDIT_CHECKS
+	auditRot  audit.Rotation // GRANTD_AUDIT_ROTATE_BYTES and _AGE
 	keyLimit  ratelimit.Limit
 	http      httpserver.Options // GRANTD_TLS_* and GRANTD_DRAIN_*
 }
@@ -190,6 +202,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return c, errors.New("GRANTD_AUDIT_CHECKS needs GRANTD_AUDIT_LOG")
 		}
 		c.auditChk = b
+	}
+	var err error
+	if c.auditRot, err = audit.RotationFromEnv(getenv, "GRANTD_AUDIT_ROTATE_BYTES", "GRANTD_AUDIT_ROTATE_AGE"); err != nil {
+		return c, err
+	}
+	if c.auditRot.Enabled() && c.auditLog == "" {
+		return c, errors.New("GRANTD_AUDIT_ROTATE_BYTES and GRANTD_AUDIT_ROTATE_AGE need GRANTD_AUDIT_LOG")
 	}
 	for _, k := range strings.Split(getenv("GRANTD_API_KEYS"), ",") {
 		if k = strings.TrimSpace(k); k != "" {
@@ -244,7 +263,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		c.keyLimit.Burst = n
 	}
-	var err error
 	if c.http, err = httpserver.FromEnv(getenv, "GRANTD_"); err != nil {
 		return c, err
 	}
@@ -347,7 +365,8 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 	defer st.Close()
 	var auditLog *audit.Log
 	if cfg.auditLog != "" {
-		if auditLog, err = audit.OpenWith(cfg.auditLog, audit.Options{Schemas: audit.Default()}); err != nil {
+		if auditLog, err = audit.OpenWith(cfg.auditLog, audit.Options{Schemas: audit.Default(),
+			Rotation: cfg.auditRot, SameRotation: true}); err != nil {
 			return fmt.Errorf("GRANTD_AUDIT_LOG: %w", err)
 		}
 		defer auditLog.Close()

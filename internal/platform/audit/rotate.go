@@ -77,6 +77,13 @@ type SegmentStarted struct {
 	PreviousFirst uint64 `json:"previous_first"`
 	// Reason is why the previous segment ended: size, age or manual.
 	Reason string `json:"reason"`
+	// MaxBytes and MaxAge are the rotating writer's limits (Rotation), so
+	// the other writers of a shared file can tell whether they rotate it
+	// alike. MaxAge is a Go duration such as "24h0m0s". Both are left out
+	// when the writer had none, and by segment records written before
+	// they were recorded.
+	MaxBytes int64  `json:"max_bytes,omitempty"`
+	MaxAge   string `json:"max_age,omitempty"`
 }
 
 // AuditEvent implements Payload.
@@ -101,6 +108,115 @@ func (r Rotation) check() error {
 	}
 	if r.Enabled() && !canLock {
 		return errors.New("audit: rotation needs flock, which this system lacks")
+	}
+	return nil
+}
+
+// The smallest limits Validate accepts. A smaller segment would hold only a
+// few records and a younger one would rotate on nearly every append; both
+// are more likely a missing unit than a plan.
+const (
+	MinRotateBytes = 4096
+	MinRotateAge   = time.Minute
+)
+
+// Validate checks limits an operator configured: neither negative, a size
+// limit of at least MinRotateBytes and an age limit of at least
+// MinRotateAge. The error does not name the setting; the caller does.
+func (r Rotation) Validate() error {
+	if r.MaxBytes < 0 || r.MaxAge < 0 {
+		return errors.New("must not be negative")
+	}
+	if r.MaxBytes > 0 && r.MaxBytes < MinRotateBytes {
+		return fmt.Errorf("size limit %d is under the minimum of %d bytes", r.MaxBytes, MinRotateBytes)
+	}
+	if r.MaxAge > 0 && r.MaxAge < MinRotateAge {
+		return fmt.Errorf("age limit %s is under the minimum of %s", r.MaxAge, MinRotateAge)
+	}
+	return nil
+}
+
+// String describes the limits for messages.
+func (r Rotation) String() string {
+	if !r.Enabled() {
+		return "no rotation"
+	}
+	var parts []string
+	if r.MaxBytes > 0 {
+		parts = append(parts, fmt.Sprintf("max_bytes=%d", r.MaxBytes))
+	}
+	if r.MaxAge > 0 {
+		parts = append(parts, "max_age="+r.MaxAge.String())
+	}
+	return strings.Join(parts, " ")
+}
+
+// started records r's limits in a segment start record.
+func (r Rotation) started(ss SegmentStarted) SegmentStarted {
+	ss.MaxBytes = r.MaxBytes
+	if r.MaxAge > 0 {
+		ss.MaxAge = r.MaxAge.String()
+	}
+	return ss
+}
+
+// ParseRotation reads limits from their text form: bytes a non-negative
+// integer and age a Go duration such as "24h"; empty or "0" leaves that
+// limit off. It applies Validate. The error names neither setting.
+func ParseRotation(bytes, age string) (Rotation, error) {
+	var r Rotation
+	if bytes != "" {
+		n, err := strconv.ParseInt(bytes, 10, 64)
+		if err != nil {
+			return r, fmt.Errorf("size limit %q is not a whole number of bytes", bytes)
+		}
+		r.MaxBytes = n
+	}
+	if age != "" && age != "0" {
+		d, err := time.ParseDuration(age)
+		if err != nil {
+			return r, fmt.Errorf("age limit %q is not a duration such as 24h", age)
+		}
+		r.MaxAge = d
+	}
+	return r, r.Validate()
+}
+
+// RotationFromEnv reads limits from two environment variables, as
+// ParseRotation reads them, with errors that name the variable.
+func RotationFromEnv(getenv func(string) string, bytesVar, ageVar string) (Rotation, error) {
+	b, a := getenv(bytesVar), getenv(ageVar)
+	if _, err := ParseRotation(b, ""); err != nil {
+		return Rotation{}, fmt.Errorf("%s: %v", bytesVar, err)
+	}
+	if _, err := ParseRotation("", a); err != nil {
+		return Rotation{}, fmt.Errorf("%s: %v", ageVar, err)
+	}
+	return ParseRotation(b, a)
+}
+
+// CheckSameRotation reports whether a writer with limits r may share the
+// log at path, whose active segment begins with the segment start record ss
+// (nil when it begins the chain). A segment that a size or age rotation
+// started records the limits it was cut under; every writer of the file
+// must have those, or the one with the smaller limits would cut segments
+// the others never would. A manual rotation, the chain's first segment and
+// segment records from before limits were recorded put no limit on r.
+func CheckSameRotation(path string, ss *SegmentStarted, r Rotation) error {
+	if ss == nil || (ss.Reason != RotateSize && ss.Reason != RotateAge) || (ss.MaxBytes == 0 && ss.MaxAge == "") {
+		return nil
+	}
+	var theirs Rotation
+	theirs.MaxBytes = ss.MaxBytes
+	if ss.MaxAge != "" {
+		d, err := time.ParseDuration(ss.MaxAge)
+		if err != nil {
+			return fmt.Errorf("audit: %s: the segment start record has max_age %q, not a duration", path, ss.MaxAge)
+		}
+		theirs.MaxAge = d
+	}
+	if theirs != r {
+		return fmt.Errorf("audit: %s is rotated with %s, but this writer has %s; every process writing one audit file must set the same rotation limits", path, theirs, r)
 	}
 	return nil
 }
@@ -432,7 +548,7 @@ func (l *Log) rotate(reason string) error {
 	now := l.now()
 	line, err := marshal(record{Seq: l.seq + 1, Time: now.UTC().Format(time.RFC3339Nano), Prev: l.head,
 		Event: EventSegmentStarted, Envelope: Envelope{Action: ActionRotate},
-		Data: SegmentStarted{Previous: filepath.Base(seg), PreviousFirst: l.first, Reason: reason}})
+		Data: l.rot.started(SegmentStarted{Previous: filepath.Base(seg), PreviousFirst: l.first, Reason: reason})})
 	if err != nil {
 		return fmt.Errorf("audit: encoding record: %w", err)
 	}

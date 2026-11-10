@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/agents/gateway"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
@@ -73,7 +74,8 @@ func serveArgs(prog string, args []string, getenv func(string) string, stderr io
 // with, the same one loadConfig builds from the TOOLGATE_ variables.
 func sectionConfig(s *Settings) (config, error) {
 	c := config{addr: s.Addr, adminAddr: s.AdminAddr, adminToken: s.AdminToken.Value(), configPath: s.Config,
-		policyPath: s.Policy, auditPath: s.AuditLog, stateDir: s.StateDir, poll: time.Duration(s.PolicyPoll)}
+		policyPath: s.Policy, auditPath: s.AuditLog,
+		auditRot: part.AuditRotation(s.AuditRotateBytes, s.AuditRotateAge), stateDir: s.StateDir, poll: time.Duration(s.PolicyPoll)}
 	var err error
 	if c.auditKey, err = hex.DecodeString(s.AuditKey.Value()); err != nil || len(c.auditKey) != 32 {
 		return c, errors.New("$.mcp.audit_key must be 64 hex characters")
@@ -274,6 +276,7 @@ func restartOnly(a, b config, ga, gb *gateway.Config) []string {
 	add(ga.Approvals != gb.Approvals, "config.approvals")
 	add(a.policyPath != b.policyPath, "policy")
 	add(a.auditPath != b.auditPath, "audit_log")
+	out = append(out, part.AuditRotationChanges(a.auditRot, b.auditRot)...)
 	add(string(a.auditKey) != string(b.auditKey), "audit_key")
 	add(a.stateDir != b.stateDir, "state_dir")
 	add(!slices.Equal(a.origins, b.origins), "allowed_origins")

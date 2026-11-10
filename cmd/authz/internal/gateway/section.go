@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/authn/check"
 	"github.com/laiwf94/authz/internal/authn/config"
 	"github.com/laiwf94/authz/internal/authn/server"
@@ -52,6 +53,10 @@ type Settings struct {
 	LogLevel string `json:"log_level"`
 	// AuditLog is WICKET_AUDIT_LOG.
 	AuditLog string `json:"audit_log"`
+	// AuditRotateBytes is WICKET_AUDIT_ROTATE_BYTES; 0 sets no size limit.
+	AuditRotateBytes int64 `json:"audit_rotate_bytes"`
+	// AuditRotateAge is WICKET_AUDIT_ROTATE_AGE; 0 sets no age limit.
+	AuditRotateAge pcfg.Duration `json:"audit_rotate_age"`
 	// TLSCert and TLSKey are WICKET_TLS_CERT and WICKET_TLS_KEY: PEM files
 	// both listeners serve TLS with. Empty serves plain HTTP.
 	TLSCert string `json:"tls_cert"`
@@ -190,6 +195,7 @@ func checkSettings(o SectionOptions, s *Settings, c *pcfg.Checker) {
 	if err := new(slog.Level).UnmarshalText([]byte(s.LogLevel)); err != nil {
 		c.Errorf(c.Field("log_level"), "%q is not debug, info, warn or error", s.LogLevel)
 	}
+	part.CheckAuditRotation(c, s.AuditLog, s.AuditRotateBytes, s.AuditRotateAge)
 
 	checkHTTP(s, c)
 

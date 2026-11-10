@@ -152,6 +152,19 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **Audit rotation in the binary and `authz audit verify`**
+  ([#81](https://github.com/laiwf94/authz/issues/81)). `audit_rotate_bytes`
+  and `audit_rotate_age` in the serve, gateway and mcp sections, and
+  `GRANTD_AUDIT_ROTATE_BYTES`/`_AGE`, `WICKET_AUDIT_ROTATE_BYTES`/`_AGE` and
+  `AUTHZ_MCP_AUDIT_ROTATE_BYTES`/`_AGE`, rotate the audit log by size (at
+  least 4096 bytes) or age (at least 1m); malformed limits, or limits
+  without an audit log, are refused at start and by `authz check`. Segment
+  start records carry the limits they were cut under, and a subcommand set
+  to other limits than the file's active segment was cut under refuses to
+  start; `authz check -config` refuses sections that share a file with
+  different limits. The new `authz audit verify [-head HASH] FILE` checks
+  every segment as one chain and every record against its schema;
+  `authz mcp audit verify` is unchanged.
 - **Audit log segments** ([#81](https://github.com/laiwf94/authz/issues/81)).
   `internal/platform/audit` can cut the log into segments by size or age
   (`Options.Rotation`; off unless set). The configured path stays the

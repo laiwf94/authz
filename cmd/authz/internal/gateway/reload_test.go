@@ -49,8 +49,8 @@ func TestSectionHasEveryVariable(t *testing.T) {
 			t.Errorf("%s has no member in the gateway section", v)
 		}
 	}
-	if len(seen) != 15 {
-		t.Errorf("%d WICKET_ settings documented, want 15: %v", len(seen), seen)
+	if len(seen) != 17 {
+		t.Errorf("%d WICKET_ settings documented, want 17: %v", len(seen), seen)
 	}
 }
 

@@ -6,6 +6,7 @@
 //	authz check      validate configuration and schema files without starting anything
 //	authz ctl        talk to a running authz serve: schema, relationships and checks
 //	authz mcp        the MCP gateway for AI agents (formerly toolgate)
+//	authz audit      verify the platform's audit log across its segments
 //	authz version    print the build's version
 //
 // authz fakeidp, a test identity provider, and authz mcpfake, a small MCP
@@ -35,6 +36,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/auditcmd"
 	"github.com/laiwf94/authz/cmd/authz/internal/checkcmd"
 	"github.com/laiwf94/authz/cmd/authz/internal/ctl"
 	"github.com/laiwf94/authz/cmd/authz/internal/fakeidp"
@@ -68,6 +70,7 @@ var commands = []command{
 	{name: "run", summary: runcmd.Summary, run: runcmd.Run},
 	{name: "ctl", summary: ctl.Summary, run: ctl.Run},
 	{name: "mcp", summary: mcp.Summary, run: mcp.Run},
+	{name: "audit", summary: auditcmd.Summary, run: auditcmd.Run},
 	{name: "mcpfake", summary: mcpfake.Summary, hidden: true, run: mcpfake.Run},
 	{name: "version", summary: "print the version, revision and Go toolchain of this build", run: runVersion},
 }

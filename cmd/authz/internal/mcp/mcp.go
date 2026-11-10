@@ -26,6 +26,11 @@
 //	TOOLGATE_POLICY           AUTHZ_MCP_POLICY           path of the JSON policy, reloaded when it changes (required)
 //	TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        path of the append-only audit log (required); may be
 //	                                                     the file authz serve and authz gateway write
+//	                          AUTHZ_MCP_AUDIT_ROTATE_BYTES  start a new segment of the audit log once it holds
+//	                                                     this many bytes (at least 4096; default 0, no limit)
+//	                          AUTHZ_MCP_AUDIT_ROTATE_AGE    start a new segment once its first record is this old
+//	                                                     (at least 1m; default 0, no limit). Every process
+//	                                                     writing one audit file must set the same limits
 //	TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters; keys the argument digests in the audit log (required)
 //	TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        directory for trusted tool definitions and approvals; empty keeps them in memory only
 //	TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,kid=<64 hex>...] for signed agent tokens; the first signs new tokens
@@ -62,6 +67,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/auditcmd"
 	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/agents/gateway"
 	"github.com/laiwf94/authz/internal/agents/identity"
@@ -106,6 +112,12 @@ different values is an error:
   TOOLGATE_POLICY           AUTHZ_MCP_POLICY           JSON policy, reloaded when it changes (required)
   TOOLGATE_AUDIT_LOG        AUTHZ_MCP_AUDIT_LOG        append-only audit log (required); may be the
                                                        file authz serve and authz gateway write
+                            AUTHZ_MCP_AUDIT_ROTATE_BYTES  start a new segment of the audit log once it
+                                                       holds this many bytes (at least 4096; default 0)
+                            AUTHZ_MCP_AUDIT_ROTATE_AGE    start a new segment once its first record is
+                                                       this old, such as 24h (at least 1m; default 0).
+                                                       Every process writing one audit file must set
+                                                       the same limits
   TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters keying argument digests (required)
   TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        tool pins and approvals; empty keeps them in memory
   TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,...] for signed agent tokens
@@ -225,6 +237,7 @@ type config struct {
 	configPath      string
 	policyPath      string
 	auditPath       string
+	auditRot        audit.Rotation // AUTHZ_MCP_AUDIT_ROTATE_BYTES and _AGE
 	auditKey        []byte
 	stateDir        string
 	keys            map[string][]byte
@@ -289,6 +302,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return c, err
 	}
 	if c.auditPath, err = required(getenv, "TOOLGATE_AUDIT_LOG"); err != nil {
+		return c, err
+	}
+	// New with the platform, so only under the AUTHZ_MCP_ names.
+	if c.auditRot, err = audit.RotationFromEnv(getenv, newPrefix+"AUDIT_ROTATE_BYTES", newPrefix+"AUDIT_ROTATE_AGE"); err != nil {
 		return c, err
 	}
 	ak, err := required(getenv, "TOOLGATE_AUDIT_KEY")
@@ -421,7 +438,8 @@ func serveGateway(ctx context.Context, h part.Host, cfg config, gc *gateway.Conf
 	}
 	// Every record must match its agents schema before it is written, and
 	// the file may be the one authz serve and authz gateway write too.
-	auditLog, err := audit.OpenWith(cfg.auditPath, audit.Options{Schemas: audit.Default()})
+	auditLog, err := audit.OpenWith(cfg.auditPath, audit.Options{Schemas: audit.Default(),
+		Rotation: cfg.auditRot, SameRotation: true})
 	if err != nil {
 		return err
 	}
@@ -531,61 +549,7 @@ func auditVerify(prog string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: "+prog+" audit verify [-head HASH] FILE")
 		return 2
 	}
-	path := fs.Arg(0)
-	// A rotated log is verified across its segments (FILE.<first record>
-	// beside it); one never rotated is the one file, checked as toolgate
-	// checked it.
-	segs, _ := audit.Segments(path)
-	var records uint64
-	var last, in string
-	if len(segs) == 0 {
-		f, err := os.Open(path)
-		if err != nil {
-			fmt.Fprintln(stderr, prog+":", err)
-			return 2
-		}
-		res, err := audit.Verify(f)
-		f.Close()
-		if err != nil {
-			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, err)
-			return 1
-		}
-		if res.Records > 0 && res.Start != audit.Genesis {
-			// A later segment without the ones before it.
-			_, err = audit.VerifyChain(path, nil)
-			if err == nil {
-				err = errors.New("the segments before this one are missing")
-			}
-			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, chainError(path, err))
-			return 1
-		}
-		records, last = res.Records, res.Head
-	} else {
-		res, err := audit.VerifyChain(path, nil)
-		if err != nil {
-			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, chainError(path, err))
-			return 1
-		}
-		records, last = res.Records, res.Head
-		in = fmt.Sprintf(" in %d segments", len(res.Segments))
-	}
-	if *head != "" && *head != last {
-		fmt.Fprintf(stdout, "FAIL %s: chain is intact but ends at %s, not the expected head %s (records were removed from the end or the last one was changed)\n",
-			path, last, *head)
-		return 1
-	}
-	fmt.Fprintf(stdout, "OK %s: %d records%s, head %s\n", path, records, in, last)
-	return 0
-}
-
-// chainError drops the segment's path from an error about the file the
-// user named, which the FAIL line already shows.
-func chainError(path string, err error) error {
-	var se *audit.SegmentError
-	if errors.As(err, &se) && se.Path == path {
-		return se.Err
-	}
-	return err
+	return auditcmd.Verify(prog, fs.Arg(0), *head, nil, stdout, stderr)
 }
 
 // policyTest runs a case file against a policy. It exits 0 when every case

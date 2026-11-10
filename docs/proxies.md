@@ -62,7 +62,10 @@ The main image (the root `Dockerfile`) contains the same binary, so
   `WICKET_LOG_LEVEL`. `authz gateway -h` describes each one. One variable
   is new and optional: `WICKET_AUDIT_LOG` names a file for the platform's
   hash-chained audit log, which then also receives every audit event as a
-  typed record (see "One audit log" in docs/DESIGN.md). Five more are new
+  typed record (see "One audit log" in docs/DESIGN.md), and with it
+  `WICKET_AUDIT_ROTATE_BYTES` and `WICKET_AUDIT_ROTATE_AGE` cut that log
+  into segments by size or age (see "Segments" in docs/DESIGN.md; every
+  process writing the file must set the same limits). Five more are new
   and optional, the same for every subcommand (see "One HTTP server" in
   docs/DESIGN.md): `WICKET_TLS_CERT` and `WICKET_TLS_KEY` serve both
   listeners over TLS 1.2 or later, reloading renewed files without a

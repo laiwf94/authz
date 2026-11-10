@@ -92,14 +92,3 @@ func TestAuditVerifySegments(t *testing.T) {
 		t.Fatalf("missing: exit %d %q", code, errs)
 	}
 }
-
-// chainError keeps the segment's path when it is another file's.
-func TestChainError(t *testing.T) {
-	se := &audit.SegmentError{Path: "a.1", Err: fmt.Errorf("x")}
-	if got := chainError("a", se).Error(); got != "a.1: x" {
-		t.Fatal(got)
-	}
-	if got := chainError("a.1", se).Error(); got != "x" {
-		t.Fatal(got)
-	}
-}

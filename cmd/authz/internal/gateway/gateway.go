@@ -26,6 +26,11 @@
 //	WICKET_LOG_LEVEL        debug, info, warn or error (default info)
 //	WICKET_AUDIT_LOG        the platform's hash-chained audit log; empty writes audit
 //	                        events to the JSON log only
+//	WICKET_AUDIT_ROTATE_BYTES  start a new segment of WICKET_AUDIT_LOG once it holds this
+//	                        many bytes (at least 4096; default 0, no limit)
+//	WICKET_AUDIT_ROTATE_AGE    start a new segment once its first record is this old
+//	                        (at least 1m; default 0, no limit). Every process writing
+//	                        one audit file must set the same limits
 //	WICKET_TLS_CERT         PEM certificate chain; with WICKET_TLS_KEY both listeners serve
 //	WICKET_TLS_KEY          TLS 1.2+ and pick up renewed files without a restart
 //	WICKET_TLS_CLIENT_CA    PEM CAs; when set, clients must present a certificate one signed
@@ -119,6 +124,11 @@ else comes from the environment:
   WICKET_LOGIN_RATE       login requests per minute per client address (default 30)
   WICKET_LOG_LEVEL        debug, info, warn or error (default info)
   WICKET_AUDIT_LOG        hash-chained audit log file; empty writes audit events to the log only
+  WICKET_AUDIT_ROTATE_BYTES  start a new segment of WICKET_AUDIT_LOG once it holds this
+                          many bytes (at least 4096; default 0, no limit)
+  WICKET_AUDIT_ROTATE_AGE    start a new segment once its first record is this old, such
+                          as 24h (at least 1m; default 0, no limit). Every process writing
+                          one audit file must set the same limits
   WICKET_TLS_CERT         PEM certificate chain; with WICKET_TLS_KEY both listeners serve
   WICKET_TLS_KEY          TLS 1.2+ and pick up renewed files without a restart
   WICKET_TLS_CLIENT_CA    PEM CAs; when set, clients must present a certificate one signed
@@ -231,6 +241,7 @@ type settings struct {
 	cookieKeys  [][]byte
 	sessionFile string
 	auditLog    string
+	auditRot    audit.Rotation // WICKET_AUDIT_ROTATE_BYTES and _AGE
 	signingKeys []string
 	trusted     []netip.Prefix
 	loginRate   int
@@ -271,6 +282,13 @@ func loadSettings(getenv func(string) string) (settings, error) {
 	}
 	s.sessionFile = getenv("WICKET_SESSION_FILE")
 	s.auditLog = getenv("WICKET_AUDIT_LOG")
+	var err error
+	if s.auditRot, err = audit.RotationFromEnv(getenv, "WICKET_AUDIT_ROTATE_BYTES", "WICKET_AUDIT_ROTATE_AGE"); err != nil {
+		return s, err
+	}
+	if s.auditRot.Enabled() && s.auditLog == "" {
+		return s, errors.New("WICKET_AUDIT_ROTATE_BYTES and WICKET_AUDIT_ROTATE_AGE need WICKET_AUDIT_LOG")
+	}
 	for _, f := range strings.Split(getenv("WICKET_SIGNING_KEYS"), ",") {
 		if f = strings.TrimSpace(f); f != "" {
 			s.signingKeys = append(s.signingKeys, f)
@@ -299,7 +317,6 @@ func loadSettings(getenv func(string) string) (settings, error) {
 			return s, fmt.Errorf("WICKET_LOG_LEVEL: %v", err)
 		}
 	}
-	var err error
 	if s.http, err = httpserver.FromEnv(getenv, "WICKET_"); err != nil {
 		return s, err
 	}
@@ -455,7 +472,8 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 	defer sessions.Close()
 	var auditLog *audit.Log
 	if st.auditLog != "" {
-		if auditLog, err = audit.OpenWith(st.auditLog, audit.Options{Now: now, Schemas: audit.Default()}); err != nil {
+		if auditLog, err = audit.OpenWith(st.auditLog, audit.Options{Now: now, Schemas: audit.Default(),
+			Rotation: st.auditRot, SameRotation: true}); err != nil {
 			return fmt.Errorf("WICKET_AUDIT_LOG: %w", err)
 		}
 		defer auditLog.Close()

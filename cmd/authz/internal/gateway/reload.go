@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/authn/check"
 	"github.com/laiwf94/authz/internal/authn/config"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
@@ -47,7 +48,7 @@ func Schema(getenv func(string) string) *pcfg.Schema {
 // has no configPath: the wicket members are in the section.
 func sectionSettings(s *Settings) (settings, error) {
 	st := settings{addr: s.Addr, adminAddr: s.AdminAddr, adminToken: s.AdminToken.Value(), sessionFile: s.SessionFile,
-		auditLog: s.AuditLog, signingKeys: slices.Clone(s.SigningKeys), loginRate: s.LoginRate}
+		auditLog: s.AuditLog, auditRot: part.AuditRotation(s.AuditRotateBytes, s.AuditRotateAge), signingKeys: slices.Clone(s.SigningKeys), loginRate: s.LoginRate}
 	var err error
 	if st.cookieKeys, err = cookieKeys(s.CookieKeys.Value()); err != nil {
 		return st, err
@@ -129,7 +130,7 @@ func wicketVars(getenv func(string) string) []string {
 	}
 	for _, k := range []string{"WICKET_CONFIG", "WICKET_COOKIE_KEYS", "WICKET_ADDR", "WICKET_ADMIN_ADDR", "WICKET_ADMIN_TOKEN",
 		"WICKET_SESSION_FILE", "WICKET_SIGNING_KEYS", "WICKET_TRUSTED_PROXIES", "WICKET_LOGIN_RATE", "WICKET_LOG_LEVEL",
-		"WICKET_AUDIT_LOG", "WICKET_TLS_CERT", "WICKET_TLS_KEY", "WICKET_TLS_CLIENT_CA", "WICKET_DRAIN_DELAY", "WICKET_DRAIN_TIMEOUT"} {
+		"WICKET_AUDIT_LOG", "WICKET_AUDIT_ROTATE_BYTES", "WICKET_AUDIT_ROTATE_AGE", "WICKET_TLS_CERT", "WICKET_TLS_KEY", "WICKET_TLS_CLIENT_CA", "WICKET_DRAIN_DELAY", "WICKET_DRAIN_TIMEOUT"} {
 		if getenv(k) != "" && !slices.Contains(out, k) {
 			out = append(out, k)
 		}
@@ -315,6 +316,7 @@ func restartOnly(a, b settings) []string {
 	if a.auditLog != b.auditLog {
 		out = append(out, "audit_log")
 	}
+	out = append(out, part.AuditRotationChanges(a.auditRot, b.auditRot)...)
 	if !reflect.DeepEqual(a.http.TLS, b.http.TLS) {
 		out = append(out, "tls")
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/authz/api"
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
@@ -49,6 +50,10 @@ type Settings struct {
 	AuditLog string `json:"audit_log"`
 	// AuditChecks is GRANTD_AUDIT_CHECKS.
 	AuditChecks bool `json:"audit_checks"`
+	// AuditRotateBytes is GRANTD_AUDIT_ROTATE_BYTES; 0 sets no size limit.
+	AuditRotateBytes int64 `json:"audit_rotate_bytes"`
+	// AuditRotateAge is GRANTD_AUDIT_ROTATE_AGE; 0 sets no age limit.
+	AuditRotateAge pcfg.Duration `json:"audit_rotate_age"`
 	// KeyRate is GRANTD_KEY_RATE: requests per second per API key; 0 sets
 	// no limit.
 	KeyRate float64 `json:"key_rate"`
@@ -146,6 +151,7 @@ func checkSettings(s *Settings, c *pcfg.Checker) {
 	if s.AuditChecks && s.AuditLog == "" {
 		c.Errorf(c.Field("audit_checks"), "needs audit_log")
 	}
+	part.CheckAuditRotation(c, s.AuditLog, s.AuditRotateBytes, s.AuditRotateAge)
 	if s.KeyRate < 0 {
 		c.Errorf(c.Field("key_rate"), "must not be negative (0 sets no limit)")
 	}
@@ -190,7 +196,8 @@ func (s *Settings) tlsFiles() *httpserver.TLSFiles {
 // with, the same one loadConfig builds from the GRANTD_ variables.
 func settingsConfig(s *Settings) (config, error) {
 	c := config{addr: s.Addr, dataDir: s.DataDir, auditLog: s.AuditLog, auditChk: s.AuditChecks, cacheSize: s.CacheSize,
-		retention: store.Revision(s.Retention), apiKeys: splitList(s.APIKeys.Value())}
+		retention: store.Revision(s.Retention), apiKeys: splitList(s.APIKeys.Value()),
+		auditRot: part.AuditRotation(s.AuditRotateBytes, s.AuditRotateAge)}
 	if len(c.apiKeys) == 0 {
 		return c, errors.New("$.serve.api_keys holds no key")
 	}
