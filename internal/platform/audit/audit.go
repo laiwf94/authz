@@ -56,6 +56,7 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/internal/platform/logging"
+	"github.com/laiwf94/authz/internal/platform/merkle"
 )
 
 // MaxLineBytes bounds one record.
@@ -134,6 +135,10 @@ type Log struct {
 	cpStop    chan struct{}
 	cpDone    chan struct{}
 	closeOnce sync.Once
+
+	// tree is the Merkle tree of every record (tree.go), kept with a
+	// signer only; guarded by mu.
+	tree *merkle.Range
 }
 
 // Options configures OpenWith.
@@ -187,7 +192,18 @@ func OpenWith(path string, o Options) (*Log, error) {
 		// failures close it only after this returns.
 		defer unlockFile(f)
 	}
-	res, err := verify(f, true, nil)
+	// With a signer the saved Merkle tree is taken up where it ends and
+	// extended over the active segment as it is verified (tree.go).
+	var resume *treeResume
+	var each func(uint64, []byte, [sha256.Size]byte)
+	if o.Signer != nil {
+		if first, err := firstSeq(f); err == nil {
+			if resume = resumeTree(path, first); resume != nil {
+				each = resume.each
+			}
+		}
+	}
+	res, err := verifyFrom(f, true, nil, Result{Head: Genesis}, 0, each)
 	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("audit: %s failed verification: %w", path, err)
@@ -229,6 +245,12 @@ func OpenWith(path string, o Options) (*Log, error) {
 			return nil, errors.New("audit: negative checkpoint interval")
 		}
 		l.signer, l.verifier, l.onCPError = o.Signer, o.Signer.Verifier(), o.OnCheckpointError
+		if l.tree = resume.tree(res); l.tree == nil {
+			if err := l.rebuildTree(); err != nil {
+				f.Close()
+				return nil, err
+			}
+		}
 		if err := l.checkOpenCheckpoint(); err != nil {
 			f.Close()
 			return nil, err
@@ -381,6 +403,9 @@ func (l *Log) write(event string, env Envelope, data any) (int64, error) {
 	l.seq++
 	l.head = hex.EncodeToString(sum[:])
 	l.size += int64(len(line)) + 1
+	if l.tree != nil {
+		l.tree.AppendData(line)
+	}
 	if l.first == 0 {
 		l.first, l.started = l.seq, l.now()
 	}
@@ -410,7 +435,13 @@ func (l *Log) catchUp() error {
 		return fmt.Errorf("audit: the file shrank from %d to %d bytes under this writer: %w", l.size, size, ErrBroken)
 	}
 	start := Result{Records: l.seq, Head: l.head, Size: l.size, First: l.first}
-	res, err := verifyFrom(io.NewSectionReader(l.osf, l.size, size-l.size), true, nil, start, l.lines())
+	// A failure breaks the log, so the tree may take in records of a
+	// stretch that then does not verify: nothing is signed after.
+	var each func(uint64, []byte, [sha256.Size]byte)
+	if l.tree != nil {
+		each = func(_ uint64, line []byte, _ [sha256.Size]byte) { l.tree.AppendData(line) }
+	}
+	res, err := verifyFrom(io.NewSectionReader(l.osf, l.size, size-l.size), true, nil, start, l.lines(), each)
 	if err != nil {
 		l.broken = true
 		return fmt.Errorf("audit: records another writer appended do not verify: %v: %w", err, ErrBroken)
@@ -569,7 +600,7 @@ func VerifyWith(r io.Reader, s *Schemas) (Result, error) {
 }
 
 func verify(r io.Reader, allowTorn bool, s *Schemas) (Result, error) {
-	return verifyFrom(r, allowTorn, s, Result{Head: Genesis}, 0)
+	return verifyFrom(r, allowTorn, s, Result{Head: Genesis}, 0, nil)
 }
 
 // verifyFrom verifies records that continue the chain res describes: r
@@ -581,7 +612,11 @@ func verify(r io.Reader, allowTorn bool, s *Schemas) (Result, error) {
 // links to an earlier record is a later segment: when res is the empty
 // chain, its chain is taken to run on from that record, which VerifyChain
 // checks against the segment before it.
-func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result, lines int) (Result, error) {
+//
+// each, if set, is given every verified record in order: its sequence
+// number, its line without the newline (the caller may keep it) and the
+// line's hash.
+func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result, lines int, each func(uint64, []byte, [sha256.Size]byte)) (Result, error) {
 	br := bufio.NewReaderSize(r, 64<<10)
 	for n := lines + 1; ; n++ {
 		line, err := readLine(br)
@@ -641,6 +676,9 @@ func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result, lines int) 
 		res.Head = hex.EncodeToString(sum[:])
 		res.Records++
 		res.Size += int64(len(line)) + 1
+		if each != nil {
+			each(rec.Seq, line, sum)
+		}
 	}
 }
 

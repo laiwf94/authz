@@ -175,6 +175,20 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **A Merkle tree over the audit log** ([#81](https://github.com/laiwf94/authz/issues/81)).
+  `internal/platform/merkle` is the RFC 6962 tree (leaf and node hashing
+  with the 0x00 and 0x01 prefixes, checked against the published test
+  vectors) kept as a compact range of at most 64 hashes. With a signing key
+  every record, across all segments, is a leaf, and every checkpoint now
+  carries the tree head: the third line is the base64 tree head as in a
+  transparency log's checkpoint, followed by `chain <base64 last record
+  hash>` and `time ...`. Checkpoints in the four-line form of the previous
+  entry no longer open; a log replaces its own on open. The range is saved
+  to `FILE.tree` before each checkpoint, so a restart reads only the active
+  segment; a missing, damaged or stale one is rebuilt from every segment.
+  `authz audit verify -key` also checks that the checkpoint's tree head is
+  the root of the records it counts, and a subcommand refuses to open a log
+  whose own checkpoint carries a tree head its records do not have.
 - **Signed audit checkpoints** ([#81](https://github.com/laiwf94/authz/issues/81)).
   With `AUTHZ_AUDIT_SIGNING_KEY` (or `AUTHZ_AUDIT_SIGNING_KEY_FILE`), an
   Ed25519 key in signed-note form that the new `authz audit keygen -out FILE

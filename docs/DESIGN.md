@@ -655,15 +655,18 @@ database and of transparency logs' checkpoints:
 ```text
 audit.example.com
 1205
-3q2+7w...base64 of the SHA-256 of record 1205...=
+x9Rk...base64 of the RFC 6962 tree head of records 1 to 1205...=
+chain 3q2+7w...base64 of the SHA-256 of record 1205...=
 time 2026-11-16T09:30:00.123456789Z
 
 — audit.example.com AbCd...base64 of key hash and Ed25519 signature...
 ```
 
 The first line is the origin, the signing key's name; then the number of
-records, the hash of the last one (32 zero bytes for an empty log) where a
-tree's root hash would stand, and the time it was signed. Keys are text in
+records and the Merkle tree head over them (the SHA-256 of nothing for an
+empty log; see "Merkle tree" below), as a transparency log's checkpoint
+has them, and two extension lines: the hash of the last record (32 zero
+bytes for an empty log) and the time it was signed. Keys are text in
 the same format (`PRIVATE+KEY+<name>+<hash>+<key>` and
 `<name>+<hash>+<key>`, the hash being the first four bytes of
 SHA-256(name, newline, 0x01, public key)), so a key from any tool of that
@@ -697,9 +700,11 @@ another key, or one that does not open, is replaced by the next one; that
 is what an attacker who deletes it achieves too, which is why checkpoints
 are worth keeping elsewhere. `authz audit verify -key PUBLIC_KEY
 [-checkpoint NOTE] FILE` opens the checkpoint (by default the stored one),
-verifies the chain across its segments, then checks that record N exists
-and has the signed hash (`ChainResult.Covers`, which reads only the segment
-holding record N), printing a second `OK` line or naming what went wrong.
+verifies the chain across its segments, then checks that record N exists,
+has the signed hash and that the signed tree head is the root of records 1
+to N (`ChainResult.Covers`; for a checkpoint older than the log it reads
+the segments up to record N), printing a second `OK` line or naming what
+went wrong.
 
 The binary reads the key from `AUTHZ_AUDIT_SIGNING_KEY` or a file named by
 `AUTHZ_AUDIT_SIGNING_KEY_FILE`, and the interval from
@@ -718,6 +723,46 @@ auditor's earlier checkpoint verifies against the grown log after later
 rotations, records cut from the end are caught by `verify -key` and stop
 serve from starting, and a public key passed as the signing key stops every
 subcommand and `authz check`.
+
+### Merkle tree
+
+The chain proves that nothing before a signed head changed, but only to
+someone who reads every record up to it. A Merkle tree over the same
+records gives the short proofs a chain cannot: that one record is in the
+log, and that today's log extends the one an auditor signed off last
+month, each in about log2(N) hashes. `internal/platform/merkle` is the
+tree of RFC 6962, section 2.1: a leaf is SHA-256(0x00 || data), a node
+SHA-256(0x01 || left || right), the empty tree the SHA-256 of nothing, and
+a tree of n leaves splits at the largest power of two below n. Leaf i is
+record i+1's line, the exact bytes the chain hashes, across every segment;
+segment start records are leaves like the rest. `TestVectors` checks the
+roots of the eight-leaf test vectors published with Certificate
+Transparency's reference implementation, and every size up to 1,100 and
+random sizes up to 2^17 match the RFC's recursion as written.
+
+A log with a signer keeps the tree as a compact range, the roots of its
+perfect subtrees largest first, one per set bit of the record count: at
+most 64 hashes, 2 KiB, however long the log. An append adds a one-leaf
+subtree and merges equal ones as a binary counter carries, about one node
+hash per append on average (BenchmarkAppend in the merkle package), and
+the tree head folds the range from the right. Writers sharing a file add
+each other's records as they read them, so each holds the tree of the
+whole chain.
+
+The range is saved to `audit.jsonl.tree`, with the record count and the
+chain head it was computed for, before every checkpoint is signed (atomic
+replace, after the fsync that checkpoint does), so a log that has a
+checkpoint has a saved tree at least as new. Open takes it up where it
+ends, which is in the active segment or just before it, and extends it
+with the active segment's later records while it verifies them: a
+restart reads no older segment. A saved tree that is missing, damaged,
+ahead of the log, from before the active segment, or whose record at its
+count has another hash, is rebuilt from every segment by `VerifyChain` and
+saved again; if that cannot be done (a segment is gone), a log with a
+signer refuses to open, naming the gap. A stored checkpoint of the same
+records with another tree head rebuilds the tree once, then refuses the
+log, as a checkpoint of a changed last record does. `VerifyChain` computes
+the tree head of every log it verifies (`ChainResult.Root`).
 
 ## One configuration file (internal/platform/config)
 

@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/laiwf94/authz/internal/platform/merkle"
 )
 
 func testSigner(t *testing.T) *Signer {
@@ -38,6 +40,23 @@ func readCheckpoint(t *testing.T, path string, v *Verifier) Checkpoint {
 	return c
 }
 
+// fileLines returns the lines of the file at path, without newlines.
+func fileLines(t *testing.T, path string) [][]byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitAfter(string(b), "\n")
+	var out [][]byte
+	for _, l := range lines {
+		if l != "" {
+			out = append(out, []byte(strings.TrimSuffix(l, "\n")))
+		}
+	}
+	return out
+}
+
 // lineHashes returns the hash of every line of a file, in order.
 func lineHashes(t *testing.T, path string) []string {
 	t.Helper()
@@ -57,13 +76,13 @@ func lineHashes(t *testing.T, path string) []string {
 }
 
 func TestCheckpointText(t *testing.T) {
-	c := Checkpoint{Origin: "PeterNeumann", Size: 3, Head: strings.Repeat("ab", 32),
+	c := Checkpoint{Origin: "PeterNeumann", Size: 3, Root: strings.Repeat("cd", 32), Head: strings.Repeat("ab", 32),
 		Time: time.Date(2026, 11, 16, 9, 30, 0, 500, time.UTC)}
 	text, err := c.Text()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "PeterNeumann\n3\nq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=\ntime 2026-11-16T09:30:00.0000005Z\n"
+	want := "PeterNeumann\n3\nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc0=\nchain q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=\ntime 2026-11-16T09:30:00.0000005Z\n"
 	if string(text) != want {
 		t.Fatalf("text\n got %q\nwant %q", text, want)
 	}
@@ -71,44 +90,59 @@ func TestCheckpointText(t *testing.T) {
 	if err != nil || back != c {
 		t.Fatalf("ParseCheckpoint = %+v, %v", back, err)
 	}
-	empty, err := Checkpoint{Origin: "o", Head: Genesis, Time: c.Time}.Text()
+	empty, err := Checkpoint{Origin: "o", Root: EmptyRoot, Head: Genesis, Time: c.Time}.Text()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ParseCheckpoint(empty); err != nil {
 		t.Fatalf("empty log: %v", err)
 	}
-	head := "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="
+	if !strings.HasPrefix(string(empty), "o\n0\n47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\nchain AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n") {
+		t.Fatalf("empty log text %q", empty)
+	}
+	root := "zc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc0="
+	head := "chain q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="
+	tm := "time 2026-11-16T09:30:00Z"
 	for name, text := range map[string]string{
-		"three lines":        "o\n3\n" + head + "\n",
-		"extra line":         "o\n3\n" + head + "\ntime 2026-11-16T09:30:00Z\nmore\n",
-		"no final newline":   "o\n3\n" + head + "\ntime 2026-11-16T09:30:00Z",
-		"origin with space":  "o o\n3\n" + head + "\ntime 2026-11-16T09:30:00Z\n",
-		"leading zero":       "o\n03\n" + head + "\ntime 2026-11-16T09:30:00Z\n",
-		"negative":           "o\n-3\n" + head + "\ntime 2026-11-16T09:30:00Z\n",
-		"short head":         "o\n3\nq6ur\ntime 2026-11-16T09:30:00Z\n",
-		"not base64":         "o\n3\n!!!!\ntime 2026-11-16T09:30:00Z\n",
-		"zero size, a head":  "o\n0\n" + head + "\ntime 2026-11-16T09:30:00Z\n",
-		"no time keyword":    "o\n3\n" + head + "\n2026-11-16T09:30:00Z\n",
-		"bad time":           "o\n3\n" + head + "\ntime yesterday\n",
-		"padding bits taken": "o\n3\nq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6t=\ntime 2026-11-16T09:30:00Z\n",
+		"four lines":         "o\n3\n" + root + "\n" + tm + "\n",
+		"the old four lines": "o\n3\nq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=\n" + tm + "\n",
+		"extra line":         "o\n3\n" + root + "\n" + head + "\n" + tm + "\nmore\n",
+		"no final newline":   "o\n3\n" + root + "\n" + head + "\n" + tm,
+		"origin with space":  "o o\n3\n" + root + "\n" + head + "\n" + tm + "\n",
+		"leading zero":       "o\n03\n" + root + "\n" + head + "\n" + tm + "\n",
+		"negative":           "o\n-3\n" + root + "\n" + head + "\n" + tm + "\n",
+		"short root":         "o\n3\nzc3N\n" + head + "\n" + tm + "\n",
+		"root not base64":    "o\n3\n!!!!\n" + head + "\n" + tm + "\n",
+		"short head":         "o\n3\n" + root + "\nchain q6ur\n" + tm + "\n",
+		"head not base64":    "o\n3\n" + root + "\nchain !!!!\n" + tm + "\n",
+		"no chain keyword":   "o\n3\n" + root + "\nq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=\n" + tm + "\n",
+		"lines swapped":      "o\n3\n" + root + "\n" + tm + "\n" + head + "\n",
+		"zero size, a head":  "o\n0\n47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\n" + head + "\n" + tm + "\n",
+		"zero size, a root":  "o\n0\n" + root + "\nchain AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n" + tm + "\n",
+		"no time keyword":    "o\n3\n" + root + "\n" + head + "\n2026-11-16T09:30:00Z\n",
+		"bad time":           "o\n3\n" + root + "\n" + head + "\ntime yesterday\n",
+		"padding bits taken": "o\n3\n" + root + "\nchain q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6t=\n" + tm + "\n",
+		"root padding bits":  "o\n3\nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc1=\n" + head + "\n" + tm + "\n",
 	} {
 		if _, err := ParseCheckpoint([]byte(text)); err == nil {
 			t.Errorf("%s: parsed", name)
 		}
 	}
-	if _, err := (Checkpoint{Origin: "a b", Head: Genesis}).Text(); err == nil {
+	if _, err := (Checkpoint{Origin: "a b", Root: EmptyRoot, Head: Genesis}).Text(); err == nil {
 		t.Error("bad origin encoded")
 	}
-	if _, err := (Checkpoint{Origin: "o", Head: "xyz"}).Text(); err == nil {
+	if _, err := (Checkpoint{Origin: "o", Root: EmptyRoot, Head: "xyz"}).Text(); err == nil {
 		t.Error("bad head encoded")
+	}
+	if _, err := (Checkpoint{Origin: "o", Root: "xyz", Head: Genesis}).Text(); err == nil {
+		t.Error("bad tree head encoded")
 	}
 }
 
 func TestCheckpointSignOpen(t *testing.T) {
 	s := testSigner(t)
 	v := s.Verifier()
-	c := Checkpoint{Origin: s.Name(), Size: 7, Head: strings.Repeat("01", 32), Time: fixedNow().UTC()}
+	c := Checkpoint{Origin: s.Name(), Size: 7, Root: strings.Repeat("02", 32), Head: strings.Repeat("01", 32), Time: fixedNow().UTC()}
 	msg, err := c.Sign(s)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +165,7 @@ func TestCheckpointSignOpen(t *testing.T) {
 		t.Fatal("opened with another key")
 	}
 	// A note by the key for another origin is not its checkpoint.
-	text, _ := Checkpoint{Origin: "EnochRoot", Size: 1, Head: c.Head, Time: c.Time}.Text()
+	text, _ := Checkpoint{Origin: "EnochRoot", Size: 1, Root: c.Root, Head: c.Head, Time: c.Time}.Text()
 	other, err := SignNote(text, s)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +173,7 @@ func TestCheckpointSignOpen(t *testing.T) {
 	if _, err := OpenCheckpoint(other, v); err == nil || !strings.Contains(err.Error(), "for EnochRoot") {
 		t.Fatalf("other origin: %v", err)
 	}
-	if _, err := (Checkpoint{Origin: "EnochRoot", Head: Genesis}).Sign(s); err == nil {
+	if _, err := (Checkpoint{Origin: "EnochRoot", Root: EmptyRoot, Head: Genesis}).Sign(s); err == nil {
 		t.Fatal("signed a checkpoint for another origin")
 	}
 	// Signed text that is not a checkpoint.
@@ -485,20 +519,27 @@ func TestCovers(t *testing.T) {
 	if len(cr.Segments) < 3 {
 		t.Fatalf("%d segments", len(cr.Segments))
 	}
-	// The hash of every record, from the files.
+	// The hash of every record and the tree head of every prefix, from the
+	// files.
 	var hashes []string
+	roots := []string{EmptyRoot}
+	var tree merkle.Range
 	for _, s := range cr.Segments {
 		hashes = append(hashes, lineHashes(t, s.Path)...)
+		for _, line := range fileLines(t, s.Path) {
+			tree.AppendData(line)
+			roots = append(roots, hexHash(tree.Root()))
+		}
 	}
-	if len(hashes) != len(recs) || uint64(len(hashes)) != cr.Records {
-		t.Fatalf("%d hashes, %d records", len(hashes), cr.Records)
+	if len(hashes) != len(recs) || uint64(len(hashes)) != cr.Records || cr.Root != roots[len(roots)-1] {
+		t.Fatalf("%d hashes, %d records, root %s", len(hashes), cr.Records, cr.Root)
 	}
 	for n := uint64(0); n <= cr.Records; n++ {
 		head := Genesis
 		if n > 0 {
 			head = hashes[n-1]
 		}
-		c := Checkpoint{Origin: "o", Size: n, Head: head, Time: fixedNow()}
+		c := Checkpoint{Origin: "o", Size: n, Root: roots[n], Head: head, Time: fixedNow()}
 		if err := cr.Covers(c); err != nil {
 			t.Fatalf("record %d: %v", n, err)
 		}
@@ -510,13 +551,21 @@ func TestCovers(t *testing.T) {
 			if err := cr.Covers(c); err == nil || !strings.Contains(err.Error(), "rewritten") {
 				t.Fatalf("record %d with another head: %v", n, err)
 			}
+			// The right record under another tree head.
+			c.Head, c.Root = head, roots[n-1]
+			if err := cr.Covers(c); err == nil || !strings.Contains(err.Error(), "not the root of records 1 to") {
+				t.Fatalf("record %d with another tree head: %v", n, err)
+			}
 		}
 	}
-	err = cr.Covers(Checkpoint{Origin: "o", Size: cr.Records + 1, Head: hashes[0], Time: fixedNow()})
+	err = cr.Covers(Checkpoint{Origin: "o", Size: cr.Records + 1, Root: roots[1], Head: hashes[0], Time: fixedNow()})
 	if err == nil || !strings.Contains(err.Error(), "removed from its end") {
 		t.Fatalf("longer checkpoint: %v", err)
 	}
-	if err := cr.Covers(Checkpoint{Origin: "o", Size: 0, Head: hashes[0]}); err == nil {
+	if err := cr.Covers(Checkpoint{Origin: "o", Size: 0, Root: EmptyRoot, Head: hashes[0]}); err == nil {
 		t.Fatal("empty checkpoint with a head")
+	}
+	if err := cr.Covers(Checkpoint{Origin: "o", Size: 0, Root: roots[1], Head: Genesis}); err == nil {
+		t.Fatal("empty checkpoint with a tree head")
 	}
 }

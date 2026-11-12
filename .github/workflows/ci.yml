@@ -80,6 +80,7 @@ jobs:
           go test ./internal/platform/audit -run=^$ -fuzz=FuzzVerify -fuzztime=20s
           go test ./internal/platform/logging -run=^$ -fuzz=FuzzParseTraceparent -fuzztime=20s
           go test ./internal/platform/logging -run=^$ -fuzz=FuzzScan -fuzztime=20s
+          go test ./internal/platform/merkle -run=^$ -fuzz=FuzzUnmarshal -fuzztime=20s
       # Every test, subtest and fuzz seed the wicket suite ran before the
       # move must still pass: internal/authn/testdata/wicket-suite.txt.
       # cmd/wicket and cmd/fakeidp are now authz gateway and authz fakeidp,

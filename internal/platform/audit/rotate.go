@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/internal/platform/logging"
+	"github.com/laiwf94/authz/internal/platform/merkle"
 )
 
 // Segments
@@ -612,6 +613,9 @@ func (l *Log) rotate(reason string) error {
 	l.seq++
 	l.head = hex.EncodeToString(sum[:])
 	l.first, l.started = l.seq, now
+	if l.tree != nil {
+		l.tree.AppendData(line)
+	}
 	logging.Observe(logging.SourceAudit, line)
 	if err := syncDir(filepath.Dir(l.path)); err != nil {
 		// The rename may not survive a crash, and the old file is no
@@ -635,6 +639,9 @@ type ChainResult struct {
 	Segments []SegmentResult // oldest first; the active file last
 	Records  uint64
 	Head     string
+	Root     string // hex Merkle tree head of every record (tree.go); EmptyRoot for none
+
+	tree *merkle.Range
 }
 
 // SegmentError locates a failure in one segment, or between two.
@@ -666,9 +673,12 @@ func VerifyChain(path string, s *Schemas) (ChainResult, error) {
 		return ChainResult{}, fmt.Errorf("audit: %w", err)
 	}
 	files := append(segs, path)
-	out := ChainResult{Head: Genesis}
+	out := ChainResult{Head: Genesis, Root: EmptyRoot, tree: &merkle.Range{}}
+	// Leaves are only right once every link below checked out, which is
+	// all a caller sees.
+	leaf := func(_ uint64, line []byte, _ [sha256.Size]byte) { out.tree.AppendData(line) }
 	for i, p := range files {
-		res, err := verifyPath(p, s)
+		res, err := verifyPath(p, s, leaf)
 		if err != nil {
 			return out, &SegmentError{p, err}
 		}
@@ -708,14 +718,15 @@ func VerifyChain(path string, s *Schemas) (ChainResult, error) {
 		}
 		out.Segments = append(out.Segments, SegmentResult{p, res})
 	}
+	out.Root = hexHash(out.tree.Root())
 	return out, nil
 }
 
-func verifyPath(p string, s *Schemas) (Result, error) {
+func verifyPath(p string, s *Schemas, each func(uint64, []byte, [sha256.Size]byte)) (Result, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return Result{}, err
 	}
 	defer f.Close()
-	return verify(f, false, s)
+	return verifyFrom(f, false, s, Result{Head: Genesis}, 0, each)
 }

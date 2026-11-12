@@ -153,6 +153,27 @@ func TestVerifyCheckpoint(t *testing.T) {
 	if code, out, _ := run("verify", "-key", vkey, "-checkpoint", saved, path); code != Failed || !strings.Contains(out, "does not verify") {
 		t.Fatalf("changed checkpoint: %d %q", code, out)
 	}
+	// Signed by the right key over the right records, but with a tree
+	// head that is not theirs.
+	kb, _ := os.ReadFile(keyFile)
+	signer, err := audit.ParseSigner(strings.TrimSpace(string(kb)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := audit.OpenCheckpoint(b, signer.Verifier())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp.Root = strings.Repeat("ee", 32)
+	wrong, err := cp.Sign(signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(saved, wrong, 0o600)
+	if code, out, _ := run("verify", "-key", vkey, "-checkpoint", saved, path); code != Failed ||
+		!strings.Contains(out, "is not the root of records 1 to 9: it was not signed over this log's records") {
+		t.Fatalf("checkpoint with another tree head: %d %q", code, out)
+	}
 }
 
 func TestVerifyCheckpointCatchesRewrites(t *testing.T) {

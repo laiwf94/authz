@@ -238,7 +238,8 @@ that does not is refused at start.
 
 With a signing key the log signs its own state: a checkpoint, in the signed
 note format of the Go checksum database and transparency logs, names the
-number of records and the hash of the last one. Each subcommand writes one
+number of records, the RFC 6962 Merkle tree head over all of them and the
+hash of the last one. Each subcommand writes one
 to `audit.jsonl.checkpoint` on start, every
 `AUTHZ_AUDIT_CHECKPOINT_INTERVAL` (default `1m`) when records were added,
 after each rotation and on shutdown, and the mcp admin API serves the

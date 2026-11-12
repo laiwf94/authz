@@ -1,40 +1,42 @@
 package audit
 
 import (
-	"bufio"
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/laiwf94/authz/internal/platform/merkle"
 )
 
 // Checkpoints
 //
 // With Options.Signer the log signs its own state: a checkpoint names the
-// number of records and the hash of the last one, at a time, in a signed
-// note (note.go) with Ed25519. Anyone holding only the public key can then
-// tell that a log they are given still holds every record the checkpoint
+// number of records, the root of the RFC 6962 Merkle tree over them (see
+// tree.go) and the hash of the last one, at a time, in a signed note
+// (note.go) with Ed25519. Anyone holding only the public key can then tell
+// that a log they are given still holds every record the checkpoint
 // covered, unchanged: "authz audit verify -key" checks it. A checkpoint is
 // the head hash of "authz mcp audit verify -head", signed, so it no longer
-// has to be kept somewhere the operator cannot write.
+// has to be kept somewhere the operator cannot write; its tree head is what
+// inclusion and consistency proofs are checked against.
 //
-// The text of a checkpoint is four lines:
+// The text of a checkpoint is five lines:
 //
 //	<origin: the signing key's name>
 //	<records>
-//	<base64 of the SHA-256 of the last record; 32 zero bytes for none>
+//	<base64 of the Merkle tree head of the records; SHA-256 of nothing for none>
+//	chain <base64 of the SHA-256 of the last record; 32 zero bytes for none>
 //	time <RFC 3339 time it was signed, UTC>
 //
-// in the layout of a transparency log's checkpoint, the chain head standing
-// where a tree's root hash would.
+// in the layout of a transparency log's checkpoint (C2SP tlog-checkpoint):
+// origin, tree size and root hash, then extension lines.
 //
 // The newest checkpoint is kept beside the log as FILE.checkpoint (see
 // CheckpointPath), replaced atomically. One is written when the log opens,
@@ -61,14 +63,21 @@ const MinCheckpointEvery = time.Second
 // no checkpoints.
 var ErrNoSigner = errors.New("audit: no signing key is configured, so the log signs no checkpoints")
 
-// Checkpoint is a log's state at a time: Size records, the last of them with
-// hash Head.
+// Checkpoint is a log's state at a time: Size records, whose Merkle tree
+// has root Root, the last of them with hash Head.
 type Checkpoint struct {
 	Origin string // the name of the key that signed it
 	Size   uint64
+	Root   string // hex RFC 6962 tree head of records 1 to Size; EmptyRoot when Size is 0
 	Head   string // hex SHA-256 of record Size; Genesis when Size is 0
 	Time   time.Time
 }
+
+// EmptyRoot is the tree head of a log of no records, in hex: the SHA-256
+// of nothing.
+var EmptyRoot = hexHash(merkle.EmptyRoot())
+
+func hexHash(h merkle.Hash) string { return hex.EncodeToString(h[:]) }
 
 // CheckpointPath is where the log at path keeps its newest checkpoint.
 func CheckpointPath(path string) string { return path + ".checkpoint" }
@@ -78,11 +87,16 @@ func (c Checkpoint) Text() ([]byte, error) {
 	if !validKeyName(c.Origin) {
 		return nil, fmt.Errorf("audit: checkpoint origin %q is not a key name", c.Origin)
 	}
+	root, err := hex.DecodeString(c.Root)
+	if err != nil || len(root) != sha256.Size {
+		return nil, errors.New("audit: checkpoint tree head is not a SHA-256 hash")
+	}
 	head, err := hex.DecodeString(c.Head)
 	if err != nil || len(head) != sha256.Size {
 		return nil, errors.New("audit: checkpoint head is not a SHA-256 hash")
 	}
-	return fmt.Appendf(nil, "%s\n%d\n%s\ntime %s\n", c.Origin, c.Size, base64.StdEncoding.EncodeToString(head),
+	b64 := base64.StdEncoding.EncodeToString
+	return fmt.Appendf(nil, "%s\n%d\n%s\nchain %s\ntime %s\n", c.Origin, c.Size, b64(root), b64(head),
 		c.Time.UTC().Format(time.RFC3339Nano)), nil
 }
 
@@ -92,8 +106,8 @@ func ParseCheckpoint(text []byte) (Checkpoint, error) {
 		return Checkpoint{}, errors.New("audit: not an audit checkpoint: " + msg)
 	}
 	lines := strings.Split(string(text), "\n")
-	if len(lines) != 5 || lines[4] != "" {
-		return bad("it must have four lines: origin, records, head and time")
+	if len(lines) != 6 || lines[5] != "" {
+		return bad("it must have five lines: origin, records, tree head, chain and time")
 	}
 	var c Checkpoint
 	if c.Origin = lines[0]; !validKeyName(c.Origin) {
@@ -104,17 +118,26 @@ func ParseCheckpoint(text []byte) (Checkpoint, error) {
 		return bad("the record count is not a decimal number")
 	}
 	c.Size = n
-	head, err := base64.StdEncoding.Strict().DecodeString(lines[2])
+	root, err := base64.StdEncoding.Strict().DecodeString(lines[2])
+	if err != nil || len(root) != sha256.Size {
+		return bad("the tree head is not a base64 SHA-256 hash")
+	}
+	c.Root = hex.EncodeToString(root)
+	chain, ok := strings.CutPrefix(lines[3], "chain ")
+	if !ok {
+		return bad(`the fourth line must be "chain <base64 hash of the last record>"`)
+	}
+	head, err := base64.StdEncoding.Strict().DecodeString(chain)
 	if err != nil || len(head) != sha256.Size {
-		return bad("the head is not a base64 SHA-256 hash")
+		return bad("the chain head is not a base64 SHA-256 hash")
 	}
 	c.Head = hex.EncodeToString(head)
-	if c.Size == 0 && c.Head != Genesis {
-		return bad("a checkpoint of no records must have the zero head")
+	if c.Size == 0 && (c.Head != Genesis || c.Root != EmptyRoot) {
+		return bad("a checkpoint of no records must have the empty tree head and the zero chain head")
 	}
-	ts, ok := strings.CutPrefix(lines[3], "time ")
+	ts, ok := strings.CutPrefix(lines[4], "time ")
 	if !ok {
-		return bad(`the fourth line must be "time <RFC 3339 time>"`)
+		return bad(`the fifth line must be "time <RFC 3339 time>"`)
 	}
 	if c.Time, err = time.Parse(time.RFC3339Nano, ts); err != nil {
 		return bad("the time is not an RFC 3339 time")
@@ -200,13 +223,15 @@ func (l *Log) Checkpoint() ([]byte, Checkpoint, error) {
 // covers it. The caller holds l.mu and, for a shared file, its lock, and
 // has read other writers' records.
 func (l *Log) checkpoint() error {
-	if l.cpNote != nil && l.cp.Size == l.seq && l.cp.Head == l.head {
+	root := hexHash(l.tree.Root())
+	if l.cpNote != nil && l.cp.Size == l.seq && l.cp.Head == l.head && l.cp.Root == root {
 		return nil
 	}
 	path := CheckpointPath(l.path)
-	// Another writer of the file may have signed this state already.
+	// Another writer of the file may have signed this state already, and
+	// saved the tree before it did.
 	if msg, err := os.ReadFile(path); err == nil {
-		if c, err := OpenCheckpoint(msg, l.verifier); err == nil && c.Size == l.seq && c.Head == l.head {
+		if c, err := OpenCheckpoint(msg, l.verifier); err == nil && c.Size == l.seq && c.Head == l.head && c.Root == root {
 			l.cp, l.cpNote = c, msg
 			return nil
 		}
@@ -217,7 +242,12 @@ func (l *Log) checkpoint() error {
 		l.broken = true
 		return fmt.Errorf("audit: fsync before checkpoint: %w", err)
 	}
-	c := Checkpoint{Origin: l.signer.Name(), Size: l.seq, Head: l.head, Time: l.now().UTC()}
+	// The tree is saved first, so a log that has a checkpoint of some
+	// state has its tree for that state or a later one.
+	if err := l.saveTree(); err != nil {
+		return fmt.Errorf("audit: writing the Merkle tree: %w", err)
+	}
+	c := Checkpoint{Origin: l.signer.Name(), Size: l.seq, Root: root, Head: l.head, Time: l.now().UTC()}
 	msg, err := c.Sign(l.signer)
 	if err != nil {
 		return err
@@ -251,6 +281,17 @@ func (l *Log) checkOpenCheckpoint() error {
 	if c.Size == l.seq && c.Head != l.head {
 		return fmt.Errorf("audit: record %d of %s differs from the one its checkpoint signed at %s: the last record was changed; restore it, or move the checkpoint away to start a new one",
 			l.seq, l.path, c.Time.Format(time.RFC3339))
+	}
+	if c.Size == l.seq && c.Root != hexHash(l.tree.Root()) {
+		// The records are the ones signed, so the saved tree was wrong,
+		// or the checkpoint was not computed from them.
+		if err := l.rebuildTree(); err != nil {
+			return err
+		}
+		if c.Root != hexHash(l.tree.Root()) {
+			return fmt.Errorf("audit: the checkpoint of %s signed at %s has a tree head that is not the root of its %d records; move the checkpoint away to start a new one",
+				l.path, c.Time.Format(time.RFC3339), c.Size)
+		}
 	}
 	if c.Size == l.seq {
 		l.cp, l.cpNote = c, msg
@@ -311,60 +352,38 @@ func writeFileAtomic(path string, data []byte) error {
 }
 
 // Covers checks that the log res verified still holds the state c signed:
-// at least c.Size records, record c.Size with hash c.Head. A log that holds
-// fewer records lost its newest ones; a different hash means the records up
-// to c.Size were rewritten.
+// at least c.Size records, record c.Size with hash c.Head, and c.Root the
+// tree head of records 1 to c.Size. A log that holds fewer records lost its
+// newest ones; a different hash means the records up to c.Size were
+// rewritten. For a checkpoint of fewer records than the log holds, or a
+// ChainResult without Root, the segments are read up to record c.Size.
 func (res ChainResult) Covers(c Checkpoint) error {
 	if c.Size > res.Records {
 		return fmt.Errorf("the log has %d records, but the checkpoint signed at %s covers %d: records were removed from its end",
 			res.Records, c.Time.Format(time.RFC3339), c.Size)
 	}
 	if c.Size == 0 {
-		if c.Head != Genesis {
-			return errors.New("a checkpoint of no records must have the zero head")
+		if c.Head != Genesis || c.Root != EmptyRoot {
+			return errors.New("a checkpoint of no records must have the empty tree head and the zero chain head")
 		}
 		return nil
 	}
-	got := res.Head
-	if c.Size < res.Records {
+	root, head := res.Root, res.Head
+	// A ChainResult put together by hand, without VerifyChain, has no
+	// tree head: compute it from the segments.
+	if c.Size < res.Records || root == "" {
 		var err error
-		if got, err = res.hashAt(c.Size); err != nil {
+		if root, head, err = res.prefix(c.Size); err != nil {
 			return err
 		}
 	}
-	if got != c.Head {
+	if head != c.Head {
 		return fmt.Errorf("record %d is not the one the checkpoint signed at %s: the log was rewritten up to there",
 			c.Size, c.Time.Format(time.RFC3339))
 	}
-	return nil
-}
-
-// hashAt returns the hash of record seq, reading the segment that holds it.
-func (res ChainResult) hashAt(seq uint64) (string, error) {
-	for _, s := range res.Segments {
-		if s.Records == 0 || seq < s.First || seq > s.Records {
-			continue
-		}
-		f, err := os.Open(s.Path)
-		if err != nil {
-			return "", fmt.Errorf("audit: %w", err)
-		}
-		defer f.Close()
-		br := bufio.NewReaderSize(f, 64<<10)
-		for n := s.First; ; n++ {
-			line, err := readLine(br)
-			if err == io.EOF || err == errTorn {
-				break
-			}
-			if err != nil {
-				return "", fmt.Errorf("audit: %s: %w", s.Path, err)
-			}
-			if n == seq {
-				sum := sha256.Sum256(bytes.Clone(line))
-				return hex.EncodeToString(sum[:]), nil
-			}
-		}
-		return "", fmt.Errorf("audit: %s changed while it was read", s.Path)
+	if root != c.Root {
+		return fmt.Errorf("the tree head of the checkpoint signed at %s is not the root of records 1 to %d: it was not signed over this log's records",
+			c.Time.Format(time.RFC3339), c.Size)
 	}
-	return "", fmt.Errorf("audit: no segment holds record %d", seq)
+	return nil
 }
