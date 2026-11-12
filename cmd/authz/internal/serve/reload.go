@@ -55,7 +55,8 @@ func grantdVars(getenv func(string) string) []string {
 	}
 	for _, k := range []string{"GRANTD_ADDR", "GRANTD_DATA_DIR", "GRANTD_API_KEYS", "GRANTD_TOKEN_KEY", "GRANTD_CACHE_SIZE",
 		"GRANTD_RETENTION", "GRANTD_LOG_LEVEL", "GRANTD_AUDIT_LOG", "GRANTD_AUDIT_CHECKS",
-		"GRANTD_AUDIT_ROTATE_BYTES", "GRANTD_AUDIT_ROTATE_AGE", "GRANTD_KEY_RATE", "GRANTD_KEY_BURST"} {
+		"GRANTD_AUDIT_ROTATE_BYTES", "GRANTD_AUDIT_ROTATE_AGE", "GRANTD_KEY_RATE", "GRANTD_KEY_BURST",
+		"GRANTD_KEYS_FILE", "GRANTD_TOKEN_ROTATE_EVERY", "GRANTD_TOKEN_OVERLAP"} {
 		if getenv(k) != "" && !slices.Contains(out, k) {
 			out = append(out, k)
 		}
@@ -145,6 +146,12 @@ func restartOnly(a, b config) []string {
 	if !slices.EqualFunc(append([][]byte{a.tokenKey}, a.oldTokens...), append([][]byte{b.tokenKey}, b.oldTokens...),
 		func(x, y []byte) bool { return string(x) == string(y) }) {
 		out = append(out, "token_key")
+	}
+	if a.keysFile != b.keysFile {
+		out = append(out, "keys_file")
+	}
+	if a.tokenPolicy != b.tokenPolicy {
+		out = append(out, "token_rotation")
 	}
 	if a.cacheSize != b.cacheSize {
 		out = append(out, "cache_size")

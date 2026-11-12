@@ -30,6 +30,7 @@ import (
 	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/cmd/authz/internal/serve"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 )
@@ -207,8 +208,9 @@ func run(ctx context.Context, parts []string, opts httpserver.Options, getenv fu
 
 	errs := make([]error, len(parts))
 	var wg sync.WaitGroup
+	keyFiles := new(keys.Files) // parts naming one keys_file share its rings
 	for i, p := range parts {
-		h := part.Host{Name: p, Bind: shared.Part(i), Metrics: reg}
+		h := part.Host{Name: p, Bind: shared.Part(i), Metrics: reg, Keys: keyFiles}
 		wg.Go(func() {
 			errs[i] = starters[p](pctx, h, getenv, path, logOut, hups[p])
 			// A part that returns stops the others: before binding by

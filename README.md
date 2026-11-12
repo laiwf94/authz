@@ -84,7 +84,7 @@ to be the grantd command, with the same `GRANTD_*` environment variables.
 ```console
 $ export GRANTD_API_KEYS=local-dev-key-0123456
 $ go run ./cmd/authz check -serve -schema examples/docs.schema   # validate without starting
-$ go run ./cmd/authz serve                     # in memory; add GRANTD_DATA_DIR and GRANTD_TOKEN_KEY to persist
+$ go run ./cmd/authz serve                     # in memory; add GRANTD_DATA_DIR and GRANTD_KEYS_FILE to persist
 $ ./examples/demo.sh                           # writes a schema and data, then runs checks
 ```
 

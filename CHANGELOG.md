@@ -90,6 +90,19 @@ link the roadmap issue they come from.
   an HS256 ring from `internal/platform/keys`, and pooled HMAC states make
   issuing and verifying a token about twice as fast (Encode 790 to 330 ns,
   Decode 730 to 310 ns, 9 and 7 allocations down to 4 and 2).
+- **`authz serve` rotates its consistency token keys on its own** ([#76](https://github.com/laiwf94/authz/issues/76)).
+  `keys_file` in the serve section (or `GRANTD_KEYS_FILE`) names the
+  process's key ring file, in place of `token_key`. Tokens are MACed from its
+  `consistency` ring, which is created when the file lacks it, rotates every
+  `token_rotate_every` (default 24h, `GRANTD_TOKEN_ROTATE_EVERY`) and keeps
+  retired keys verifying for `token_overlap` (default 168h,
+  `GRANTD_TOKEN_OVERLAP`). The file is saved, mode 0600, after every
+  rotation, so a restart keeps verifying the tokens issued before it. A
+  file that changed under the process (another process using it) is not
+  overwritten: the failure is logged and the running keys are kept.
+  `authz check` checks the file and the policy. Under `authz run`, parts
+  naming the same file share its rings. `token_key` and `GRANTD_TOKEN_KEY`
+  work as before; setting both is an error.
 - **Cookie keys and agent token keys can sit on key rings** ([#76](https://github.com/laiwf94/authz/issues/76)).
   `seal.FromRing` seals with an A256GCM ring's current key and opens with its
   next key and its retired keys inside their overlap; `identity.Config.Ring`

@@ -251,6 +251,18 @@ same snapshot, so pages read at one token agree with each other.
   new key in front and removing the old one once its tokens no longer
   matter. Tokens carry no key id; a token is checked against the current key
   first, then the others, so a forged token costs at most one MAC per key.
+- `GRANTD_KEYS_FILE` (`keys_file`) replaces that list with the process's
+  key ring file. Its `consistency` ring rotates on its own
+  (`GRANTD_TOKEN_ROTATE_EVERY`, default 24h) and keeps retired keys for
+  `GRANTD_TOKEN_OVERLAP` (default a week), and the file is saved after every
+  rotation, so neither a rotation nor a restart refuses a token younger than
+  the overlap. `keys.File` owns the file: `Ensure` adds the rings a
+  subcommand needs and saves before handing them out, `Start` rotates once
+  per process however many subcommands share the file (`keys.Files`, under
+  `authz run`), and every write first checks the file still holds what this
+  process last read or wrote. A second process pointed at the same file is
+  reported (`ErrConflict`) rather than allowed to replace the first one's
+  keys; the running rings keep their keys either way.
 - Strict JSON: unknown fields and trailing data are rejected; the body size is
   capped before decoding.
 - Internal errors return a generic message and request ID. The details go to

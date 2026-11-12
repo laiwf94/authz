@@ -3,9 +3,11 @@ package part
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"testing"
 
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
@@ -37,5 +39,28 @@ func TestHostDefaults(t *testing.T) {
 	cancel()
 	if err := s.Serve(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHostKeyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys.json")
+	var alone Host
+	a, err := alone.KeyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := alone.KeyFile(path); b == a {
+		t.Fatal("a zero Host shares ring files")
+	}
+	shared := Host{Keys: new(keys.Files)}
+	c, err := shared.KeyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := (Host{Name: "gateway", Keys: shared.Keys}).KeyFile(path); d != c {
+		t.Fatal("parts of one process do not share a ring file")
+	}
+	if _, err := shared.KeyFile(""); err == nil {
+		t.Fatal("empty path accepted")
 	}
 }

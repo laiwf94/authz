@@ -7,6 +7,10 @@
 //	GRANTD_API_KEYS    comma-separated bearer keys, each at least 16 characters (required)
 //	GRANTD_TOKEN_KEY   64 hex characters used to sign consistency tokens; required with GRANTD_DATA_DIR.
 //	                   A comma-separated list rotates: the first key signs, the rest still verify
+//	GRANTD_KEYS_FILE   the process's key ring file, instead of GRANTD_TOKEN_KEY: consistency
+//	                   tokens are signed from its rotating "consistency" ring
+//	GRANTD_TOKEN_ROTATE_EVERY  rotation period of that ring (default 24h; 0s never)
+//	GRANTD_TOKEN_OVERLAP       how long its retired keys verify (default 168h)
 //	GRANTD_CACHE_SIZE  check results kept across requests (default 100000; 0 disables)
 //	GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
 //	GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
@@ -43,6 +47,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +59,7 @@ import (
 	"github.com/laiwf94/authz/internal/platform/audit"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
@@ -79,6 +85,12 @@ Without a file, configuration comes from the environment, as grantd's did:
   GRANTD_API_KEYS    comma-separated bearer keys, each at least 16 characters (required)
   GRANTD_TOKEN_KEY   64 hex characters used to sign consistency tokens; required with GRANTD_DATA_DIR.
                      A comma-separated list rotates: the first key signs, the rest still verify
+  GRANTD_KEYS_FILE   the process's key ring file, instead of GRANTD_TOKEN_KEY: consistency
+                     tokens are signed from its "consistency" ring, created when missing,
+                     which rotates on its own and is saved after every rotation
+  GRANTD_TOKEN_ROTATE_EVERY  how long a token key on that ring stays current (default 24h;
+                     0s never rotates it)
+  GRANTD_TOKEN_OVERLAP  how long a retired token key keeps verifying (default 168h)
   GRANTD_CACHE_SIZE  check results kept across requests (default 100000; 0 disables)
   GRANTD_RETENTION   revisions of history kept for snapshot reads and watch (default 100000)
   GRANTD_LOG_LEVEL   debug, info, warn or error (default info)
@@ -174,23 +186,25 @@ func Check(getenv func(string) string) []error {
 }
 
 type config struct {
-	addr      string
-	dataDir   string
-	apiKeys   []string
-	tokenKey  []byte   // signs consistency tokens
-	oldTokens [][]byte // the rest of GRANTD_TOKEN_KEY: verify only
-	cacheSize int
-	retention store.Revision
-	logLevel  slog.Level
-	auditLog  string
-	auditChk  bool           // GRANTD_AUDIT_CHECKS
-	auditRot  audit.Rotation // GRANTD_AUDIT_ROTATE_BYTES and _AGE
-	keyLimit  ratelimit.Limit
-	http      httpserver.Options // GRANTD_TLS_* and GRANTD_DRAIN_*
+	addr        string
+	dataDir     string
+	apiKeys     []string
+	tokenKey    []byte      // signs consistency tokens
+	oldTokens   [][]byte    // the rest of GRANTD_TOKEN_KEY: verify only
+	keysFile    string      // GRANTD_KEYS_FILE: tokens on its consistency ring instead
+	tokenPolicy keys.Policy // GRANTD_TOKEN_ROTATE_EVERY and _OVERLAP
+	cacheSize   int
+	retention   store.Revision
+	logLevel    slog.Level
+	auditLog    string
+	auditChk    bool           // GRANTD_AUDIT_CHECKS
+	auditRot    audit.Rotation // GRANTD_AUDIT_ROTATE_BYTES and _AGE
+	keyLimit    ratelimit.Limit
+	http        httpserver.Options // GRANTD_TLS_* and GRANTD_DRAIN_*
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
-	c := config{addr: ":8080", cacheSize: 100_000, retention: store.DefaultRetention}
+	c := config{addr: ":8080", cacheSize: 100_000, retention: store.DefaultRetention, tokenPolicy: DefaultTokenPolicy}
 	if v := getenv("GRANTD_ADDR"); v != "" {
 		c.addr = v
 	}
@@ -221,14 +235,28 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if len(c.apiKeys) == 0 {
 		return c, errors.New("GRANTD_API_KEYS is required (comma-separated, each at least 16 characters)")
 	}
-	if v := getenv("GRANTD_TOKEN_KEY"); v != "" {
+	c.keysFile = getenv("GRANTD_KEYS_FILE")
+	for name, d := range map[string]*time.Duration{"GRANTD_TOKEN_ROTATE_EVERY": &c.tokenPolicy.RotateEvery, "GRANTD_TOKEN_OVERLAP": &c.tokenPolicy.Overlap} {
+		if v := getenv(name); v != "" {
+			if *d, err = time.ParseDuration(v); err != nil || *d < 0 {
+				return c, fmt.Errorf(`%s must be a duration such as "24h"`, name)
+			}
+		}
+	}
+	if err := c.tokenPolicy.Check(); err != nil {
+		return c, fmt.Errorf("GRANTD_TOKEN_ROTATE_EVERY, GRANTD_TOKEN_OVERLAP: %s", strings.TrimPrefix(err.Error(), "keys: "))
+	}
+	switch v := getenv("GRANTD_TOKEN_KEY"); {
+	case v != "" && c.keysFile != "":
+		return c, errors.New("set GRANTD_TOKEN_KEY or GRANTD_KEYS_FILE, not both")
+	case v != "":
 		ks, err := parseTokenKeys(v)
 		if err != nil {
 			return c, err
 		}
 		c.tokenKey, c.oldTokens = ks[0], ks[1:]
-	} else if c.dataDir != "" {
-		return c, errors.New("GRANTD_TOKEN_KEY is required with GRANTD_DATA_DIR, so tokens stay valid across restarts")
+	case c.dataDir != "" && c.keysFile == "":
+		return c, errors.New("GRANTD_TOKEN_KEY is required with GRANTD_DATA_DIR, so tokens stay valid across restarts (or GRANTD_KEYS_FILE, which keeps them on a key ring)")
 	}
 	if v := getenv("GRANTD_CACHE_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -296,6 +324,47 @@ func parseTokenKeys(v string) ([][]byte, error) {
 	return out, nil
 }
 
+// DefaultTokenPolicy is how the consistency ring of a keys_file rotates
+// unless token_rotate_every and token_overlap say otherwise: a new key
+// every day, and a retired key verifying for a week, far longer than a
+// client holds a token to read its own writes.
+var DefaultTokenPolicy = keys.Policy{RotateEvery: 24 * time.Hour, Overlap: 7 * 24 * time.Hour}
+
+func tokenSpec(p keys.Policy) keys.Spec {
+	return keys.Spec{Name: keys.RingConsistency, Alg: keys.HS256, Policy: p}
+}
+
+// ringTokens puts consistency tokens on the consistency ring of the
+// process's ring file, which rotates until ctx ends, and logs its
+// rotations.
+func ringTokens(ctx context.Context, h part.Host, cfg config, log *slog.Logger) (*token.Issuer, error) {
+	kf, err := h.KeyFile(cfg.keysFile)
+	if err != nil {
+		return nil, fmt.Errorf("keys file: %w", err)
+	}
+	rings, err := kf.Ensure(tokenSpec(cfg.tokenPolicy))
+	if err != nil {
+		return nil, fmt.Errorf("keys file: %w", err)
+	}
+	tokens, err := token.FromRing(rings[0], nil)
+	if err != nil {
+		return nil, err
+	}
+	remove := kf.OnChange(func(changed []string, err error) {
+		if err != nil {
+			log.Error("key ring check failed; the rings keep their keys", "keys_file", cfg.keysFile, "error", err.Error())
+		}
+		if slices.Contains(changed, keys.RingConsistency) {
+			log.Info("key ring rotated", "keys_file", cfg.keysFile, "ring", keys.RingConsistency)
+		}
+	})
+	context.AfterFunc(ctx, remove)
+	kf.Start(ctx)
+	log.Info("consistency tokens on a key ring", "keys_file", cfg.keysFile,
+		"rotate_every", cfg.tokenPolicy.RotateEvery.String(), "overlap", cfg.tokenPolicy.Overlap.String())
+	return tokens, nil
+}
+
 // ConfigEnv names the platform configuration file when -config is not
 // given.
 const ConfigEnv = "AUTHZ_CONFIG"
@@ -351,15 +420,21 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 				"config", path, "ignored", ignored)
 		}
 	}
-	if cfg.tokenKey == nil {
-		log.Warn("GRANTD_TOKEN_KEY not set; using a random key, so consistency tokens end with this process")
-		if cfg.tokenKey, err = token.RandomKey(); err != nil {
+	var tokens *token.Issuer
+	if cfg.keysFile != "" {
+		if tokens, err = ringTokens(ctx, h, cfg, log); err != nil {
 			return err
 		}
-	}
-	tokens, err := token.NewIssuerKeys(cfg.tokenKey, cfg.oldTokens...)
-	if err != nil {
-		return err
+	} else {
+		if cfg.tokenKey == nil {
+			log.Warn("GRANTD_TOKEN_KEY not set; using a random key, so consistency tokens end with this process")
+			if cfg.tokenKey, err = token.RandomKey(); err != nil {
+				return err
+			}
+		}
+		if tokens, err = token.NewIssuerKeys(cfg.tokenKey, cfg.oldTokens...); err != nil {
+			return err
+		}
 	}
 	st, err := store.Open(store.Options{Dir: cfg.dataDir, Retention: cfg.retention})
 	if err != nil {

@@ -8,6 +8,7 @@ package part
 
 import (
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
@@ -23,6 +24,10 @@ type Host struct {
 	// Metrics is the registry the subcommand's metrics go to; nil is a
 	// new registry of its own.
 	Metrics *metrics.Registry
+	// Keys is the process's ring files: subcommands of one process naming
+	// the same keys_file share its rings, rotated once. Nil opens a file of
+	// the subcommand's own.
+	Keys *keys.Files
 }
 
 // Binder returns Bind, or httpserver.Bind when it is not set.
@@ -39,4 +44,13 @@ func (h Host) Registry() *metrics.Registry {
 		return metrics.New()
 	}
 	return h.Metrics
+}
+
+// KeyFile returns the ring file at path: the process's, shared with the
+// other subcommands that name it, or one of the subcommand's own.
+func (h Host) KeyFile(path string) (*keys.File, error) {
+	if h.Keys == nil {
+		return new(keys.Files).Open(path)
+	}
+	return h.Keys.Open(path)
 }

@@ -209,6 +209,11 @@ func (s *Set) Save(path string) error {
 	if err != nil {
 		return err
 	}
+	return saveBytes(path, append(b, '\n'))
+}
+
+// saveBytes writes b to path as Save does.
+func saveBytes(path string, b []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
@@ -218,7 +223,7 @@ func (s *Set) Save(path string) error {
 		tmp.Close()
 		return err
 	}
-	if _, err := tmp.Write(append(b, '\n')); err != nil {
+	if _, err := tmp.Write(b); err != nil {
 		tmp.Close()
 		return err
 	}

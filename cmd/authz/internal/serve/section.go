@@ -17,6 +17,7 @@ import (
 	"github.com/laiwf94/authz/internal/authz/token"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/ratelimit"
 )
 
@@ -40,6 +41,19 @@ type Settings struct {
 	// TokenKey is GRANTD_TOKEN_KEY: 64 hex characters, or a comma-separated
 	// list newest first.
 	TokenKey pcfg.Secret `json:"token_key"`
+	// KeysFile is GRANTD_KEYS_FILE: the process's ring file
+	// (internal/platform/keys). Consistency tokens are MACed from its
+	// "consistency" ring, which is created when the file lacks it and
+	// rotates on TokenRotateEvery, keeping retired keys for TokenOverlap.
+	// It replaces token_key, and like it keeps tokens valid across
+	// restarts.
+	KeysFile string `json:"keys_file"`
+	// TokenRotateEvery is GRANTD_TOKEN_ROTATE_EVERY: how long a consistency
+	// token key stays current on the keys_file ring; 0 never rotates it.
+	TokenRotateEvery pcfg.Duration `json:"token_rotate_every"`
+	// TokenOverlap is GRANTD_TOKEN_OVERLAP: how long a retired consistency
+	// token key keeps verifying.
+	TokenOverlap pcfg.Duration `json:"token_overlap"`
 	// CacheSize is GRANTD_CACHE_SIZE; 0 disables the cache.
 	CacheSize int `json:"cache_size"`
 	// Retention is GRANTD_RETENTION.
@@ -99,6 +113,8 @@ func defaultSettings(s *Settings) {
 	s.CacheSize = 100_000
 	s.Retention = store.DefaultRetention
 	s.LogLevel = "info"
+	s.TokenRotateEvery = pcfg.Duration(DefaultTokenPolicy.RotateEvery)
+	s.TokenOverlap = pcfg.Duration(DefaultTokenPolicy.Overlap)
 	s.DrainTimeout = pcfg.Duration(httpserver.DefaultDrainTimeout)
 }
 
@@ -130,14 +146,23 @@ func checkSettings(s *Settings, c *pcfg.Checker) {
 		}
 	}
 	switch {
+	case s.TokenKey.IsSet() && s.KeysFile != "":
+		c.Errorf(c.Field("token_key"), "set token_key or keys_file, not both")
 	case s.TokenKey.IsSet():
 		if v := s.TokenKey.Value(); v != "" || blank(s.TokenKey) {
 			if _, err := tokenKeys(v); err != nil {
 				c.Errorf(c.Field("token_key"), "%v", err)
 			}
 		}
+	case s.KeysFile != "":
+		if err := keys.CheckFile(s.KeysFile, tokenSpec(s.tokenPolicy())); err != nil {
+			c.Errorf(c.Field("keys_file"), "%v", err)
+		}
 	case s.DataDir != "":
-		c.Errorf(c.Field("token_key"), "is required with data_dir, so tokens stay valid across restarts")
+		c.Errorf(c.Field("token_key"), "is required with data_dir, so tokens stay valid across restarts (or keys_file, which keeps them on a key ring)")
+	}
+	if err := s.tokenPolicy().Check(); err != nil {
+		c.Errorf(c.Field("token_overlap"), "%s", strings.TrimPrefix(err.Error(), "keys: "))
 	}
 	if s.CacheSize < 0 {
 		c.Errorf(c.Field("cache_size"), "must not be negative (0 disables the cache)")
@@ -201,6 +226,7 @@ func settingsConfig(s *Settings) (config, error) {
 	if len(c.apiKeys) == 0 {
 		return c, errors.New("$.serve.api_keys holds no key")
 	}
+	c.keysFile, c.tokenPolicy = s.KeysFile, s.tokenPolicy()
 	if s.TokenKey.IsSet() {
 		ks, err := tokenKeys(s.TokenKey.Value())
 		if err != nil {
@@ -219,6 +245,10 @@ func settingsConfig(s *Settings) (config, error) {
 		}
 	}
 	return c, nil
+}
+
+func (s *Settings) tokenPolicy() keys.Policy {
+	return keys.Policy{RotateEvery: time.Duration(s.TokenRotateEvery), Overlap: time.Duration(s.TokenOverlap)}
 }
 
 // tokenKeys reads a token key list: one key, or a comma-separated list

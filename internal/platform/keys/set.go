@@ -58,6 +58,13 @@ func (s *Set) Ring(name string) *Ring {
 	return s.rings[name]
 }
 
+// replace swaps the ring called name, which the set holds, for r.
+func (s *Set) replace(name string, r *Ring) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rings[name] = r
+}
+
 // Names returns the ring names in the order they were added.
 func (s *Set) Names() []string {
 	s.mu.RLock()
