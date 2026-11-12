@@ -53,6 +53,13 @@ func checkConfig(ctx context.Context, r *report, name string, getenv func(string
 	if res.Problems.Err() != nil {
 		return
 	}
+	// The checkpoint signing key is the platform's, read by every
+	// subcommand from the environment.
+	if _, err := part.AuditSigningFromEnv(getenv); err != nil {
+		where, msg, _ := strings.Cut(err.Error(), ": ")
+		r.problem(where, msg)
+		return
+	}
 	if probs := sharedAuditLogs(res.Config); len(probs) > 0 {
 		for _, p := range probs {
 			r.problem(name, p)

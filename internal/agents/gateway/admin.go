@@ -10,6 +10,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/approval"
 	"github.com/laiwf94/authz/internal/agents/httpx"
 	"github.com/laiwf94/authz/internal/agents/pins"
+	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 )
 
@@ -43,6 +44,7 @@ func (g *Gateway) AdminHandler(adminToken string) http.Handler {
 	route("GET /admin/policy", g.getPolicy)
 	route("POST /admin/policy/reload", g.reloadPolicy)
 	route("GET /admin/audit/head", g.auditHead)
+	route("GET /admin/audit/checkpoint", g.auditCheckpoint)
 	mux.Handle("/", hs.Wrap("other", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "no such endpoint")
 	}))
@@ -183,6 +185,25 @@ func (g *Gateway) auditHead(w http.ResponseWriter, r *http.Request) error {
 	n, head := g.opt.Audit.Head()
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"records": n, "head": head})
 	return nil
+}
+
+// auditCheckpoint serves the audit log's newest checkpoint, a signed note
+// covering every record written so far (signed now if records were added
+// since the last one), for an auditor to keep and later check the log
+// against with only the public key: "authz audit verify -key".
+func (g *Gateway) auditCheckpoint(w http.ResponseWriter, r *http.Request) error {
+	msg, _, err := g.opt.Audit.Checkpoint()
+	if errors.Is(err, audit.ErrNoSigner) {
+		return &httpx.Error{Status: http.StatusNotFound, Code: "not_found",
+			Msg: "the audit log signs no checkpoints; set AUTHZ_AUDIT_SIGNING_KEY"}
+	}
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, err = w.Write(msg)
+	return err
 }
 
 // Refresh lists every upstream's tools now, so that definition changes are

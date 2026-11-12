@@ -155,6 +155,9 @@ func Check(getenv func(string) string) []error {
 	if _, _, err := net.SplitHostPort(cfg.addr); err != nil {
 		errs = append(errs, fmt.Errorf("GRANTD_ADDR: %v", err))
 	}
+	if _, err := part.AuditSigningFromEnv(getenv); err != nil {
+		errs = append(errs, err)
+	}
 	if cfg.dataDir != "" {
 		if fi, err := os.Stat(cfg.dataDir); err == nil && !fi.IsDir() {
 			errs = append(errs, fmt.Errorf("GRANTD_DATA_DIR: %s exists and is not a directory", cfg.dataDir))
@@ -363,10 +366,16 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 		return fmt.Errorf("opening store: %w", err)
 	}
 	defer st.Close()
+	// A malformed signing key stops the subcommand even without a log of
+	// its own to sign: the key is the platform's.
+	signing, err := part.AuditSigningFromEnv(getenv)
+	if err != nil {
+		return err
+	}
 	var auditLog *audit.Log
 	if cfg.auditLog != "" {
-		if auditLog, err = audit.OpenWith(cfg.auditLog, audit.Options{Schemas: audit.Default(),
-			Rotation: cfg.auditRot, SameRotation: true}); err != nil {
+		if auditLog, err = audit.OpenWith(cfg.auditLog, signing.Options(audit.Options{Schemas: audit.Default(),
+			Rotation: cfg.auditRot, SameRotation: true}, log)); err != nil {
 			return fmt.Errorf("GRANTD_AUDIT_LOG: %w", err)
 		}
 		defer auditLog.Close()

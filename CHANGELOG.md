@@ -162,6 +162,23 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **Signed audit checkpoints** ([#81](https://github.com/laiwf94/authz/issues/81)).
+  With `AUTHZ_AUDIT_SIGNING_KEY` (or `AUTHZ_AUDIT_SIGNING_KEY_FILE`), an
+  Ed25519 key in signed-note form that the new `authz audit keygen -out FILE
+  NAME` makes, `authz serve`, `authz gateway` and `authz mcp` sign the audit
+  log's state (record count and last record's hash) as a checkpoint in the
+  signed note format of the Go checksum database and transparency logs. One
+  is written to `FILE.checkpoint` on open, every
+  `AUTHZ_AUDIT_CHECKPOINT_INTERVAL` (default 1m, at least 1s) when records
+  were added, after each rotation and on shutdown, and covers only records
+  already on disk. `GET /admin/audit/checkpoint` on the mcp admin API serves
+  the newest one. `authz audit verify -key PUBLIC_KEY [-checkpoint NOTE]
+  FILE` checks that the log still holds every record a checkpoint covers,
+  unchanged, so records cut from the end are caught with only the public
+  key; a subcommand with the key refuses to open a log shorter than its own
+  checkpoint. A malformed key or interval stops every subcommand at start
+  and is reported by `authz check`. Log lines that carry a note signing key
+  now fail the secret scan.
 - **Audit rotation in the binary and `authz audit verify`**
   ([#81](https://github.com/laiwf94/authz/issues/81)). `audit_rotate_bytes`
   and `audit_rotate_age` in the serve, gateway and mcp sections, and

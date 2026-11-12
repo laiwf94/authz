@@ -470,10 +470,16 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 		return err
 	}
 	defer sessions.Close()
+	// A malformed signing key stops the subcommand even without a log of
+	// its own to sign: the key is the platform's.
+	signing, err := part.AuditSigningFromEnv(getenv)
+	if err != nil {
+		return err
+	}
 	var auditLog *audit.Log
 	if st.auditLog != "" {
-		if auditLog, err = audit.OpenWith(st.auditLog, audit.Options{Now: now, Schemas: audit.Default(),
-			Rotation: st.auditRot, SameRotation: true}); err != nil {
+		if auditLog, err = audit.OpenWith(st.auditLog, signing.Options(audit.Options{Now: now, Schemas: audit.Default(),
+			Rotation: st.auditRot, SameRotation: true}, log)); err != nil {
 			return fmt.Errorf("WICKET_AUDIT_LOG: %w", err)
 		}
 		defer auditLog.Close()

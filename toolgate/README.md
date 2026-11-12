@@ -265,6 +265,7 @@ Administrators (`TOOLGATE_ADMIN_ADDR`, default `127.0.0.1:8081`), `Authorization
 | `POST /admin/tools/{name}/approve` | `{"hash":"<pending_hash>"}` trusts the reviewed definition (compare-and-set). |
 | `GET /admin/policy`, `POST /admin/policy/reload` | Policy hash; reload now (also on SIGHUP and when the file changes). |
 | `GET /admin/audit/head` | Record count and head hash, to anchor the log elsewhere. |
+| `GET /admin/audit/checkpoint` | The newest signed checkpoint of the audit log (`text/plain`, a signed note), with `AUTHZ_AUDIT_SIGNING_KEY` set; 404 without it. Check a log against it with `authz audit verify -key`. |
 | `GET /metrics` | Prometheus metrics. |
 
 JSON-RPC errors from the gateway use codes outside the range JSON-RPC and MCP

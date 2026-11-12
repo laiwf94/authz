@@ -608,6 +608,83 @@ in `authn.login_succeeded` and the user in the later records tie them.
 `TestSharedWriterProcesses` has four processes append 600 records at once
 and requires one chain with each record once.
 
+### Checkpoints
+
+The chain proves that no record was changed, removed or reordered, except
+at its end: the last record has no successor, so a log cut short looks like
+one that ended there, and `-head` only helps if the head was kept somewhere
+the operator cannot write. A checkpoint is that head, signed. With
+`Options.Signer` the log signs its state as a note in the signed note
+format of `golang.org/x/mod/sumdb/note`, the format of the Go checksum
+database and of transparency logs' checkpoints:
+
+```text
+audit.example.com
+1205
+3q2+7w...base64 of the SHA-256 of record 1205...=
+time 2026-11-16T09:30:00.123456789Z
+
+— audit.example.com AbCd...base64 of key hash and Ed25519 signature...
+```
+
+The first line is the origin, the signing key's name; then the number of
+records, the hash of the last one (32 zero bytes for an empty log) where a
+tree's root hash would stand, and the time it was signed. Keys are text in
+the same format (`PRIVATE+KEY+<name>+<hash>+<key>` and
+`<name>+<hash>+<key>`, the hash being the first four bytes of
+SHA-256(name, newline, 0x01, public key)), so a key from any tool of that
+format signs the log and its checkpoints open with any note verifier. The
+implementation is about 200 lines on `crypto/ed25519`, without the
+dependency, and `TestNoteVectors` signs and opens the test vectors
+published with x/mod byte for byte; every cut and changed byte of a key is
+refused, as x/mod's own tests require.
+
+The newest checkpoint is kept beside the log as `audit.jsonl.checkpoint`,
+replaced by writing a temporary file, fsyncing it, renaming it over and
+fsyncing the directory. One is signed when the log opens, by a timer
+(`Options.CheckpointEvery`, one minute by default) when records were added
+since the last, after every rotation (covering the segment start record,
+which seals the old segment), on `Close`, and on demand by
+`Log.Checkpoint`, which `GET /admin/audit/checkpoint` calls. It signs only
+what is on disk: the active segment is fsynced first, so a crash cannot
+leave a checkpoint that outlives a record it covers. A checkpoint that
+cannot be written after a rotation or on the timer is reported through
+`Options.OnCheckpointError` (the subcommands log a warning) and fails no
+append; the next one tries again. Writers sharing one file sign under the
+file's lock after reading each other's records, so the file only moves
+forward and a writer that finds the current state already signed keeps
+that note rather than signing again. They should share one key; with two,
+each replaces the other's signature with its own.
+
+On open, a log whose stored checkpoint, by its own key, covers more records
+than the log holds, or the same number ending in another hash, is refused:
+its newest records were removed or its last one changed. A checkpoint by
+another key, or one that does not open, is replaced by the next one; that
+is what an attacker who deletes it achieves too, which is why checkpoints
+are worth keeping elsewhere. `authz audit verify -key PUBLIC_KEY
+[-checkpoint NOTE] FILE` opens the checkpoint (by default the stored one),
+verifies the chain across its segments, then checks that record N exists
+and has the signed hash (`ChainResult.Covers`, which reads only the segment
+holding record N), printing a second `OK` line or naming what went wrong.
+
+The binary reads the key from `AUTHZ_AUDIT_SIGNING_KEY` or a file named by
+`AUTHZ_AUDIT_SIGNING_KEY_FILE`, and the interval from
+`AUTHZ_AUDIT_CHECKPOINT_INTERVAL` (at least `1s`). They are the platform's
+variables, not a section's, so serve, gateway and mcp sharing a file sign
+it with one key. A malformed key or interval, both spellings, or an
+interval without a key stops each subcommand at start, with or without an
+audit log of its own, and `authz check -serve` and `-config` report it; no
+error repeats the key, and the secret scan now treats a note signing key in
+a log line as a private key. `authz audit keygen -out FILE NAME` writes a
+new signing key to FILE (mode 0600, never over an existing file) and prints
+the public key. `TestMainAuditCheckpoints` (cmd/authz) runs the three
+subcommands rotating one signed file: the checkpoint the mcp admin API
+serves covers the records of all three, the timers sign what follows, the
+auditor's earlier checkpoint verifies against the grown log after later
+rotations, records cut from the end are caught by `verify -key` and stop
+serve from starting, and a public key passed as the signing key stops every
+subcommand and `authz check`.
+
 ## One configuration file (internal/platform/config)
 
 Every subcommand reads its part of one versioned JSON document. A section

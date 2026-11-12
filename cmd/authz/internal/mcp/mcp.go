@@ -393,7 +393,7 @@ func runIn(ctx context.Context, h part.Host, getenv func(string) string, logOut 
 	}
 	level := new(slog.LevelVar)
 	level.Set(cfg.logLevel)
-	return serveGateway(ctx, h, cfg, gc, auth, level, logOut, ready, nil)
+	return serveGateway(ctx, h, getenv, cfg, gc, auth, level, logOut, ready, nil)
 }
 
 // fileMode is a gateway started from the platform configuration file.
@@ -414,13 +414,13 @@ func serveFile(ctx context.Context, path string, getenv func(string) string, log
 		return err
 	}
 	level.Set(cfg.logLevel)
-	return serveGateway(ctx, part.Host{}, cfg, s.agents, s.auth, level, logOut, ready, &fileMode{path: path, watcher: w, rl: rl, getenv: getenv})
+	return serveGateway(ctx, part.Host{}, getenv, cfg, s.agents, s.auth, level, logOut, ready, &fileMode{path: path, watcher: w, rl: rl, getenv: getenv})
 }
 
 // serveGateway runs the gateway until ctx ends. fm is nil when it was
 // configured from the environment. h is the process the gateway is a part
 // of; its zero value is a process of its own.
-func serveGateway(ctx context.Context, h part.Host, cfg config, gc *gateway.Config, auth *identity.Authenticator, level *slog.LevelVar,
+func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, cfg config, gc *gateway.Config, auth *identity.Authenticator, level *slog.LevelVar,
 	logOut io.Writer, ready func(gw, admin string), fm *fileMode) error {
 	// The platform handler: request lines carry the correlation ID their
 	// audit records do, and its tap feeds the secret scan. No subcommand
@@ -438,8 +438,12 @@ func serveGateway(ctx context.Context, h part.Host, cfg config, gc *gateway.Conf
 	}
 	// Every record must match its agents schema before it is written, and
 	// the file may be the one authz serve and authz gateway write too.
-	auditLog, err := audit.OpenWith(cfg.auditPath, audit.Options{Schemas: audit.Default(),
-		Rotation: cfg.auditRot, SameRotation: true})
+	signing, err := part.AuditSigningFromEnv(getenv)
+	if err != nil {
+		return err
+	}
+	auditLog, err := audit.OpenWith(cfg.auditPath, signing.Options(audit.Options{Schemas: audit.Default(),
+		Rotation: cfg.auditRot, SameRotation: true}, log))
 	if err != nil {
 		return err
 	}

@@ -2,22 +2,29 @@
 // hash-chained audit log, which authz serve, authz gateway and authz mcp
 // write, together or apart.
 //
-//	authz audit verify [-head HASH] FILE   check the chain across every segment of FILE
+//	authz audit verify [-head HASH] [-key KEY [-checkpoint NOTE]] FILE
+//	                                        check the chain across every segment of FILE,
+//	                                        and against a signed checkpoint
+//	authz audit keygen -out FILE NAME      make a checkpoint signing key
 package auditcmd
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/laiwf94/authz/internal/platform/audit"
 )
 
 // Summary is the one-line description shown in "authz help".
-const Summary = "verify the platform's audit log across its segments"
+const Summary = "verify the platform's audit log across its segments and against signed checkpoints"
 
 // Exit codes of "authz audit".
 const (
@@ -26,23 +33,40 @@ const (
 	Usage  = 2 // bad flags or arguments, or a file that cannot be read
 )
 
-const usage = `usage: authz audit verify [-head HASH] FILE
+const usage = `usage: authz audit verify [-head HASH] [-key KEY [-checkpoint NOTE]] FILE
+       authz audit keygen -out FILE NAME
 
-Checks the hash chain of the audit log that authz serve (GRANTD_AUDIT_LOG),
-authz gateway (WICKET_AUDIT_LOG) and authz mcp (AUTHZ_MCP_AUDIT_LOG) write,
-and every record against its event type's schema. A log rotated by
-audit_rotate_bytes or audit_rotate_age is checked across all its segments
-(FILE.<first record number> beside FILE) as one chain, and a segment that
-was removed, renamed, reordered or replaced is named.
+verify checks the hash chain of the audit log that authz serve
+(GRANTD_AUDIT_LOG), authz gateway (WICKET_AUDIT_LOG) and authz mcp
+(AUTHZ_MCP_AUDIT_LOG) write, and every record against its event type's
+schema. A log rotated by audit_rotate_bytes or audit_rotate_age is checked
+across all its segments (FILE.<first record number> beside FILE) as one
+chain, and a segment that was removed, renamed, reordered or replaced is
+named.
 
-  -head HASH  the hash the last record must have, from GET /admin/audit/head
-              or an earlier run; without it, records cut from the end of the
-              newest segment cannot be told from a log that ended there
+  -head HASH        the hash the last record must have, from GET
+                    /admin/audit/head or an earlier run; without it or
+                    -key, records cut from the end of the newest segment
+                    cannot be told from a log that ended there
+  -key KEY          the public key of AUTHZ_AUDIT_SIGNING_KEY, as keygen
+                    printed it (NAME+HASH+KEY), or a file holding it: the
+                    checkpoint must be signed by it, and the log must still
+                    hold every record the checkpoint covers, unchanged
+  -checkpoint NOTE  the signed checkpoint to check against, such as one
+                    saved from GET /admin/audit/checkpoint; default
+                    FILE.checkpoint, the newest one the log wrote
 
-Prints "OK FILE: N records[ in K segments], head HASH", or "FAIL FILE: reason".
-Exit codes: 0 verified, 1 failed, 2 usage error or unreadable file.
-"authz mcp audit verify" is the MCP gateway's check, kept as toolgate had it:
-the chain only, not the schemas.
+Prints "OK FILE: N records[ in K segments], head HASH", then with -key
+"OK FILE: checkpoint signed by NAME at TIME covers M of the N records",
+or "FAIL FILE: reason". Exit codes: 0 verified, 1 failed, 2 usage error or
+unreadable file. "authz mcp audit verify" is the MCP gateway's check, kept
+as toolgate had it: the chain only, not the schemas.
+
+keygen makes an Ed25519 key named NAME for signing checkpoints. The
+signing key goes to FILE, created with mode 0600 (an existing file is not
+replaced): point AUTHZ_AUDIT_SIGNING_KEY_FILE at it, or put its contents in
+AUTHZ_AUDIT_SIGNING_KEY. The public key, the one auditors verify with, is
+printed.
 `
 
 // Run is the "authz audit" subcommand.
@@ -59,6 +83,8 @@ func Run(_ context.Context, args []string, _ func(string) string, _ io.Reader, s
 	switch fs.Arg(0) {
 	case "verify":
 		return verifyCmd(fs.Args()[1:], stdout, stderr)
+	case "keygen":
+		return keygenCmd(fs.Args()[1:], stdout, stderr)
 	case "":
 		fmt.Fprint(stderr, usage)
 	default:
@@ -72,6 +98,8 @@ func verifyCmd(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage) }
 	head := fs.String("head", "", "expected hash of the last record")
+	key := fs.String("key", "", "public key the checkpoint is signed with, or a file holding it")
+	cpPath := fs.String("checkpoint", "", "signed checkpoint (default FILE.checkpoint)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return OK
@@ -79,10 +107,103 @@ func verifyCmd(args []string, stdout, stderr io.Writer) int {
 		return Usage
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: authz audit verify [-head HASH] FILE")
+		fmt.Fprintln(stderr, "usage: authz audit verify [-head HASH] [-key KEY [-checkpoint NOTE]] FILE")
 		return Usage
 	}
-	return Verify("authz", fs.Arg(0), *head, audit.Default(), stdout, stderr)
+	path := fs.Arg(0)
+	if *key == "" {
+		if *cpPath != "" {
+			fmt.Fprintln(stderr, "authz audit verify: -checkpoint needs -key, the public key it is signed with")
+			return Usage
+		}
+		return Verify("authz", path, *head, audit.Default(), stdout, stderr)
+	}
+	v, err := readVerifier(*key)
+	if err != nil {
+		fmt.Fprintln(stderr, "authz audit verify: -key:", err)
+		return Usage
+	}
+	if *cpPath == "" {
+		*cpPath = audit.CheckpointPath(path)
+	}
+	msg, err := os.ReadFile(*cpPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "authz audit verify:", err)
+		return Usage
+	}
+	cp, err := audit.OpenCheckpoint(msg, v)
+	if err != nil {
+		fmt.Fprintf(stdout, "FAIL %s: checkpoint %s: %s\n", path, *cpPath, strings.TrimPrefix(err.Error(), "audit: "))
+		return Failed
+	}
+	var out bytes.Buffer
+	cr, code := check("authz", path, *head, audit.Default(), &out, stderr)
+	if code == OK {
+		if err := cr.Covers(cp); err != nil {
+			fmt.Fprintf(stdout, "FAIL %s: checkpoint %s: %v\n", path, *cpPath, err)
+			return Failed
+		}
+		fmt.Fprintf(&out, "OK %s: checkpoint signed by %s at %s covers %d of the %d records\n",
+			path, cp.Origin, cp.Time.Format(time.RFC3339), cp.Size, cr.Records)
+	}
+	stdout.Write(out.Bytes())
+	return code
+}
+
+// readVerifier reads a public key given as text or as a file holding it.
+func readVerifier(s string) (*audit.Verifier, error) {
+	v, err := audit.ParseVerifier(s)
+	if err == nil || strings.HasPrefix(s, "PRIVATE+KEY+") {
+		return v, err
+	}
+	b, ferr := os.ReadFile(s)
+	if ferr != nil {
+		if strings.Contains(s, "+") {
+			return nil, err
+		}
+		return nil, ferr
+	}
+	return audit.ParseVerifier(string(b))
+}
+
+func keygenCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("audit keygen", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprint(fs.Output(), usage) }
+	out := fs.String("out", "", "file for the signing key")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return OK
+		}
+		return Usage
+	}
+	if fs.NArg() != 1 || *out == "" {
+		fmt.Fprintln(stderr, "usage: authz audit keygen -out FILE NAME")
+		return Usage
+	}
+	skey, vkey, err := audit.GenerateKey(rand.Reader, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(stderr, "authz audit keygen:", strings.TrimPrefix(err.Error(), "audit: "))
+		return Usage
+	}
+	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		fmt.Fprintln(stderr, "authz audit keygen:", err)
+		return Usage
+	}
+	if _, err := f.WriteString(skey + "\n"); err != nil {
+		f.Close()
+		os.Remove(*out)
+		fmt.Fprintln(stderr, "authz audit keygen:", err)
+		return Usage
+	}
+	if err := errors.Join(f.Sync(), f.Close()); err != nil {
+		os.Remove(*out)
+		fmt.Fprintln(stderr, "authz audit keygen:", err)
+		return Usage
+	}
+	fmt.Fprintln(stdout, vkey)
+	return OK
 }
 
 // Verify checks the log at path, across its segments when it was rotated,
@@ -91,16 +212,22 @@ func verifyCmd(args []string, stdout, stderr io.Writer) int {
 // payload too. head, if set, is the hash the last record must have. prog
 // prefixes errors that are not about the chain.
 func Verify(prog, path, head string, s *audit.Schemas, stdout, stderr io.Writer) int {
+	_, code := check(prog, path, head, s, stdout, stderr)
+	return code
+}
+
+// check is Verify, also returning the verified log.
+func check(prog, path, head string, s *audit.Schemas, stdout, stderr io.Writer) (audit.ChainResult, int) {
 	segs, _ := audit.Segments(path)
-	var records uint64
-	var last, in string
+	var cr audit.ChainResult
+	var in string
 	if len(segs) == 0 {
 		// A log that was never rotated is the one file, checked and
 		// printed as toolgate did.
 		f, err := os.Open(path)
 		if err != nil {
 			fmt.Fprintln(stderr, prog+":", err)
-			return Usage
+			return cr, Usage
 		}
 		var res audit.Result
 		if s != nil {
@@ -111,7 +238,7 @@ func Verify(prog, path, head string, s *audit.Schemas, stdout, stderr io.Writer)
 		f.Close()
 		if err != nil {
 			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, err)
-			return Failed
+			return cr, Failed
 		}
 		if res.Records > 0 && res.Start != audit.Genesis {
 			// A later segment without the ones before it.
@@ -120,25 +247,24 @@ func Verify(prog, path, head string, s *audit.Schemas, stdout, stderr io.Writer)
 				err = errors.New("the segments before this one are missing")
 			}
 			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, chainError(path, err))
-			return Failed
+			return cr, Failed
 		}
-		records, last = res.Records, res.Head
+		cr = audit.ChainResult{Segments: []audit.SegmentResult{{Path: path, Result: res}}, Records: res.Records, Head: res.Head}
 	} else {
-		res, err := audit.VerifyChain(path, s)
-		if err != nil {
+		var err error
+		if cr, err = audit.VerifyChain(path, s); err != nil {
 			fmt.Fprintf(stdout, "FAIL %s: %v\n", path, chainError(path, err))
-			return Failed
+			return cr, Failed
 		}
-		records, last = res.Records, res.Head
-		in = fmt.Sprintf(" in %d segments", len(res.Segments))
+		in = fmt.Sprintf(" in %d segments", len(cr.Segments))
 	}
-	if head != "" && head != last {
+	if head != "" && head != cr.Head {
 		fmt.Fprintf(stdout, "FAIL %s: chain is intact but ends at %s, not the expected head %s (records were removed from the end or the last one was changed)\n",
-			path, last, head)
-		return Failed
+			path, cr.Head, head)
+		return cr, Failed
 	}
-	fmt.Fprintf(stdout, "OK %s: %d records%s, head %s\n", path, records, in, last)
-	return OK
+	fmt.Fprintf(stdout, "OK %s: %d records%s, head %s\n", path, cr.Records, in, cr.Head)
+	return cr, OK
 }
 
 // chainError drops the segment's path from an error about the file the

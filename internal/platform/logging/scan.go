@@ -232,7 +232,10 @@ func indexFold(b []byte, w string) int {
 var patterns = []pattern{
 	{rule: RuleJWT, re: regexp.MustCompile(`eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*)?`),
 		hint: contains("eyJ"), check: checkJWT},
-	{rule: RulePrivateKey, re: regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----`), hint: contains("PRIVATE KEY")},
+	// A PEM private key, or a signed-note signing key (the audit log's
+	// AUTHZ_AUDIT_SIGNING_KEY): PRIVATE+KEY+<name>+<hash>+<key>.
+	{rule: RulePrivateKey, re: regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----|PRIVATE\+KEY\+[^\s+]+\+[0-9a-f]{8}\+[A-Za-z0-9+/]{40,}=*`),
+		hint: contains("PRIVATE KEY", "PRIVATE+KEY+")},
 	{rule: RuleJWKPrivate, re: regexp.MustCompile(`"(?:d|p|q|dp|dq|qi|k)"\s*:\s*"([A-Za-z0-9_-]{16,})"`),
 		hint: contains(`"kty"`), check: checkJWK},
 	{rule: RuleAuthHeader, re: regexp.MustCompile(`(?i)\b(bearer|basic)[ \t]+([A-Za-z0-9._~+/-]+=*)`),

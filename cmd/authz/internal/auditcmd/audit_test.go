@@ -58,8 +58,8 @@ func TestUsage(t *testing.T) {
 		{[]string{"-h"}, OK, "usage: authz audit verify"},
 		{[]string{"-x"}, Usage, "flag provided but not defined"},
 		{[]string{"nope"}, Usage, `unknown command "nope"`},
-		{[]string{"verify"}, Usage, "usage: authz audit verify [-head HASH] FILE"},
-		{[]string{"verify", "a", "b"}, Usage, "usage: authz audit verify [-head HASH] FILE"},
+		{[]string{"verify"}, Usage, "usage: authz audit verify [-head HASH] [-key KEY [-checkpoint NOTE]] FILE"},
+		{[]string{"verify", "a", "b"}, Usage, "usage: authz audit verify [-head HASH] [-key KEY [-checkpoint NOTE]] FILE"},
 		{[]string{"verify", "-h"}, OK, "-head HASH"},
 		{[]string{"verify", "-x", "f"}, Usage, "flag provided but not defined"},
 	} {

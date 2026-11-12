@@ -427,7 +427,27 @@ func (l *Log) Rotate() error {
 	if err := l.refresh(); err != nil {
 		return err
 	}
-	return l.rotate(RotateManual)
+	if err := l.rotate(RotateManual); err != nil {
+		return err
+	}
+	return l.rotated()
+}
+
+// rotated signs a checkpoint after a rotation, when the log has a signer.
+// The caller holds l.mu and the new segment's lock. A checkpoint that
+// cannot be written is reported and does not fail the rotation, unless
+// its fsync failed and the log is broken.
+func (l *Log) rotated() error {
+	if l.signer == nil {
+		return nil
+	}
+	if err := l.checkpoint(); err != nil {
+		if l.broken {
+			return err
+		}
+		l.checkpointFailed(err)
+	}
+	return nil
 }
 
 // refresh brings the Log up to the end of the chain other writers left: the

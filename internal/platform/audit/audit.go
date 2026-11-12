@@ -123,6 +123,17 @@ type Log struct {
 
 	syncMu sync.Mutex // serializes fsyncs
 	synced int64      // file size known durable; guarded by syncMu
+
+	// Checkpoints (checkpoint.go); signer is nil without them. cp and
+	// cpNote are the newest checkpoint, guarded by mu.
+	signer    *Signer
+	verifier  *Verifier
+	cp        Checkpoint
+	cpNote    []byte
+	onCPError func(error)
+	cpStop    chan struct{}
+	cpDone    chan struct{}
+	closeOnce sync.Once
 }
 
 // Options configures OpenWith.
@@ -140,6 +151,15 @@ type Options struct {
 	// by a size or age rotation under limits other than Rotation, so the
 	// processes sharing one file rotate it alike (see CheckSameRotation).
 	SameRotation bool
+	// Signer, if set, signs checkpoints of the log (see checkpoint.go):
+	// on open, every CheckpointEvery (DefaultCheckpointEvery if zero)
+	// when records were added, after each rotation and on Close.
+	Signer          *Signer
+	CheckpointEvery time.Duration
+	// OnCheckpointError, if set, is told about checkpoints that could not
+	// be written on the timer or after a rotation; neither fails an
+	// append.
+	OnCheckpointError func(error)
 }
 
 // Open opens or creates the log at path. An existing log is verified first; a
@@ -202,6 +222,27 @@ func OpenWith(path string, o Options) (*Log, error) {
 			f.Close()
 			return nil, err
 		}
+	}
+	if o.Signer != nil {
+		if o.CheckpointEvery < 0 {
+			f.Close()
+			return nil, errors.New("audit: negative checkpoint interval")
+		}
+		l.signer, l.verifier, l.onCPError = o.Signer, o.Signer.Verifier(), o.OnCheckpointError
+		if err := l.checkOpenCheckpoint(); err != nil {
+			f.Close()
+			return nil, err
+		}
+		if err := l.checkpoint(); err != nil {
+			f.Close()
+			return nil, err
+		}
+		every := o.CheckpointEvery
+		if every == 0 {
+			every = DefaultCheckpointEvery
+		}
+		l.cpStop, l.cpDone = make(chan struct{}), make(chan struct{})
+		go l.checkpointLoop(every)
 	}
 	return l, nil
 }
@@ -312,6 +353,9 @@ func (l *Log) write(event string, env Envelope, data any) (int64, error) {
 	}
 	if reason := l.due(); reason != "" {
 		if err := l.rotate(reason); err != nil {
+			return 0, err
+		}
+		if err := l.rotated(); err != nil {
 			return 0, err
 		}
 	}
@@ -458,15 +502,27 @@ func (l *Log) Healthy() bool {
 	return !l.broken
 }
 
-// Close closes the file.
+// Close closes the file. With a signer it first stops the checkpoint
+// timer and signs the final state.
 func (l *Log) Close() error {
+	var cpErr error
+	l.closeOnce.Do(func() {
+		if l.signer == nil {
+			return
+		}
+		close(l.cpStop)
+		<-l.cpDone
+		if _, _, err := l.Checkpoint(); err != nil && !errors.Is(err, ErrBroken) {
+			cpErr = err
+		}
+	})
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, o := range l.retired {
 		o.Close()
 	}
 	l.retired = nil
-	return l.f.Close()
+	return errors.Join(cpErr, l.f.Close())
 }
 
 // Result summarizes a verified log.
