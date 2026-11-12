@@ -90,6 +90,16 @@ link the roadmap issue they come from.
   an HS256 ring from `internal/platform/keys`, and pooled HMAC states make
   issuing and verifying a token about twice as fast (Encode 790 to 330 ns,
   Decode 730 to 310 ns, 9 and 7 allocations down to 4 and 2).
+- **Cookie keys and agent token keys can sit on key rings** ([#76](https://github.com/laiwf94/authz/issues/76)).
+  `seal.FromRing` seals with an A256GCM ring's current key and opens with its
+  next key and its retired keys inside their overlap; `identity.Config.Ring`
+  does the same for HS256 agent tokens. A cookie key or a `kid=` signing key
+  moved from its list onto a ring keeps its id, so values and tokens issued
+  before the move still open and verify. A test rotates the session,
+  upstream, consistency and agent rings every second under load, with a
+  replica reloading the ring file and refusing broken versions of it, and no
+  credential younger than the overlap is ever refused. The subcommands still
+  read their key lists; they move onto rings in a later task.
 - **One configuration file schema** ([#76](https://github.com/laiwf94/authz/issues/76)).
   `internal/platform/config` reads a versioned JSON document
   (`{"version": 1, "serve": {...}, "gateway": {...}, "mcp": {...}}`) with a

@@ -9,6 +9,11 @@
 //     iss, aud, sub, owner, scope, iat, nbf, exp. Keys are named by "kid" so
 //     they can rotate: verify with every configured key, sign with the newest.
 //     Only HS256 is accepted; the header cannot choose a weaker algorithm.
+//     The keys are a configured list (Config.Keys) or an HS256 ring of
+//     internal/platform/keys (Config.Ring): the ring's current key signs,
+//     and its next key and retired keys inside their overlap verify, so a
+//     ring rotating on schedule never refuses a token its old key signed
+//     until the overlap ends.
 //     Tokens are parsed, signed and verified by the platform JOSE library
 //     (internal/platform/jose), which the sign-on gateway uses too.
 package identity
@@ -29,6 +34,7 @@ import (
 
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/platform/jose"
+	"github.com/laiwf94/authz/internal/platform/keys"
 )
 
 // Limits and defaults.
@@ -69,11 +75,14 @@ type Config struct {
 	// Keys maps key ids to HMAC keys. ActiveKey names the one Mint signs with.
 	Keys      map[string][]byte
 	ActiveKey string
-	Issuer    string
-	Audience  string
-	MaxTTL    time.Duration // longest accepted exp - iat; default DefaultMaxTTL
-	Leeway    time.Duration // clock skew allowed; default DefaultLeeway
-	Now       func() time.Time
+	// Ring, instead of Keys and ActiveKey, is an HS256 key ring: its
+	// current key signs, and every key it accepts at Now verifies.
+	Ring     *keys.Ring
+	Issuer   string
+	Audience string
+	MaxTTL   time.Duration // longest accepted exp - iat; default DefaultMaxTTL
+	Leeway   time.Duration // clock skew allowed; default DefaultLeeway
+	Now      func() time.Time
 }
 
 // Authenticator verifies credentials. It is safe for concurrent use.
@@ -126,10 +135,20 @@ func New(cfg Config) (*Authenticator, error) {
 			return nil, fmt.Errorf("identity: key %q must be at least %d bytes", kid, MinKeyBytes)
 		}
 	}
+	if cfg.Ring != nil {
+		if len(cfg.Keys) > 0 || cfg.ActiveKey != "" {
+			return nil, errors.New("identity: configure signing keys or a key ring, not both")
+		}
+		if cfg.Ring.Alg() != keys.HS256 {
+			return nil, fmt.Errorf("identity: key ring holds %s keys, want %s", cfg.Ring.Alg(), keys.HS256)
+		}
+	}
 	if len(cfg.Keys) > 0 {
 		if _, ok := cfg.Keys[cfg.ActiveKey]; !ok {
 			return nil, errors.New("identity: the active key id is not among the keys")
 		}
+	}
+	if len(cfg.Keys) > 0 || cfg.Ring != nil {
 		if cfg.Issuer == "" || cfg.Audience == "" {
 			return nil, errors.New("identity: signed tokens need an issuer and an audience")
 		}
@@ -226,7 +245,7 @@ func (a *Authenticator) verifySigned(token string) (Identity, error) {
 	if h.Alg != jose.HS256 || h.Typ != "" && h.Typ != "JWT" {
 		return Identity{}, unauthenticated("unsupported algorithm %q", h.Alg)
 	}
-	key, ok := a.cfg.Keys[h.Kid]
+	key, ok := a.verifyKey(h.Kid)
 	if !ok {
 		return Identity{}, unauthenticated("unknown key id")
 	}
@@ -267,10 +286,28 @@ func (a *Authenticator) verifySigned(token string) (Identity, error) {
 		KeyID: h.Kid, ExpiresAt: time.Unix(c.ExpiresAt, 0)}, nil
 }
 
-// Mint signs a token for subject with the active key.
+// verifyKey returns the secret of the key kid names, if it verifies now.
+func (a *Authenticator) verifyKey(kid string) ([]byte, bool) {
+	if a.cfg.Ring == nil {
+		key, ok := a.cfg.Keys[kid]
+		return key, ok
+	}
+	k := a.cfg.Ring.Lookup(kid, a.cfg.Now())
+	if k == nil {
+		return nil, false
+	}
+	return k.Secret(), true
+}
+
+// Mint signs a token for subject with the active key, or the ring's
+// current key.
 func (a *Authenticator) Mint(subject, owner string, scopes []string, ttl time.Duration) (string, error) {
-	key, ok := a.cfg.Keys[a.cfg.ActiveKey]
-	if !ok {
+	kid, key := a.cfg.ActiveKey, a.cfg.Keys[a.cfg.ActiveKey]
+	if a.cfg.Ring != nil {
+		k := a.cfg.Ring.Current()
+		kid, key = k.ID(), k.Secret()
+	}
+	if key == nil {
 		return "", errors.New("identity: no signing key configured")
 	}
 	if !policy.ValidAgentID(subject) {
@@ -291,5 +328,5 @@ func (a *Authenticator) Mint(subject, owner string, scopes []string, ttl time.Du
 	c := Claims{Issuer: a.cfg.Issuer, Audience: a.cfg.Audience, Subject: subject, Owner: owner,
 		Scope: strings.Join(scopes, " "), IssuedAt: now, NotBefore: now,
 		ExpiresAt: now + int64(ttl/time.Second), ID: hex.EncodeToString(jti[:])}
-	return jose.SignHMAC(a.cfg.ActiveKey, key, c)
+	return jose.SignHMAC(kid, key, c)
 }
