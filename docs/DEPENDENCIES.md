@@ -6,7 +6,7 @@ it is for, why the standard library is not enough, where it is confined and
 when, if ever, it goes away. A change that adds a requirement without a
 section in this file does not pass review.
 
-The module targets Go 1.27.3 (`go` directive in `go.mod`), the same version
+The module targets Go 1.27.4 (`go` directive in `go.mod`), the same version
 grantd, wicket and toolgate each used before the merge, so the toolchain did
 not move with the tree.
 
