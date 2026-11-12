@@ -44,6 +44,10 @@ type Engine interface {
 	// Expand returns the userset tree of a permission on one object: who
 	// holds it, through which relations and operators.
 	Expand(ctx context.Context, req ExpandRequest) (ExpandResult, error)
+	// LookupSubjects pages through the subjects of a type that hold a
+	// permission on one object, in ID order, a wildcard first with the
+	// IDs it leaves out.
+	LookupSubjects(ctx context.Context, req LookupSubjectsRequest) (LookupSubjectsResult, error)
 	// ReadRelationships pages through the stored relationships matching a
 	// filter, in their text order.
 	ReadRelationships(ctx context.Context, req ReadRequest) (ReadResult, error)
@@ -190,6 +194,31 @@ type ExpandRequest struct {
 type ExpandResult struct {
 	Tree *check.Trace
 	At   Snapshot
+}
+
+// LookupSubjectsRequest asks which subjects of SubjectType (usersets of
+// SubjectRelation, when it is set) hold Permission on
+// ResourceType:ResourceID. Cursor is the last subject ID of the previous
+// page ("" to start, check.Wildcard after a wildcard); Limit is at most
+// check.MaxLookupLimit, and 0 means check.DefaultLookupLimit.
+// check.Engine.LookupSubjects describes the answer.
+type LookupSubjectsRequest struct {
+	ResourceType    string
+	ResourceID      string
+	Permission      string
+	SubjectType     string
+	SubjectRelation string
+	Consistency     Consistency
+	Cursor          string
+	Limit           int
+}
+
+// LookupSubjectsResult is one page of a subject lookup. Cursor continues
+// it, and is "" when the list is complete.
+type LookupSubjectsResult struct {
+	Subjects []check.FoundSubject
+	Cursor   string
+	At       Snapshot
 }
 
 // ReadRequest pages through stored relationships. Limit is at most
@@ -448,6 +477,34 @@ func (e *Local) Expand(ctx context.Context, req ExpandRequest) (ExpandResult, er
 		return ExpandResult{}, err
 	}
 	return ExpandResult{Tree: tree, At: e.at(rev)}, nil
+}
+
+// LookupSubjects implements Engine. Its dispatches count in
+// grantd_check_dispatches_total with the checks'.
+func (e *Local) LookupSubjects(ctx context.Context, req LookupSubjectsRequest) (LookupSubjectsResult, error) {
+	if req.Limit < 0 || req.Limit > check.MaxLookupLimit {
+		return LookupSubjectsResult{}, invalid("limit must be between 0 and %d (0 uses the default of %d)", check.MaxLookupLimit, check.DefaultLookupLimit)
+	}
+	if req.Cursor != "" && req.Cursor != check.Wildcard && !store.ValidID(req.Cursor) {
+		return LookupSubjectsResult{}, invalid("cursor is not valid")
+	}
+	rev, err := e.resolve(req.Consistency)
+	if err != nil {
+		return LookupSubjectsResult{}, err
+	}
+	sc, _ := e.st.Schema()
+	res, stats, err := e.eng.LookupSubjects(ctx, sc, rev, check.LookupSubjectsRequest{ResourceType: req.ResourceType,
+		ResourceID: req.ResourceID, Permission: req.Permission, SubjectType: req.SubjectType,
+		SubjectRelation: req.SubjectRelation, After: req.Cursor, Limit: req.Limit})
+	e.dispatches.Add(uint64(stats.Dispatches))
+	if err != nil {
+		return LookupSubjectsResult{}, err
+	}
+	subjects := res.Subjects
+	if subjects == nil {
+		subjects = []check.FoundSubject{}
+	}
+	return LookupSubjectsResult{Subjects: subjects, Cursor: res.Next, At: e.at(rev)}, nil
 }
 
 // ReadRelationships implements Engine.

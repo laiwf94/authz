@@ -155,6 +155,7 @@ func New(cfg Config) (*Server, error) {
 	s.route("POST /v1/check/bulk", s.checkBulk, true)
 	s.route("POST /v1/lookup/resources", s.lookup, true)
 	s.route("POST /v1/expand", s.expand, true)
+	s.route("POST /v1/lookup/subjects", s.lookupSubjects, true)
 	s.route("POST /v1/watch", s.watch, true)
 	s.route("/", func(http.ResponseWriter, *http.Request) error {
 		return &apiError{http.StatusNotFound, "not_found", "no such endpoint"}
@@ -732,6 +733,53 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"resource_ids": res.ResourceIDs, "cursor": res.Cursor, "looked_up_at": res.At.Token})
+	return nil
+}
+
+// foundSubject is the JSON form of one subject a subject lookup found:
+// "user:alice", "group:eng#member", or "user:*" with the subjects the
+// wildcard leaves out.
+type foundSubject struct {
+	Subject  string   `json:"subject"`
+	Excluded []string `json:"excluded,omitempty"`
+}
+
+// lookupSubjects answers which subjects of a type hold a permission on one
+// object, a page at a time.
+func (s *Server) lookupSubjects(w http.ResponseWriter, r *http.Request) error {
+	var body struct {
+		Resource        string      `json:"resource"`     // type:id
+		Permission      string      `json:"permission"`   // relation or permission
+		SubjectType     string      `json:"subject_type"` // e.g. user, or group with subject_relation member
+		SubjectRelation string      `json:"subject_relation"`
+		Consistency     Consistency `json:"consistency"`
+		Cursor          string      `json:"cursor"`
+		Limit           int         `json:"limit"`
+	}
+	if err := decode(r, &body); err != nil {
+		return err
+	}
+	rt, rid, ok := strings.Cut(body.Resource, ":")
+	if !ok || rt == "" || rid == "" {
+		return badRequest("resource %q must be type:id", body.Resource)
+	}
+	ctx, cancel := s.withTimeout(r)
+	defer cancel()
+	res, err := s.eng.LookupSubjects(ctx, engine.LookupSubjectsRequest{ResourceType: rt, ResourceID: rid, Permission: body.Permission,
+		SubjectType: body.SubjectType, SubjectRelation: body.SubjectRelation, Consistency: body.Consistency,
+		Cursor: body.Cursor, Limit: body.Limit})
+	if err != nil {
+		return err
+	}
+	out := make([]foundSubject, len(res.Subjects))
+	for i, f := range res.Subjects {
+		subj := store.Subject{Type: body.SubjectType, ID: f.ID, Relation: body.SubjectRelation}
+		out[i].Subject = subj.String()
+		for _, id := range f.Excluded {
+			out[i].Excluded = append(out[i].Excluded, store.Subject{Type: body.SubjectType, ID: id}.String())
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subjects": out, "cursor": res.Cursor, "looked_up_at": res.At.Token})
 	return nil
 }
 

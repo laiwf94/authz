@@ -453,6 +453,64 @@ func TestExpand(t *testing.T) {
 	}
 }
 
+func TestLookupSubjects(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.schema(t)
+	w := f.write(t, "touch doc:d#viewer@group:eng#member", "touch doc:d#owner@user:olga", "touch doc:d#banned@user:alice",
+		"touch group:eng#member@user:alice", "touch group:eng#member@user:bob", "touch group:eng#member@user:carl")
+	before := f.m.Counter("grantd_check_dispatches_total", "", "").Value()
+	res, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
+		SubjectType: "user", Consistency: Consistency{Mode: AtLeastAsFresh, Token: w.Token}, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(res.Subjects) != "[{bob []} {carl []}]" || res.Cursor != "carl" || res.At.Revision < w.Revision {
+		t.Fatalf("first page = %+v", res)
+	}
+	if after := f.m.Counter("grantd_check_dispatches_total", "", "").Value(); after-before != 5 {
+		t.Fatalf("lookup counted %d dispatches, want 5 (view, viewer, group:eng#member, owner, banned)", after-before)
+	}
+	// The next page at the same snapshot, then a wildcard written later.
+	next, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
+		SubjectType: "user", Consistency: Consistency{Mode: AtExactSnapshot, Token: res.At.Token}, Cursor: res.Cursor, Limit: 2})
+	if err != nil || fmt.Sprint(next.Subjects) != "[{olga []}]" || next.Cursor != "" || next.At != res.At {
+		t.Fatalf("second page = %+v %v", next, err)
+	}
+	pub := f.write(t, "touch doc:d#viewer@user:*")
+	all, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
+		SubjectType: "user", Consistency: Consistency{Mode: AtLeastAsFresh, Token: pub.Token}})
+	if err != nil || fmt.Sprint(all.Subjects) != "[{* [alice]}]" || all.Cursor != "" {
+		t.Fatalf("wildcard = %+v %v", all, err)
+	}
+	if after, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
+		SubjectType: "user", Cursor: check.Wildcard, Consistency: Consistency{Mode: FullyConsistent}}); err != nil || after.Subjects == nil || len(after.Subjects) != 0 {
+		t.Fatalf("after the wildcard = %#v %v", after, err)
+	}
+	groups, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
+		SubjectType: "group", SubjectRelation: "member", Consistency: Consistency{Mode: FullyConsistent}})
+	if err != nil || fmt.Sprint(groups.Subjects) != "[{eng []}]" {
+		t.Fatalf("usersets = %+v %v", groups, err)
+	}
+	for _, req := range []LookupSubjectsRequest{
+		{ResourceType: "doc", ResourceID: "d", Permission: "view", SubjectType: "user", Limit: -1},
+		{ResourceType: "doc", ResourceID: "d", Permission: "view", SubjectType: "user", Limit: check.MaxLookupLimit + 1},
+		{ResourceType: "doc", ResourceID: "d", Permission: "view", SubjectType: "user", Cursor: "a b"},
+		{ResourceType: "doc", ResourceID: "d", Permission: "view", SubjectType: "user", Consistency: Consistency{Mode: "sometime"}},
+	} {
+		if _, err := f.e.LookupSubjects(context.Background(), req); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("LookupSubjects(%+v) = %v", req, err)
+		}
+	}
+	if _, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view", SubjectType: "ghost"}); !errors.Is(err, check.ErrUnknownType) {
+		t.Errorf("lookup of an unknown subject type = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.e.LookupSubjects(ctx, LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view", SubjectType: "user"}); !errors.Is(err, context.Canceled) {
+		t.Errorf("canceled lookup = %v", err)
+	}
+}
+
 func TestReadRelationships(t *testing.T) {
 	f := newFixture(t, Options{})
 	f.schema(t)

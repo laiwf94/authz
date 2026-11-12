@@ -188,6 +188,35 @@ wildcards, bans and intersections. A tree has at most `max_nodes` nodes
 (1,000 by default, 100,000 at most); expansion stops there and reports
 `truncated`, so its work is bounded like a check's.
 
+## Lookup subjects
+
+`lookup/subjects` answers the same question as a flat list: which users
+(or which `group#member` usersets) hold `doc:plan#view`? It walks the
+rewrite rules from the resource down to the stored relationships and
+combines the answers back up as sets of subject IDs. A set is either a
+list of IDs or the wildcard minus a list of IDs, so union, intersection and
+exclusion stay exact over `user:*`: `(viewer + parent->view) - banned` on a
+public folder is `user:*` excluding the banned users, and the response
+carries it as one subject with `excluded`. A userset target includes the
+userset itself, as `check` does (`group:eng#member` holds
+`group:eng#member`), and a wildcard never matches usersets.
+
+Cycles in the data are solved as a least fixpoint rather than cut: a node
+met again on its own path reads the previous round's value for it (empty
+in the first round), and the walk repeats until those values stop
+changing. Nodes that never touched a cycle keep their value between
+rounds, so an acyclic graph is walked once and a group cycle typically
+takes two or three rounds. Every node evaluation in every round counts
+against the 100,000 dispatch limit, so a cycle through the subtracted side
+of an exclusion, which has no least fixpoint, ends in a work-limit error
+instead of looping. The tests hold the result to the fixpoint reference on
+random graphs with group and folder cycles, wildcards, bans and
+intersections, for users and for `group#member` usersets.
+
+Pages are in ID order, the wildcard first, at most 1,000 per call; the
+cursor is the last ID returned. Each page walks the graph again at the
+same snapshot, so pages read at one token agree with each other.
+
 ## API security
 
 - API keys are compared as SHA-256 digests with `subtle.ConstantTimeCompare`
