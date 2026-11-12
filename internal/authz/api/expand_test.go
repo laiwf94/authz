@@ -2,7 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
+
+	"github.com/laiwf94/authz/internal/authz/check"
 )
 
 // POST /v1/expand answers who holds a permission as a userset tree, at the
@@ -69,5 +72,37 @@ func TestExpandWithoutSchema(t *testing.T) {
 	h := newHarness(t, 0)
 	if code, out := h.call("POST", "/v1/expand", map[string]any{"resource": "doc:a", "permission": "view"}); code != 424 || errCode(out) != "no_schema" {
 		t.Fatalf("expand before a schema: %d %v", code, out)
+	}
+}
+
+// A recursive expand that walks past the depth limit is refused as
+// resource_exhausted, as a check is; a chain that fits, a single level of the
+// deep chain and a tree cut by max_nodes are answers, and max_nodes may be
+// exactly check.MaxTraceNodes but not more.
+func TestExpandLimits(t *testing.T) {
+	h := newHarness(t, 0)
+	h.setup()
+	var updates []map[string]string
+	for i := 0; i < check.DefaultMaxDepth+5; i++ {
+		updates = append(updates, map[string]string{"op": "touch",
+			"relationship": fmt.Sprintf("group:g%d#member@group:g%d#member", i, i+1)})
+	}
+	h.ok("POST", "/v1/relationships/write", map[string]any{"updates": updates})
+
+	code, out := h.call("POST", "/v1/expand", map[string]any{"resource": "group:g0", "permission": "member", "recursive": true})
+	if code != 422 || errCode(out) != "resource_exhausted" {
+		t.Fatalf("deep recursive expand: %d %v", code, out)
+	}
+	if out := h.ok("POST", "/v1/expand", map[string]any{"resource": "group:g10", "permission": "member", "recursive": true}); out["truncated"] != false {
+		t.Fatalf("chain within the depth limit: %v", out)
+	}
+	if out := h.ok("POST", "/v1/expand", map[string]any{"resource": "group:g0", "permission": "member"}); out["nodes"] != float64(2) {
+		t.Fatalf("one level of the deep chain: %v", out)
+	}
+
+	h.ok("POST", "/v1/expand", map[string]any{"resource": "group:g10", "permission": "member", "max_nodes": check.MaxTraceNodes})
+	code, out = h.call("POST", "/v1/expand", map[string]any{"resource": "group:g10", "permission": "member", "max_nodes": check.MaxTraceNodes + 1})
+	if code != 400 || errCode(out) != "invalid_argument" {
+		t.Fatalf("max_nodes above the maximum: %d %v", code, out)
 	}
 }
