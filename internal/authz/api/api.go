@@ -151,6 +151,7 @@ func New(cfg Config) (*Server, error) {
 	s.route("PUT /v1/schema", s.putSchema, true)
 	s.route("POST /v1/relationships/write", s.write, true)
 	s.route("POST /v1/relationships/read", s.read, true)
+	s.route("POST /v1/relationships/delete", s.deleteByFilter, true)
 	s.route("POST /v1/check", s.check, true)
 	s.route("POST /v1/check/bulk", s.checkBulk, true)
 	s.route("POST /v1/lookup/resources", s.lookup, true)
@@ -572,6 +573,31 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request) error {
 	}
 	s.record(r.Context(), audit.Envelope{Action: "relationships.write"}, p)
 	writeJSON(w, http.StatusOK, map[string]string{"written_at": at})
+	return nil
+}
+
+// deleteByFilter deletes the relationships matching a filter in one
+// revision. The audit record is a relationships write whose delete count is
+// what the call removed.
+func (s *Server) deleteByFilter(w http.ResponseWriter, r *http.Request) error {
+	var body struct {
+		Filter        store.Filter         `json:"filter"`
+		Limit         int                  `json:"limit"`
+		AllowPartial  bool                 `json:"allow_partial"`
+		Preconditions []store.Precondition `json:"preconditions"`
+	}
+	if err := decode(r, &body); err != nil {
+		return err
+	}
+	res, err := s.eng.DeleteRelationships(r.Context(), engine.DeleteRequest{Filter: body.Filter, Limit: body.Limit,
+		AllowPartial: body.AllowPartial, Preconditions: body.Preconditions})
+	if err != nil {
+		return err
+	}
+	at := res.At.Token
+	s.record(r.Context(), audit.Envelope{Action: "relationships.delete"},
+		audit.RelationshipsWritten{Revision: at, Delete: res.Deleted, Preconditions: len(body.Preconditions)})
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": res.Deleted, "partial": res.Partial, "deleted_at": at})
 	return nil
 }
 

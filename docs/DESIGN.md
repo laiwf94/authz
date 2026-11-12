@@ -75,6 +75,28 @@ offset** of the resulting log, truncates a copy there and recovers it. The
 recovered state must equal the state after some prefix of the acknowledged
 writes.
 
+### Delete by filter
+
+`POST /v1/relationships/delete` removes every relationship matching a
+filter (the same filter `relationships/read` takes) as one revision, after
+its preconditions hold. It deletes at most `limit` relationships (1,000 when
+unset and never more), the bound on one write's updates, so one revision never holds
+more changes than a watch page. When more match, the call deletes nothing
+and fails with `failed_precondition` (412), unless `allow_partial` is set:
+then it deletes the first `limit` in text order and answers `partial:
+true`, and the caller repeats it until `partial` is false. The store finds
+them by keeping only the `limit + 1` smallest matches in a heap, ordered
+without building their text forms, so memory stays bounded by the limit
+however many relationships match.
+
+The log holds the delete as one ordinary write record listing every
+relationship removed, not the filter. Replay then needs no matching rule of
+its own, a follower applies exactly what the leader acknowledged, and a
+crash keeps all of the deletes or none of them; the tests cut the log at
+every byte of such a record to check that. A page of 1,000 from a type with
+100,000 relationships takes about 15 to 20 ms, almost all of it the scan of
+the type that `relationships/read` also does (`BenchmarkDeleteByFilter`).
+
 The cost is write throughput: fsync per write under the store lock caps it at
 the disk's sync rate. Group commit (batching concurrent writes into one fsync)
 is the next step if write volume needs it. Checks are unaffected, because reads

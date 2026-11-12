@@ -54,6 +54,9 @@ type Engine interface {
 	// Write applies relationship updates atomically once every
 	// precondition holds.
 	Write(ctx context.Context, req WriteRequest) (WriteResult, error)
+	// DeleteRelationships deletes the relationships matching a filter in
+	// one revision, up to a limit, once every precondition holds.
+	DeleteRelationships(ctx context.Context, req DeleteRequest) (DeleteResult, error)
 }
 
 // Mode names how fresh a read's snapshot must be.
@@ -248,6 +251,27 @@ type WriteRequest struct {
 // At.Token and AtLeastAsFresh, see it.
 type WriteResult struct {
 	At Snapshot
+}
+
+// DeleteRequest deletes the relationships matching Filter in one revision:
+// at most Limit of them (0 means store.MaxDeletesPerFilter). When more
+// match, the delete fails with store.ErrPrecondition unless AllowPartial is
+// set, in which case it deletes the first Limit in text order and reports
+// Partial.
+type DeleteRequest struct {
+	Filter        store.Filter
+	Limit         int
+	AllowPartial  bool
+	Preconditions []store.Precondition
+}
+
+// DeleteResult reports a delete by filter: how many relationships it
+// removed, whether more still match, and where it is visible. A delete that
+// matched nothing reports the head it saw.
+type DeleteResult struct {
+	Deleted int
+	Partial bool
+	At      Snapshot
 }
 
 // Options configures a Local engine.
@@ -543,4 +567,18 @@ func (e *Local) Write(ctx context.Context, req WriteRequest) (WriteResult, error
 		return WriteResult{}, err
 	}
 	return WriteResult{At: e.at(rev)}, nil
+}
+
+// DeleteRelationships implements Engine. Like Write, a ctx that has already
+// ended stops it before it starts.
+func (e *Local) DeleteRelationships(ctx context.Context, req DeleteRequest) (DeleteResult, error) {
+	if err := ctx.Err(); err != nil {
+		return DeleteResult{}, err
+	}
+	res, err := e.st.DeleteByFilter(store.DeleteRequest{Filter: req.Filter, Limit: req.Limit,
+		AllowPartial: req.AllowPartial, Preconditions: req.Preconditions})
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	return DeleteResult{Deleted: res.Deleted, Partial: res.Partial, At: e.at(res.Revision)}, nil
 }

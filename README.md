@@ -262,6 +262,7 @@ The authorization API (`authz serve`). All `/v1` endpoints take `Authorization: 
 | `GET /v1/schema` | Current schema in canonical form. |
 | `POST /v1/relationships/write` | Atomic batch of `touch` / `create` / `delete`, with optional preconditions. Returns `written_at`. |
 | `POST /v1/relationships/read` | Filtered, paged read at a snapshot. |
+| `POST /v1/relationships/delete` | Delete everything matching a filter in one revision, up to `limit` (at most 1,000), with optional preconditions; `allow_partial` deletes the first `limit` in text order and answers `partial: true`. Returns `deleted` and `deleted_at`. |
 | `POST /v1/check` | One permission check. |
 | `POST /v1/check/bulk` | Up to 100 checks at one snapshot. |
 | `POST /v1/lookup/resources` | Objects of a type the subject can access, paged. |

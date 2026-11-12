@@ -1,6 +1,7 @@
 package store
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
@@ -331,15 +332,8 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 			return 0, fmt.Errorf("update %d: %w", i, err)
 		}
 	}
-	for i, p := range preconds {
-		found := s.anyLocked(s.head, p.Filter)
-		if found != p.MustExist {
-			want := "exist"
-			if !p.MustExist {
-				want = "not exist"
-			}
-			return 0, fmt.Errorf("%w: precondition %d: matching relationships must %s", ErrPrecondition, i, want)
-		}
+	if err := s.preconditionsLocked(preconds); err != nil {
+		return 0, err
 	}
 
 	var changes []Change
@@ -377,6 +371,245 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 	s.applyChanges(rev, changes)
 	s.commitLocked(rev)
 	return rev, nil
+}
+
+// MaxDeletesPerFilter is the most relationships one DeleteByFilter call
+// removes, the same bound as the updates of one Write, so one revision never
+// carries more changes than a watch page can hold.
+const MaxDeletesPerFilter = MaxUpdatesPerWrite
+
+// DeleteRequest deletes the relationships matching Filter in one revision.
+type DeleteRequest struct {
+	Filter Filter
+	// Limit is the most relationships to delete; 0 means
+	// MaxDeletesPerFilter.
+	Limit int
+	// AllowPartial deletes the first Limit matches, in text order, when more
+	// match. Without it a call that matches more than Limit deletes nothing
+	// and fails with ErrPrecondition.
+	AllowPartial bool
+	// Preconditions must hold at the moment of the delete, as in Write.
+	Preconditions []Precondition
+}
+
+// DeleteResult reports a delete by filter.
+type DeleteResult struct {
+	// Revision is the revision at which the delete is visible, or the
+	// current head when nothing matched.
+	Revision Revision
+	// Deleted is how many relationships the delete removed.
+	Deleted int
+	// Partial is true when more relationships still match the filter: the
+	// call hit Limit with AllowPartial set. Calling again deletes the next
+	// ones.
+	Partial bool
+}
+
+// DeleteByFilter removes the relationships alive at the head that match
+// req.Filter, after checking req.Preconditions, as one revision. The log
+// holds it as one write record listing every deleted relationship, so
+// recovery and watch see the same changes the caller was told about, and a
+// crash keeps all of them or none.
+func (s *Store) DeleteByFilter(req DeleteRequest) (DeleteResult, error) {
+	if err := req.Filter.Validate(); err != nil {
+		return DeleteResult{}, fmt.Errorf("filter: %w", err)
+	}
+	if req.Limit < 0 || req.Limit > MaxDeletesPerFilter {
+		return DeleteResult{}, invalid("limit must be between 0 and %d", MaxDeletesPerFilter)
+	}
+	limit := req.Limit
+	if limit == 0 {
+		limit = MaxDeletesPerFilter
+	}
+	if len(req.Preconditions) > MaxPreconditions {
+		return DeleteResult{}, invalid("a delete can have at most %d preconditions", MaxPreconditions)
+	}
+	for i, p := range req.Preconditions {
+		if err := p.Filter.Validate(); err != nil {
+			return DeleteResult{}, fmt.Errorf("precondition %d: %w", i, err)
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.schema == nil {
+		return DeleteResult{}, ErrNoSchema
+	}
+	if err := s.preconditionsLocked(req.Preconditions); err != nil {
+		return DeleteResult{}, err
+	}
+	// Keep the limit+1 smallest matches in text order: enough to delete the
+	// first limit and to know whether more remain, in memory bounded by the
+	// limit however many relationships match.
+	h := &relHeap{}
+	s.scanLocked(s.head, req.Filter, func(r Relationship) bool {
+		if h.Len() <= limit {
+			heap.Push(h, r)
+		} else if compareText(r, (*h)[0]) < 0 {
+			(*h)[0] = r
+			heap.Fix(h, 0)
+		}
+		return true
+	})
+	if h.Len() == 0 {
+		return DeleteResult{Revision: s.head}, nil
+	}
+	partial := h.Len() > limit
+	if partial && !req.AllowPartial {
+		return DeleteResult{}, fmt.Errorf("%w: more than %d relationships match the filter; set allow_partial to delete them in pages", ErrPrecondition, limit)
+	}
+	sort.Slice(*h, func(i, j int) bool { return compareText((*h)[i], (*h)[j]) < 0 })
+	matched := *h
+	if partial {
+		matched = matched[:limit]
+	}
+	rev := s.head + 1
+	changes := make([]Change, len(matched))
+	for i, r := range matched {
+		changes[i] = Change{Revision: rev, Op: OpDelete, Relationship: r}
+	}
+	if s.wal != nil {
+		if err := s.wal.append(walRecord{Rev: rev, Type: recWrite, Changes: changes}); err != nil {
+			return DeleteResult{}, err
+		}
+	}
+	s.applyChanges(rev, changes)
+	s.commitLocked(rev)
+	return DeleteResult{Revision: rev, Deleted: len(changes), Partial: partial}, nil
+}
+
+// relHeap is a max-heap in text order: its root is the last relationship
+// kept.
+type relHeap []Relationship
+
+func (h relHeap) Len() int           { return len(h) }
+func (h relHeap) Less(i, j int) bool { return compareText(h[i], h[j]) > 0 }
+func (h relHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *relHeap) Push(x any)        { *h = append(*h, x.(Relationship)) }
+func (h *relHeap) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
+}
+
+// compareText orders relationships as strings.Compare orders their String
+// forms, without building them. String joins the same eleven parts for
+// every relationship, so the first part that differs decides, unless one is
+// a prefix of the other: then the shorter one's next byte decides against
+// the longer one's, and only a tie there needs a byte-by-byte walk.
+func compareText(a, b Relationship) int {
+	for i := range numParts {
+		x, y := textPart(a, i), textPart(b, i)
+		if x == y {
+			continue
+		}
+		n := min(len(x), len(y))
+		if x[:n] != y[:n] {
+			return strings.Compare(x, y)
+		}
+		if len(x) < len(y) {
+			if c := cmpByte(nextByte(a, i), int(y[n])); c != 0 {
+				return c
+			}
+		} else if c := cmpByte(int(x[n]), nextByte(b, i)); c != 0 {
+			return c
+		}
+		return compareBytes(a, b, i)
+	}
+	return 0
+}
+
+const numParts = 11
+
+// textPart is the i-th of the parts String joins.
+func textPart(r Relationship, i int) string {
+	switch i {
+	case 0:
+		return r.ResourceType
+	case 1, 7:
+		return ":"
+	case 2:
+		return r.ResourceID
+	case 3:
+		return "#"
+	case 4:
+		return r.Relation
+	case 5:
+		return "@"
+	case 6:
+		return r.SubjectType
+	case 8:
+		return r.SubjectID
+	case 9:
+		if r.SubjectRelation != "" {
+			return "#"
+		}
+		return ""
+	default:
+		return r.SubjectRelation
+	}
+}
+
+// nextByte is the byte of r's text form after part i, or -1 at the end.
+func nextByte(r Relationship, i int) int {
+	for i++; i < numParts; i++ {
+		if p := textPart(r, i); p != "" {
+			return int(p[0])
+		}
+	}
+	return -1
+}
+
+func cmpByte(x, y int) int {
+	switch {
+	case x < y:
+		return -1
+	case x > y:
+		return 1
+	}
+	return 0
+}
+
+// compareBytes compares a and b byte by byte from part i on, where both
+// text forms agree up to the start of part i.
+func compareBytes(a, b Relationship, i int) int {
+	j, ai, bi := i, 0, 0
+	for {
+		for i < numParts && ai == len(textPart(a, i)) {
+			i, ai = i+1, 0
+		}
+		for j < numParts && bi == len(textPart(b, j)) {
+			j, bi = j+1, 0
+		}
+		switch {
+		case i == numParts && j == numParts:
+			return 0
+		case i == numParts:
+			return -1
+		case j == numParts:
+			return 1
+		}
+		if c := cmpByte(int(textPart(a, i)[ai]), int(textPart(b, j)[bi])); c != 0 {
+			return c
+		}
+		ai, bi = ai+1, bi+1
+	}
+}
+
+// preconditionsLocked checks preconditions at the head.
+func (s *Store) preconditionsLocked(preconds []Precondition) error {
+	for i, p := range preconds {
+		found := s.anyLocked(s.head, p.Filter)
+		if found != p.MustExist {
+			want := "exist"
+			if !p.MustExist {
+				want = "not exist"
+			}
+			return fmt.Errorf("%w: precondition %d: matching relationships must %s", ErrPrecondition, i, want)
+		}
+	}
+	return nil
 }
 
 func (s *Store) applyChanges(rev Revision, changes []Change) {
