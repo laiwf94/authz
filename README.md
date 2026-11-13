@@ -259,7 +259,7 @@ The authorization API (`authz serve`). All `/v1` endpoints take `Authorization: 
 
 | Endpoint | Purpose |
 |---|---|
-| `PUT /v1/schema` | Replace the schema. Refused if existing data would break it. |
+| `PUT /v1/schema` | Replace the schema. Refused if existing data would break it. With `?dry_run=true` it writes nothing and lists the `changes`, the `affected_permissions` and the `breaking_relationships` (up to `limit`, at most 1,000, with `breaking_count` for all). |
 | `GET /v1/schema` | Current schema in canonical form. |
 | `POST /v1/relationships/write` | Atomic batch of `touch` / `create` / `delete`, with optional preconditions. Returns `written_at`. |
 | `POST /v1/relationships/read` | Filtered, paged read at a snapshot. |

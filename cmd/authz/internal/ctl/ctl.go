@@ -43,7 +43,9 @@ const usage = `usage: authz ctl [-addr url] [-timeout 10s] <command> [arguments]
 
 Commands:
   schema read                          print the current schema
-  schema write <file|->                replace the schema; prints the write's token
+  schema write [-dry-run] <file|->     replace the schema; prints the write's token.
+                                       -dry-run writes nothing and prints the changes,
+                                       affected permissions and broken relationships
   rel touch|create|delete <rel...|->   one atomic write of relationships (or one per
                                        line on stdin); prints the write's token
   rel read <filter>                    print matching relationships, one per line
@@ -247,12 +249,22 @@ func (c *client) schema(ctx context.Context, args []string) int {
 		}
 		return OK
 	case "write":
-		if len(args) != 2 {
-			return c.usageErr("usage: schema write <file|->")
+		var dry bool
+		fs, code, ok := c.subFlags("schema write", "schema write [-dry-run] <file|->", args[1:], func(fs *flag.FlagSet) {
+			fs.BoolVar(&dry, "dry-run", false, "write nothing; print the changes, the affected permissions and the relationships the schema would break")
+		})
+		if !ok {
+			return code
 		}
-		src, err := c.readInput(args[1])
+		if fs.NArg() != 1 {
+			return c.usageErr("usage: schema write [-dry-run] <file|->")
+		}
+		src, err := c.readInput(fs.Arg(0))
 		if err != nil {
 			return c.fail(err)
+		}
+		if dry {
+			return c.schemaDryRun(ctx, string(src))
 		}
 		var out struct {
 			WrittenAt string `json:"written_at"`
@@ -265,6 +277,49 @@ func (c *client) schema(ctx context.Context, args []string) int {
 	default:
 		return c.usageErr("unknown schema command %q; use read or write", args[0])
 	}
+}
+
+// schemaDryRun prints what writing src would do: one line per change, the
+// affected permissions, and each relationship it would break. It exits
+// Failed when the write would be refused.
+func (c *client) schemaDryRun(ctx context.Context, src string) int {
+	var out struct {
+		Changes []struct {
+			Kind, Object, Name, Detail string
+		} `json:"changes"`
+		Affected []string `json:"affected_permissions"`
+		Breaking []struct {
+			Relationship, Reason string
+		} `json:"breaking_relationships"`
+		Count int `json:"breaking_count"`
+	}
+	if err := c.call(ctx, http.MethodPut, "/v1/schema?dry_run=true", map[string]string{"schema": src}, &out); err != nil {
+		return c.fail(err)
+	}
+	for _, ch := range out.Changes {
+		fmt.Fprintf(c.stdout, "%s %s %s", ch.Kind, ch.Object, ch.Name)
+		if ch.Detail != "" {
+			fmt.Fprintf(c.stdout, ": %s", ch.Detail)
+		}
+		fmt.Fprintln(c.stdout)
+	}
+	if len(out.Changes) == 0 {
+		fmt.Fprintln(c.stdout, "no changes")
+	}
+	if len(out.Affected) > 0 {
+		fmt.Fprintf(c.stdout, "affected permissions: %s\n", strings.Join(out.Affected, " "))
+	}
+	for _, b := range out.Breaking {
+		fmt.Fprintf(c.stdout, "breaks %s: %s\n", b.Relationship, b.Reason)
+	}
+	if out.Count > len(out.Breaking) {
+		fmt.Fprintf(c.stdout, "breaks %d more\n", out.Count-len(out.Breaking))
+	}
+	if out.Count > 0 {
+		fmt.Fprintf(c.stderr, "authz ctl: the schema would break %d stored relationships; nothing was written\n", out.Count)
+		return Failed
+	}
+	return OK
 }
 
 // consistency holds the read flags shared by rel read, check and lookup.

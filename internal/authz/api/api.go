@@ -23,6 +23,7 @@ import (
 
 	"github.com/laiwf94/authz/internal/authz/check"
 	"github.com/laiwf94/authz/internal/authz/engine"
+	"github.com/laiwf94/authz/internal/authz/schema"
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
 	"github.com/laiwf94/authz/internal/platform/audit"
@@ -521,6 +522,21 @@ func (s *Server) putSchema(w http.ResponseWriter, r *http.Request) error {
 	if strings.TrimSpace(body.Schema) == "" {
 		return badRequest("schema is empty")
 	}
+	q := r.URL.Query()
+	dry := false
+	if v := q.Get("dry_run"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return badRequest("dry_run must be true or false, not %q", v)
+		}
+		dry = b
+	}
+	if q.Has("limit") && !dry {
+		return badRequest("limit only applies with dry_run=true")
+	}
+	if dry {
+		return s.dryRunSchema(w, body.Schema, q.Get("limit"))
+	}
 	rev, err := s.st.WriteSchema(body.Schema)
 	if err != nil {
 		return err
@@ -531,6 +547,45 @@ func (s *Server) putSchema(w http.ResponseWriter, r *http.Request) error {
 	s.record(r.Context(), audit.Envelope{Action: "schema.write"},
 		audit.SchemaWritten{Revision: at, SHA256: hex.EncodeToString(sum[:]), Bytes: len(src)})
 	writeJSON(w, http.StatusOK, map[string]string{"schema": src, "written_at": at})
+	return nil
+}
+
+// dryRunSchema answers PUT /v1/schema?dry_run=true: how the schema differs
+// from the one in force, which permissions can answer differently, and
+// which stored relationships it would break (the write is refused exactly
+// when there are any). Nothing is written or audited.
+func (s *Server) dryRunSchema(w http.ResponseWriter, src, limitParam string) error {
+	limit := 0
+	if limitParam != "" {
+		n, err := strconv.Atoi(limitParam)
+		if err != nil || n < 1 || n > store.MaxBrokenListed {
+			return badRequest("limit must be between 1 and %d", store.MaxBrokenListed)
+		}
+		limit = n
+	}
+	res, err := s.st.DryRunSchema(src, limit)
+	if err != nil {
+		return err
+	}
+	type broken struct {
+		Relationship string `json:"relationship"`
+		Reason       string `json:"reason"`
+	}
+	list := make([]broken, len(res.Broken))
+	for i, b := range res.Broken {
+		list[i] = broken{b.Relationship.String(), b.Reason}
+	}
+	diff := schema.Compare(res.Previous, res.Schema)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"dry_run":                true,
+		"valid":                  res.BrokenCount == 0,
+		"schema":                 res.Source,
+		"changes":                diff.Changes,
+		"affected_permissions":   diff.Affected,
+		"breaking_relationships": list,
+		"breaking_count":         res.BrokenCount,
+		"checked_at":             s.tokens.Encode(res.Revision),
+	})
 	return nil
 }
 

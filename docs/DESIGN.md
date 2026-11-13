@@ -102,6 +102,42 @@ the disk's sync rate. Group commit (batching concurrent writes into one fsync)
 is the next step if write volume needs it. Checks are unaffected, because reads
 take a shared lock.
 
+### Schema changes and dry runs
+
+`PUT /v1/schema` refuses a schema that any stored relationship would no
+longer fit: a type it drops, a relation that became a permission or went
+away, or a subject type a relation stops allowing. Data and schema never
+disagree, so checks never have to decide what a stray relationship means.
+
+`PUT /v1/schema?dry_run=true` takes the same body and writes nothing (and
+records no audit entry). It answers three questions at the snapshot it
+names in `checked_at`:
+
+- `changes`: every definition, relation and permission added, removed or
+  changed, with `before -> after` for allowed subjects (in sorted order,
+  since their order means nothing) and for permission expressions.
+- `affected_permissions`: permissions in both schemas whose answer can
+  differ. The walk starts at what changed and follows, backwards, every
+  way a permission reads another name: a reference on the same object,
+  both sides of an arrow (the tupleset and the computed name on every type
+  it allows), and a relation that allows a userset such as
+  `group#member`. A removed name needs no start, since whatever used it
+  must have been rewritten to pass validation. The list errs on the side
+  of including: a relation that only gains a subject type counts though
+  no data uses it yet. A test runs the engine under both schemas on random
+  data and fails if a permission left off the list answers any check
+  differently.
+- `breaking_relationships`: the stored relationships the write would be
+  refused over, in text order with the reason for each, and
+  `breaking_count` for all of them. The list stops at `limit` (default and
+  most 1,000); the count does not. `valid` is true exactly when the count
+  is zero, and the same scan as the write decides it, so a dry run that
+  says valid is a write that succeeds against the same data.
+
+`authz ctl schema write -dry-run <file>` prints the same report and exits
+1 when the schema would break anything, which makes it a CI step for
+schema changes.
+
 ## Consistency tokens
 
 Every write and read returns a token naming its revision. A token is

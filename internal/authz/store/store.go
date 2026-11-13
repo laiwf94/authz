@@ -240,6 +240,60 @@ func (s *Store) WriteSchema(src string) (Revision, error) {
 	return rev, nil
 }
 
+// MaxBrokenListed is the most broken relationships a schema dry run lists;
+// it counts all of them.
+const MaxBrokenListed = 1000
+
+// Broken is a stored relationship a new schema would not allow.
+type Broken struct {
+	Relationship Relationship
+	Reason       string // why the new schema refuses it
+}
+
+// SchemaDryRun is what WriteSchema would find, without writing anything.
+type SchemaDryRun struct {
+	Schema   *schema.Schema // the parsed new schema
+	Source   string         // its canonical form
+	Previous *schema.Schema // the schema in force, nil before one is written
+	Revision Revision       // the snapshot the relationships were checked at
+	// Broken holds the first limit broken relationships in text order and
+	// BrokenCount how many there are in all. WriteSchema refuses the schema
+	// exactly when BrokenCount is not zero.
+	Broken      []Broken
+	BrokenCount int
+}
+
+// DryRunSchema checks src as WriteSchema would and reports every stored
+// relationship it would break, listing at most limit of them (at most
+// MaxBrokenListed; zero means that many). It changes nothing.
+func (s *Store) DryRunSchema(src string, limit int) (SchemaDryRun, error) {
+	if limit < 0 || limit > MaxBrokenListed {
+		return SchemaDryRun{}, invalid("limit must be between 1 and %d", MaxBrokenListed)
+	}
+	if limit == 0 {
+		limit = MaxBrokenListed
+	}
+	sc, err := schema.Parse(src)
+	if err != nil {
+		return SchemaDryRun{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	out := SchemaDryRun{Schema: sc, Source: sc.String(), Broken: []Broken{}}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out.Previous, out.Revision = s.schema, s.head
+	for _, r := range s.aliveLocked() {
+		err := checkAgainst(sc, r)
+		if err == nil {
+			continue
+		}
+		out.BrokenCount++
+		if len(out.Broken) < limit {
+			out.Broken = append(out.Broken, Broken{Relationship: r, Reason: strings.TrimPrefix(err.Error(), ErrInvalid.Error()+": ")})
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) applySchema(rev Revision, sc *schema.Schema, src string) {
 	s.schema, s.schemaSrc = sc, src
 	s.head = rev

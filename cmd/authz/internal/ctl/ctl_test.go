@@ -280,3 +280,41 @@ func TestAddrFlagWinsOverEnv(t *testing.T) {
 		t.Fatalf("DefaultAddr = %q; grantd listened on :8080", DefaultAddr)
 	}
 }
+
+func TestSchemaWriteDryRun(t *testing.T) {
+	hs, _ := newServer(t)
+	// Before a schema exists every definition is new and nothing breaks.
+	got := must(t, ctl(t, hs.URL, docsSchema, "schema", "write", "-dry-run", "-"), OK)
+	if got != "added definition user\nadded definition group\nadded definition doc" {
+		t.Fatalf("first dry run:\n%s", got)
+	}
+	if r := ctl(t, hs.URL, "", "schema", "read"); r.code != Failed {
+		t.Fatalf("the dry run wrote the schema: %+v", r)
+	}
+	must(t, ctl(t, hs.URL, docsSchema, "schema", "write", "-"), OK)
+	if got := must(t, ctl(t, hs.URL, docsSchema, "schema", "write", "-dry-run", "-"), OK); got != "no changes" {
+		t.Fatalf("same schema: %q", got)
+	}
+	must(t, ctl(t, hs.URL, "", "rel", "touch", "doc:plan#viewer@group:eng#member", "doc:plan#viewer@user:bob"), OK)
+
+	narrower := strings.Replace(docsSchema, "relation viewer: user | group#member", "relation viewer: user", 1)
+	r := ctl(t, hs.URL, narrower, "schema", "write", "-dry-run", "-")
+	want := "changed relation doc#viewer: group#member | user -> user\n" +
+		"affected permissions: doc#view\n" +
+		"breaks doc:plan#viewer@group:eng#member: doc#viewer does not allow group#member (allowed: user)\n"
+	if r.code != Failed || r.out != want || !strings.Contains(r.errout, "would break 1 stored relationships; nothing was written") {
+		t.Fatalf("narrower: %+v", r)
+	}
+	if got := must(t, ctl(t, hs.URL, "", "schema", "read"), OK); !strings.Contains(got, "relation viewer: user | group#member") {
+		t.Fatalf("the dry run wrote the schema:\n%s", got)
+	}
+	if r := ctl(t, hs.URL, "definition doc {", "schema", "write", "-dry-run", "-"); r.code != Failed || !strings.Contains(r.errout, "invalid_argument") {
+		t.Fatalf("bad schema: %+v", r)
+	}
+	if r := ctl(t, hs.URL, "", "schema", "write", "-dry-run"); r.code != Usage || !strings.Contains(r.errout, "usage: schema write [-dry-run]") {
+		t.Fatalf("no file: %+v", r)
+	}
+	if r := ctl(t, hs.URL, "", "schema", "write", "-nope", "-"); r.code != Usage {
+		t.Fatalf("bad flag: %+v", r)
+	}
+}
