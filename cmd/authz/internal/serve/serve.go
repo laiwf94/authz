@@ -336,19 +336,19 @@ func tokenSpec(p keys.Policy) keys.Spec {
 
 // ringTokens puts consistency tokens on the consistency ring of the
 // process's ring file, which rotates until ctx ends, and logs its
-// rotations.
-func ringTokens(ctx context.Context, h part.Host, cfg config, log *slog.Logger) (*token.Issuer, error) {
+// rotations. The channel is closed once those rotations have stopped.
+func ringTokens(ctx context.Context, h part.Host, cfg config, log *slog.Logger) (*token.Issuer, <-chan struct{}, error) {
 	kf, err := h.KeyFile(cfg.keysFile)
 	if err != nil {
-		return nil, fmt.Errorf("keys file: %w", err)
+		return nil, nil, fmt.Errorf("keys file: %w", err)
 	}
 	rings, err := kf.Ensure(tokenSpec(cfg.tokenPolicy))
 	if err != nil {
-		return nil, fmt.Errorf("keys file: %w", err)
+		return nil, nil, fmt.Errorf("keys file: %w", err)
 	}
 	tokens, err := token.FromRing(rings[0], nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	remove := kf.OnChange(func(changed []string, err error) {
 		if err != nil {
@@ -359,10 +359,10 @@ func ringTokens(ctx context.Context, h part.Host, cfg config, log *slog.Logger) 
 		}
 	})
 	context.AfterFunc(ctx, remove)
-	kf.Start(ctx)
+	stopped := kf.Start(ctx)
 	log.Info("consistency tokens on a key ring", "keys_file", cfg.keysFile,
 		"rotate_every", cfg.tokenPolicy.RotateEvery.String(), "overlap", cfg.tokenPolicy.Overlap.String())
-	return tokens, nil
+	return tokens, stopped, nil
 }
 
 // ConfigEnv names the platform configuration file when -config is not
@@ -422,9 +422,15 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 	}
 	var tokens *token.Issuer
 	if cfg.keysFile != "" {
-		if tokens, err = ringTokens(ctx, h, cfg, log); err != nil {
+		// The rotations stop, and the file is last written, before serve
+		// returns.
+		kctx, stopKeys := context.WithCancel(ctx)
+		var stopped <-chan struct{}
+		if tokens, stopped, err = ringTokens(kctx, h, cfg, log); err != nil {
+			stopKeys()
 			return err
 		}
+		defer func() { stopKeys(); <-stopped }()
 	} else {
 		if cfg.tokenKey == nil {
 			log.Warn("GRANTD_TOKEN_KEY not set; using a random key, so consistency tokens end with this process")

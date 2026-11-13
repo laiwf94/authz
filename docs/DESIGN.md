@@ -427,6 +427,46 @@ now exits 2, as every subcommand does.
   `/wicket`, the gateway image's entrypoint and `authz gateway`, and compares
   the responses.
 
+### Key rings in the gateway
+
+Without a keys file the gateway keeps wicket's two key lists.
+`WICKET_SIGNING_KEYS` becomes a configured ES256 ring
+(`keys.Configured`): the first key signs, every key is published, nothing
+rotates on its own, and the JWKS is byte for byte what wicket served (the
+golden transcripts check it). `WICKET_COOKIE_KEYS` stays seal's key list,
+which seals and opens exactly as a configured ring of the same keys does,
+so `cookie_keys` can still be swapped in place on reload.
+
+`WICKET_KEYS_FILE` (`keys_file`) moves both onto the process's key ring
+file, the same `keys.File` `authz serve` keeps its consistency ring in:
+
+- Cookies are sealed from the A256GCM `session` ring through
+  `seal.FromRing` (`WICKET_COOKIE_ROTATE_EVERY`, default 24h;
+  `WICKET_COOKIE_OVERLAP`, default 48h, longer than the default absolute
+  session lifetime, and a warning when it is shorter than the configured
+  one).
+- Upstream tokens are signed from the ES256 `upstream` ring
+  (`WICKET_SIGNING_ROTATE_EVERY` and `WICKET_SIGNING_OVERLAP`, both 24h by
+  default). `/.well-known/jwks.json` publishes its current key, its next key
+  a whole period before it signs, and its retired keys until their overlap
+  ends. The server rebuilds the signer and the set on every ring change
+  (`File.OnChange` calls `Server.RefreshKeys`), and also on the first token
+  after a rotation it has not heard of yet, so a token is never signed by a
+  key the published set lacks. A rotation period under the JWKS cache
+  lifetime (5 minutes) is warned about.
+- A ring the file lacks is created from `cookie_keys` or `signing_keys`
+  when they are set (`keys.Spec.Seed`): the first key stays current and the
+  others are retired for the overlap, so the first start with a keys file
+  signs nobody out and leaves upstreams with the keys they cached. Once the
+  file holds the ring, the lists are ignored and a warning says they can be
+  removed.
+- Under `authz run`, serve and the gateway naming one file share it: one set
+  of rings, rotated and saved once.
+
+The rings rotate on their own, so `keys_file` and the rotation settings
+apply on restart, and with a keys file a change to `cookie_keys` is logged
+as applying on restart too.
+
 ## Agent gateway (agents)
 
 The agent side, `authz mcp`, is the toolgate command moved into the one

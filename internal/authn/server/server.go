@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -27,6 +28,7 @@ import (
 	"github.com/laiwf94/authz/internal/authn/session"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/jose"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 	"github.com/laiwf94/authz/internal/platform/seal"
@@ -48,10 +50,15 @@ const (
 type Options struct {
 	// Load returns the current configuration; it is called at start and on
 	// every reload.
-	Load       func() (*config.Config, error)
-	Sessions   *session.Store
-	Keys       *seal.Keyring
-	Signers    []*jose.Signer // [0] signs upstream tokens; all are published
+	Load     func() (*config.Config, error)
+	Sessions *session.Store
+	Keys     *seal.Keyring
+	Signers  []*jose.Signer // [0] signs upstream tokens; all are published
+	// Upstream, in place of Signers, is an ES256 key ring: its current key
+	// signs upstream tokens and the JWKS publishes the keys it verifies
+	// with (current, next and the retired keys inside their overlap). Call
+	// RefreshKeys after the ring rotates or prunes.
+	Upstream   *keys.Ring
 	Logger     *slog.Logger
 	Metrics    *metrics.Registry
 	AdminToken string // empty: the admin API must only be reachable on loopback
@@ -78,8 +85,7 @@ type Server struct {
 	opts     Options
 	sessions *session.Store
 	keys     *seal.Keyring
-	signers  []*jose.Signer
-	jwks     []byte
+	upstream atomic.Pointer[upstreamKeys]
 	log      *slog.Logger
 	m        *metrics.Registry
 	now      func() time.Time
@@ -98,12 +104,19 @@ type Server struct {
 type cachedToken struct {
 	value   string
 	refresh time.Time
+	signer  *jose.Signer // a token from a key that no longer signs is not reused
 }
 
 // New builds the server and loads the configuration once.
 func New(opts Options) (*Server, error) {
-	if opts.Load == nil || opts.Sessions == nil || opts.Keys == nil || len(opts.Signers) == 0 {
+	if opts.Load == nil || opts.Sessions == nil || opts.Keys == nil || (len(opts.Signers) == 0 && opts.Upstream == nil) {
 		return nil, errors.New("server: Load, Sessions, Keys and Signers are required")
+	}
+	if len(opts.Signers) > 0 && opts.Upstream != nil {
+		return nil, errors.New("server: set Signers or Upstream, not both")
+	}
+	if opts.Upstream != nil && opts.Upstream.Alg() != keys.ES256 {
+		return nil, fmt.Errorf("server: the upstream key ring holds %s keys, want ES256", opts.Upstream.Alg())
 	}
 	if opts.AdminToken != "" && len(opts.AdminToken) < minAdminTokenSize {
 		return nil, fmt.Errorf("server: the admin token must be at least %d characters", minAdminTokenSize)
@@ -120,18 +133,25 @@ func New(opts Options) (*Server, error) {
 	if opts.LoginRate <= 0 {
 		opts.LoginRate = DefaultLoginRate
 	}
-	s := &Server{opts: opts, sessions: opts.Sessions, keys: opts.Keys, signers: opts.Signers, log: opts.Logger,
+	s := &Server{opts: opts, sessions: opts.Sessions, keys: opts.Keys, log: opts.Logger,
 		m: opts.Metrics, now: opts.Now, replay: saml.NewReplayCache(0, opts.Now), used: saml.NewReplayCache(0, opts.Now),
 		limiter: newRateLimiter(opts.LoginRate, opts.Now), tokens: map[string]cachedToken{}}
 	s.auditLog.Store(opts.Audit)
 	if opts.AdminToken != "" {
 		s.admin = sha256.Sum256([]byte(opts.AdminToken))
 	}
-	keys := make([]map[string]string, len(opts.Signers))
-	for i, sg := range opts.Signers {
-		keys[i] = jose.PublicJWK(sg.Public(), sg.KeyID())
+	if opts.Upstream != nil {
+		if err := s.RefreshKeys(); err != nil {
+			return nil, err
+		}
+	} else {
+		pub := make([]map[string]string, len(opts.Signers))
+		for i, sg := range opts.Signers {
+			pub[i] = jose.PublicJWK(sg.Public(), sg.KeyID())
+		}
+		jwks, _ := json.Marshal(map[string]any{"keys": pub})
+		s.upstream.Store(&upstreamKeys{signer: opts.Signers[0], jwks: jwks})
 	}
-	s.jwks, _ = json.Marshal(map[string]any{"keys": keys})
 
 	if err := s.Reload(context.Background()); err != nil {
 		return nil, err
@@ -379,10 +399,55 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	w.Write(s.jwks)
+	w.Write(s.upstreamKeys().jwks)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", metrics.ContentType)
 	_ = s.m.Write(w)
+}
+
+// upstreamKeys is the key that signs upstream tokens and the JWK Set
+// published at /.well-known/jwks.json, swapped together.
+type upstreamKeys struct {
+	key    *keys.Key // the ring's current key it was built from; nil with Signers
+	signer *jose.Signer
+	jwks   []byte
+}
+
+// RefreshKeys rebuilds the upstream signer and the published JWKS from the
+// Upstream ring, for a ring that rotated or pruned. Without a ring it does
+// nothing. Tokens already issued keep verifying for as long as the ring
+// keeps their key.
+func (s *Server) RefreshKeys() error {
+	r := s.opts.Upstream
+	if r == nil {
+		return nil
+	}
+	cur := r.Current()
+	priv, ok := cur.Signer().(*ecdsa.PrivateKey)
+	if !ok {
+		return fmt.Errorf("server: upstream key %s is not an ECDSA key", cur.ID())
+	}
+	sg, err := jose.NewSigner(priv)
+	if err != nil {
+		return fmt.Errorf("server: upstream key %s: %w", cur.ID(), err)
+	}
+	s.upstream.Store(&upstreamKeys{key: cur, signer: sg, jwks: keys.JWKS(s.now(), r)})
+	return nil
+}
+
+// upstreamKeys returns the keys in use, rebuilding them first when the
+// ring's current key changed and RefreshKeys has not run yet, so a token is
+// never signed by a key the published set lacks.
+func (s *Server) upstreamKeys() *upstreamKeys {
+	u := s.upstream.Load()
+	if r := s.opts.Upstream; r != nil && r.Current() != u.key {
+		if err := s.RefreshKeys(); err != nil {
+			s.log.Error("upstream signing key unusable; signing with the previous one", "error", err.Error())
+			return u
+		}
+		u = s.upstream.Load()
+	}
+	return u
 }

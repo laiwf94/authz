@@ -20,6 +20,38 @@ type Spec struct {
 	Name   string
 	Alg    Alg
 	Policy Policy
+	// Seed, when set, are the keys a ring the file lacks starts from
+	// instead of a fresh one: the keys a subcommand was configured with
+	// before it had a ring file, first one current and the rest retired
+	// for Policy.Overlap (or until dropped, with no overlap), so what they
+	// signed or sealed keeps verifying. A ring the file already holds
+	// ignores them.
+	Seed []*Key
+}
+
+// Seeded returns a ring that starts from seed: seed[0] current from now, a
+// fresh next key, and the other seed keys retired for p.Overlap (with no
+// expiry when p.Overlap is zero).
+func Seeded(alg Alg, p Policy, now time.Time, seed ...*Key) (*Ring, error) {
+	if len(seed) == 0 {
+		return nil, errors.New("keys: no seed keys")
+	}
+	if len(seed)-1 > MaxPrevious {
+		return nil, fmt.Errorf("keys: %d seed keys; at most %d", len(seed), MaxPrevious+1)
+	}
+	next, err := Generate(alg, now)
+	if err != nil {
+		return nil, err
+	}
+	until := time.Time{}
+	if p.Overlap > 0 {
+		until = now.Add(p.Overlap).UTC()
+	}
+	st := Snapshot{Current: seed[0], Activated: now, Next: next}
+	for _, k := range seed[1:] {
+		st.Previous = append(st.Previous, Retired{Key: k, Until: until})
+	}
+	return Restore(alg, p, st)
 }
 
 // ErrConflict is returned when a ring file changed under a File since the
@@ -86,7 +118,7 @@ func (f *File) Path() string { return f.path }
 func (f *File) Set() *Set { return f.set }
 
 // Ensure returns the rings specs name, in order, adding to the file the
-// ones it lacks with fresh keys. A ring the file holds must have the alg
+// ones it lacks with fresh keys, or with their Seed keys. A ring the file holds must have the alg
 // its spec asks for. When the policy differs, the ring keeps its keys and
 // takes the spec's policy, unless an earlier Ensure already handed it out
 // under another one: two subcommands of one process must agree. The file is
@@ -119,6 +151,12 @@ func (f *File) Ensure(specs ...Spec) ([]*Ring, error) {
 		}
 		r := f.set.Ring(sp.Name)
 		switch {
+		case r == nil && len(sp.Seed) > 0:
+			nr, err := Seeded(sp.Alg, sp.Policy, now, sp.Seed...)
+			if err != nil {
+				return nil, fmt.Errorf("keys: ring %s: %w", sp.Name, err)
+			}
+			changes = append(changes, change{sp.Name, nr, true})
 		case r == nil:
 			nr, err := NewRing(sp.Alg, sp.Policy, now)
 			if err != nil {
@@ -222,8 +260,11 @@ func (f *File) OnChange(fn func(changed []string, err error)) (remove func()) {
 
 // Start rotates the file's rings on their schedules until ctx ends. Every
 // subcommand sharing the file calls it with its own context; the rings
-// rotate once however many do, and stop when the last context ends.
-func (f *File) Start(ctx context.Context) {
+// rotate once however many do, and stop when the last context ends. The
+// returned channel is closed once ctx has ended and, if this was the last
+// user, the rotations have stopped, so nothing writes the file after it.
+func (f *File) Start(ctx context.Context) <-chan struct{} {
+	stopped := make(chan struct{})
 	f.mu.Lock()
 	f.users++
 	if f.users == 1 {
@@ -233,6 +274,7 @@ func (f *File) Start(ctx context.Context) {
 	}
 	f.mu.Unlock()
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
 		f.mu.Lock()
 		f.users--
@@ -246,6 +288,7 @@ func (f *File) Start(ctx context.Context) {
 			<-done
 		}
 	}()
+	return stopped
 }
 
 func (f *File) run(ctx context.Context, done chan struct{}) {

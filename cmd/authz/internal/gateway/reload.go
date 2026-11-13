@@ -49,9 +49,12 @@ func Schema(getenv func(string) string) *pcfg.Schema {
 func sectionSettings(s *Settings) (settings, error) {
 	st := settings{addr: s.Addr, adminAddr: s.AdminAddr, adminToken: s.AdminToken.Value(), sessionFile: s.SessionFile,
 		auditLog: s.AuditLog, auditRot: part.AuditRotation(s.AuditRotateBytes, s.AuditRotateAge), signingKeys: slices.Clone(s.SigningKeys), loginRate: s.LoginRate}
-	var err error
-	if st.cookieKeys, err = cookieKeys(s.CookieKeys.Value()); err != nil {
-		return st, err
+	st.keysFile, st.cookiePol, st.signingPol = s.KeysFile, s.cookiePolicy(), s.signingPolicy()
+	if s.KeysFile == "" || s.CookieKeys.IsSet() {
+		var err error
+		if st.cookieKeys, err = cookieKeys(s.CookieKeys.Value()); err != nil {
+			return st, err
+		}
 	}
 	for i, p := range s.TrustedProxies {
 		pfx, err := netip.ParsePrefix(strings.TrimSpace(p))
@@ -130,7 +133,8 @@ func wicketVars(getenv func(string) string) []string {
 	}
 	for _, k := range []string{"WICKET_CONFIG", "WICKET_COOKIE_KEYS", "WICKET_ADDR", "WICKET_ADMIN_ADDR", "WICKET_ADMIN_TOKEN",
 		"WICKET_SESSION_FILE", "WICKET_SIGNING_KEYS", "WICKET_TRUSTED_PROXIES", "WICKET_LOGIN_RATE", "WICKET_LOG_LEVEL",
-		"WICKET_AUDIT_LOG", "WICKET_AUDIT_ROTATE_BYTES", "WICKET_AUDIT_ROTATE_AGE", "WICKET_TLS_CERT", "WICKET_TLS_KEY", "WICKET_TLS_CLIENT_CA", "WICKET_DRAIN_DELAY", "WICKET_DRAIN_TIMEOUT"} {
+		"WICKET_AUDIT_LOG", "WICKET_AUDIT_ROTATE_BYTES", "WICKET_AUDIT_ROTATE_AGE", "WICKET_TLS_CERT", "WICKET_TLS_KEY", "WICKET_TLS_CLIENT_CA", "WICKET_DRAIN_DELAY", "WICKET_DRAIN_TIMEOUT",
+		"WICKET_KEYS_FILE", "WICKET_COOKIE_ROTATE_EVERY", "WICKET_COOKIE_OVERLAP", "WICKET_SIGNING_ROTATE_EVERY", "WICKET_SIGNING_OVERLAP"} {
 		if getenv(k) != "" && !slices.Contains(out, k) {
 			out = append(out, k)
 		}
@@ -215,7 +219,9 @@ func (r *reloader) reload(old, cur *pcfg.Config, warnings pcfg.Problems) {
 		return
 	}
 	var applied []string
-	if !slices.EqualFunc(st.cookieKeys, r.applied.cookieKeys, func(a, b []byte) bool { return string(a) == string(b) }) {
+	// With a keys_file the cookie keys are on its session ring, which
+	// rotates on its own; cookie_keys only seeded it.
+	if r.started.keysFile == "" && !slices.EqualFunc(st.cookieKeys, r.applied.cookieKeys, func(a, b []byte) bool { return string(a) == string(b) }) {
 		if err := r.keys.Rotate(st.cookieKeys); err != nil {
 			r.log.Error("configuration change refused; keeping the running cookie keys", "error", err.Error())
 			st.cookieKeys = r.applied.cookieKeys
@@ -306,6 +312,18 @@ func restartOnly(a, b settings) []string {
 	}
 	if !slices.Equal(a.signingKeys, b.signingKeys) {
 		out = append(out, "signing_keys")
+	}
+	if a.keysFile != "" && !slices.EqualFunc(a.cookieKeys, b.cookieKeys, func(x, y []byte) bool { return string(x) == string(y) }) {
+		out = append(out, "cookie_keys")
+	}
+	if a.keysFile != b.keysFile {
+		out = append(out, "keys_file")
+	}
+	if a.cookiePol != b.cookiePol {
+		out = append(out, "cookie_rotation")
+	}
+	if a.signingPol != b.signingPol {
+		out = append(out, "signing_rotation")
 	}
 	if !slices.Equal(a.trusted, b.trusted) {
 		out = append(out, "trusted_proxies")

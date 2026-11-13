@@ -73,8 +73,17 @@ The main image (the root `Dockerfile`) contains the same binary, so
   `WICKET_DRAIN_DELAY` keeps accepting requests for a while after
   `SIGTERM` while the admin listener's `/readyz` answers 503; and
   `WICKET_DRAIN_TIMEOUT` (default 20s, as before) bounds how long
-  in-flight requests may finish. Without them the gateway behaves exactly
-  as wicket did.
+  in-flight requests may finish. Five more put the keys on rotating key
+  rings (see "Key rings in the gateway" in docs/DESIGN.md):
+  `WICKET_KEYS_FILE` names the process's key ring file, whose `session`
+  ring seals cookies and whose `upstream` ring signs upstream tokens and
+  is published at `/.well-known/jwks.json`; `WICKET_COOKIE_ROTATE_EVERY`,
+  `WICKET_COOKIE_OVERLAP`, `WICKET_SIGNING_ROTATE_EVERY` and
+  `WICKET_SIGNING_OVERLAP` set how often each ring rotates and how long a
+  retired key keeps working. The first start with a keys file takes
+  `WICKET_COOKIE_KEYS` and `WICKET_SIGNING_KEYS` into the new rings, so
+  signed-in users stay signed in and upstreams keep the keys they cached.
+  Without them the gateway behaves exactly as wicket did.
 - **The endpoints, cookies and headers** are the same. That includes the
   `__Host-wicket` cookie, so signed-in users stay signed in across the
   upgrade, and sessions in an existing `WICKET_SESSION_FILE` are kept.

@@ -21,6 +21,14 @@
 //	WICKET_SESSION_FILE     append-only session log; empty keeps sessions in memory only
 //	WICKET_SIGNING_KEYS     comma-separated PEM files with P-256 keys for upstream tokens; the
 //	                        first signs, all are published; empty generates a key per process
+//	WICKET_KEYS_FILE        the process's key ring file, instead of the two key lists: cookies
+//	                        are sealed from its "session" ring and upstream tokens signed from
+//	                        its "upstream" ring, which rotate on their own; a ring the file
+//	                        lacks starts from WICKET_COOKIE_KEYS or WICKET_SIGNING_KEYS when set
+//	WICKET_COOKIE_ROTATE_EVERY  rotation period of the session ring (default 24h; 0s never)
+//	WICKET_COOKIE_OVERLAP   how long its retired keys open cookies (default 48h)
+//	WICKET_SIGNING_ROTATE_EVERY rotation period of the upstream ring (default 24h; 0s never)
+//	WICKET_SIGNING_OVERLAP  how long its retired keys stay published (default 24h)
 //	WICKET_TRUSTED_PROXIES  CIDRs whose X-Forwarded-For is believed (default loopback)
 //	WICKET_LOGIN_RATE       login requests per minute per client address (default 30)
 //	WICKET_LOG_LEVEL        debug, info, warn or error (default info)
@@ -79,6 +87,7 @@ import (
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
 	"github.com/laiwf94/authz/internal/platform/jose"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/seal"
 )
@@ -120,6 +129,16 @@ else comes from the environment:
   WICKET_ADMIN_TOKEN      admin API bearer token, at least 16 characters
   WICKET_SESSION_FILE     append-only session log; empty keeps sessions in memory only
   WICKET_SIGNING_KEYS     comma-separated PEM files with P-256 keys for upstream tokens
+  WICKET_KEYS_FILE        the process's key ring file, instead of the two key lists: cookies
+                          are sealed from its "session" ring and upstream tokens signed from
+                          its "upstream" ring, created when missing (from WICKET_COOKIE_KEYS
+                          and WICKET_SIGNING_KEYS when set), rotated on their own and saved
+                          after every rotation; the published JWKS follows the upstream ring
+  WICKET_COOKIE_ROTATE_EVERY  how long a cookie key on that ring stays current (default 24h;
+                          0s never rotates it)
+  WICKET_COOKIE_OVERLAP   how long a retired cookie key keeps opening cookies (default 48h)
+  WICKET_SIGNING_ROTATE_EVERY  how long a signing key stays current (default 24h; 0s never)
+  WICKET_SIGNING_OVERLAP  how long a retired signing key stays published (default 24h)
   WICKET_TRUSTED_PROXIES  CIDRs whose X-Forwarded-For is believed (default loopback)
   WICKET_LOGIN_RATE       login requests per minute per client address (default 30)
   WICKET_LOG_LEVEL        debug, info, warn or error (default info)
@@ -243,6 +262,9 @@ type settings struct {
 	auditLog    string
 	auditRot    audit.Rotation // WICKET_AUDIT_ROTATE_BYTES and _AGE
 	signingKeys []string
+	keysFile    string      // WICKET_KEYS_FILE: cookies and upstream tokens on its rings
+	cookiePol   keys.Policy // WICKET_COOKIE_ROTATE_EVERY and _OVERLAP
+	signingPol  keys.Policy // WICKET_SIGNING_ROTATE_EVERY and _OVERLAP
 	trusted     []netip.Prefix
 	loginRate   int
 	logLevel    slog.Level
@@ -250,7 +272,7 @@ type settings struct {
 }
 
 func loadSettings(getenv func(string) string) (settings, error) {
-	s := settings{addr: ":4180", adminAddr: "127.0.0.1:4181"}
+	s := settings{addr: ":4180", adminAddr: "127.0.0.1:4181", cookiePol: DefaultCookiePolicy, signingPol: DefaultSigningPolicy}
 	if s.configPath = getenv("WICKET_CONFIG"); s.configPath == "" {
 		return s, errors.New("WICKET_CONFIG is required")
 	}
@@ -277,8 +299,28 @@ func loadSettings(getenv func(string) string) (settings, error) {
 		}
 		s.cookieKeys = append(s.cookieKeys, b)
 	}
-	if len(s.cookieKeys) == 0 {
+	s.keysFile = getenv("WICKET_KEYS_FILE")
+	if len(s.cookieKeys) == 0 && s.keysFile == "" {
 		return s, errors.New("WICKET_COOKIE_KEYS is required (run: authz gateway genkey)")
+	}
+	for _, p := range []struct {
+		every, overlap string
+		pol            *keys.Policy
+	}{
+		{"WICKET_COOKIE_ROTATE_EVERY", "WICKET_COOKIE_OVERLAP", &s.cookiePol},
+		{"WICKET_SIGNING_ROTATE_EVERY", "WICKET_SIGNING_OVERLAP", &s.signingPol},
+	} {
+		for name, d := range map[string]*time.Duration{p.every: &p.pol.RotateEvery, p.overlap: &p.pol.Overlap} {
+			if v := getenv(name); v != "" {
+				var err error
+				if *d, err = time.ParseDuration(v); err != nil || *d < 0 {
+					return s, fmt.Errorf(`%s must be a duration such as "24h"`, name)
+				}
+			}
+		}
+		if err := p.pol.Check(); err != nil {
+			return s, fmt.Errorf("%s, %s: %s", p.every, p.overlap, policyError(err))
+		}
 	}
 	s.sessionFile = getenv("WICKET_SESSION_FILE")
 	s.auditLog = getenv("WICKET_AUDIT_LOG")
@@ -336,7 +378,25 @@ func isLoopback(addr string) bool {
 }
 
 func loadSigners(files []string) ([]*jose.Signer, error) {
-	var out []*jose.Signer
+	ks, err := loadECKeys(files)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*jose.Signer, 0, len(ks))
+	for i, key := range ks {
+		sg, err := jose.NewSigner(key)
+		if err != nil {
+			return nil, fmt.Errorf("signing key %s: %w", files[i], err)
+		}
+		out = append(out, sg)
+	}
+	return out, nil
+}
+
+// loadECKeys reads PEM files holding P-256 private keys, as PKCS #8 or
+// SEC 1.
+func loadECKeys(files []string) ([]*ecdsa.PrivateKey, error) {
+	var out []*ecdsa.PrivateKey
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -355,11 +415,10 @@ func loadSigners(files []string) ([]*jose.Signer, error) {
 		if key == nil {
 			return nil, fmt.Errorf("signing key %s: not an ECDSA private key", f)
 		}
-		sg, err := jose.NewSigner(key)
-		if err != nil {
-			return nil, fmt.Errorf("signing key %s: %w", f, err)
+		if key.Curve != elliptic.P256() {
+			return nil, fmt.Errorf("signing key %s: jose: signer needs a P-256 private key", f)
 		}
-		out = append(out, sg)
+		out = append(out, key)
 	}
 	return out, nil
 }
@@ -424,23 +483,27 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 				"config", path, "ignored", ignored)
 		}
 	}
-	signers, err := loadSigners(st.signingKeys)
-	if err != nil {
-		return err
+	clk := now
+	if clk == nil {
+		clk = time.Now
 	}
-	if len(signers) == 0 {
-		if watcher != nil {
-			log.Warn("$.gateway.signing_keys not set; using a key generated for this process, so upstream tokens can't be verified across replicas or restarts")
-		} else {
-			log.Warn("WICKET_SIGNING_KEYS not set; using a key generated for this process, so upstream tokens can't be verified across replicas or restarts")
+	var (
+		cookies  *seal.Keyring
+		upstream *keys.Ring
+		fk       *fileKeys
+	)
+	if st.keysFile != "" {
+		if fk, err = openFileKeys(h, st, clk, log); err != nil {
+			return err
 		}
-		k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		sg, _ := jose.NewSigner(k)
-		signers = []*jose.Signer{sg}
-	}
-	keys, err := seal.New(st.cookieKeys)
-	if err != nil {
-		return err
+		cookies, upstream = fk.cookies, fk.upstream
+	} else {
+		if upstream, err = configuredUpstream(st, clk(), log, watcher != nil); err != nil {
+			return err
+		}
+		if cookies, err = seal.New(st.cookieKeys); err != nil {
+			return err
+		}
 	}
 	// load reads the wicket configuration again: the file WICKET_CONFIG
 	// names, or, with a platform file, the section the watcher holds after
@@ -463,6 +526,11 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 	}
 	if err != nil {
 		return err
+	}
+	if st.keysFile != "" {
+		for _, w := range keyPolicyWarnings(st.cookiePol, st.signingPol, time.Duration(cfg.Session.AbsoluteTimeout), time.Duration(cfg.UpstreamTokenTTL)) {
+			log.Warn("key rotation: "+w, "keys_file", st.keysFile)
+		}
 	}
 	sessions, err := session.Open(session.Options{Path: st.sessionFile, IdleTimeout: time.Duration(cfg.Session.IdleTimeout),
 		AbsoluteTimeout: time.Duration(cfg.Session.AbsoluteTimeout), Now: now})
@@ -494,7 +562,7 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 			}
 			return load()
 		},
-		Sessions: sessions, Keys: keys, Signers: signers, Logger: log, Metrics: h.Registry(),
+		Sessions: sessions, Keys: cookies, Upstream: upstream, Logger: log, Metrics: h.Registry(),
 		AdminToken: st.adminToken, TrustedProxies: st.trusted, LoginRate: st.loginRate, Now: now,
 		Audit: auditLog,
 	})
@@ -502,6 +570,14 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 		return err
 	}
 
+	if fk != nil {
+		kctx, stopKeys := context.WithCancel(ctx)
+		stopped := fk.start(kctx, srv, st.keysFile, log)
+		defer func() { stopKeys(); <-stopped }()
+		log.Info("cookies and upstream tokens on key rings", "keys_file", st.keysFile,
+			"cookie_rotate_every", st.cookiePol.RotateEvery.String(), "cookie_overlap", st.cookiePol.Overlap.String(),
+			"signing_rotate_every", st.signingPol.RotateEvery.String(), "signing_overlap", st.signingPol.Overlap.String())
+	}
 	g, err := h.Binder()(st.http,
 		httpserver.Spec{Name: "public", Addr: st.addr, Handler: srv.Handler(),
 			Limits: httpserver.Limits{WriteTimeout: 45 * time.Second, MaxHeaderBytes: 32 << 10}},
@@ -511,7 +587,7 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 	}
 	var changed <-chan struct{}
 	if watcher != nil {
-		rl.start(log, keys, st)
+		rl.start(log, cookies, st)
 		wctx, stopWatch := context.WithCancel(ctx)
 		defer stopWatch()
 		go func() { _ = watcher.Run(wctx) }()

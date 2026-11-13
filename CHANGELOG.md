@@ -172,6 +172,25 @@ link the roadmap issue they come from.
 - `config.Checker.ReadFile`: a file a section's check reads (the mcp
   section's agents config and policy) becomes one of the configuration's
   watched sources.
+- **`authz gateway` rotates its cookie and upstream signing keys on its own** ([#76](https://github.com/laiwf94/authz/issues/76)).
+  `keys_file` in the gateway section (or `WICKET_KEYS_FILE`) names the
+  process's key ring file. Cookies are sealed from its A256GCM `session`
+  ring (`cookie_rotate_every`, default 24h; `cookie_overlap`, default 48h)
+  and upstream tokens signed from its ES256 `upstream` ring
+  (`signing_rotate_every` and `signing_overlap`, both 24h by default; the
+  `WICKET_COOKIE_*` and `WICKET_SIGNING_*` variables set the same).
+  `/.well-known/jwks.json` publishes the next signing key a period before it
+  signs and retired keys until their overlap ends, and is rebuilt after
+  every rotation. On the first start with a keys file, `cookie_keys` and
+  `signing_keys` seed the new rings, so nobody is signed out and upstreams
+  keep the keys they cached; once the file holds the rings the lists are
+  ignored, with a warning. `authz check` checks the file and warns about an
+  overlap shorter than the absolute session lifetime or the upstream token
+  lifetime. Under `authz run`, the gateway and serve can share one file.
+  Without a keys file, `WICKET_COOKIE_KEYS` and `WICKET_SIGNING_KEYS` work as
+  before, the signing keys as a configured ring, and `WICKET_COOKIE_KEYS` is
+  no longer required when `WICKET_KEYS_FILE` is set. A cached upstream token
+  is re-signed once its key stops signing.
 
 ### Agent gateway (agents)
 

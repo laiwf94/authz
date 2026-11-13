@@ -222,8 +222,9 @@ type upstreamClaims struct {
 func (s *Server) upstreamToken(rt *runtime, sess *session.Session, appID string) (string, error) {
 	key := sess.ID + "\x00" + appID
 	now := s.now()
+	sg := s.upstreamKeys().signer
 	s.tokenMu.Lock()
-	if t, ok := s.tokens[key]; ok && now.Before(t.refresh) {
+	if t, ok := s.tokens[key]; ok && now.Before(t.refresh) && t.signer == sg {
 		s.tokenMu.Unlock()
 		return t.value, nil
 	}
@@ -234,7 +235,7 @@ func (s *Server) upstreamToken(rt *runtime, sess *session.Session, appID string)
 		exp = sess.ExpiresAt
 	}
 	id := sess.Identity
-	tok, err := s.signers[0].Sign(upstreamClaims{Issuer: rt.cfg.PublicURL, Audience: appID, Subject: id.Subject,
+	tok, err := sg.Sign(upstreamClaims{Issuer: rt.cfg.PublicURL, Audience: appID, Subject: id.Subject,
 		Email: id.Email, Name: id.Name, Groups: id.Groups, Provider: id.Provider, SessionID: sess.ID,
 		IssuedAt: now.Unix(), NotBefore: now.Unix(), Expiry: exp.Unix()})
 	if err != nil {
@@ -244,7 +245,7 @@ func (s *Server) upstreamToken(rt *runtime, sess *session.Session, appID string)
 	if len(s.tokens) >= maxTokenCache {
 		clear(s.tokens)
 	}
-	s.tokens[key] = cachedToken{value: tok, refresh: now.Add(exp.Sub(now) / 2)}
+	s.tokens[key] = cachedToken{value: tok, refresh: now.Add(exp.Sub(now) / 2), signer: sg}
 	s.tokenMu.Unlock()
 	return tok, nil
 }

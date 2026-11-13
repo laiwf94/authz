@@ -16,6 +16,7 @@ import (
 	"github.com/laiwf94/authz/internal/authn/server"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/seal"
 )
 
@@ -45,6 +46,24 @@ type Settings struct {
 	SessionFile string `json:"session_file"`
 	// SigningKeys is WICKET_SIGNING_KEYS: PEM files with P-256 keys.
 	SigningKeys []string `json:"signing_keys"`
+	// KeysFile is WICKET_KEYS_FILE: the process's ring file
+	// (internal/platform/keys). Cookies are sealed from its A256GCM
+	// "session" ring and upstream tokens signed from its ES256 "upstream"
+	// ring, both created when the file lacks them (from cookie_keys and
+	// signing_keys when those are set) and rotated on their schedules.
+	KeysFile string `json:"keys_file"`
+	// CookieRotateEvery is WICKET_COOKIE_ROTATE_EVERY: how long a cookie
+	// key on the session ring stays current; 0 never rotates it.
+	CookieRotateEvery pcfg.Duration `json:"cookie_rotate_every"`
+	// CookieOverlap is WICKET_COOKIE_OVERLAP: how long a retired cookie key
+	// keeps opening cookies.
+	CookieOverlap pcfg.Duration `json:"cookie_overlap"`
+	// SigningRotateEvery is WICKET_SIGNING_ROTATE_EVERY: how long a signing
+	// key on the upstream ring stays current; 0 never rotates it.
+	SigningRotateEvery pcfg.Duration `json:"signing_rotate_every"`
+	// SigningOverlap is WICKET_SIGNING_OVERLAP: how long a retired signing
+	// key stays published.
+	SigningOverlap pcfg.Duration `json:"signing_overlap"`
 	// TrustedProxies is WICKET_TRUSTED_PROXIES.
 	TrustedProxies []string `json:"trusted_proxies"`
 	// LoginRate is WICKET_LOGIN_RATE.
@@ -143,6 +162,16 @@ func defaultSettings(s *Settings) {
 	s.LoginRate = server.DefaultLoginRate
 	s.LogLevel = "info"
 	s.DrainTimeout = pcfg.Duration(httpserver.DefaultDrainTimeout)
+	s.CookieRotateEvery, s.CookieOverlap = pcfg.Duration(DefaultCookiePolicy.RotateEvery), pcfg.Duration(DefaultCookiePolicy.Overlap)
+	s.SigningRotateEvery, s.SigningOverlap = pcfg.Duration(DefaultSigningPolicy.RotateEvery), pcfg.Duration(DefaultSigningPolicy.Overlap)
+}
+
+func (s *Settings) cookiePolicy() keys.Policy {
+	return keys.Policy{RotateEvery: time.Duration(s.CookieRotateEvery), Overlap: time.Duration(s.CookieOverlap)}
+}
+
+func (s *Settings) signingPolicy() keys.Policy {
+	return keys.Policy{RotateEvery: time.Duration(s.SigningRotateEvery), Overlap: time.Duration(s.SigningOverlap)}
 }
 
 func checkSettings(o SectionOptions, s *Settings, c *pcfg.Checker) {
@@ -162,7 +191,9 @@ func checkSettings(o SectionOptions, s *Settings, c *pcfg.Checker) {
 	}
 
 	if !s.CookieKeys.IsSet() {
-		c.Errorf(c.Field("cookie_keys"), "is required (run: authz gateway genkey)")
+		if s.KeysFile == "" {
+			c.Errorf(c.Field("cookie_keys"), "is required (run: authz gateway genkey), or keys_file")
+		}
 	} else if v := s.CookieKeys.Value(); v != "" || blankSecret(s.CookieKeys) {
 		n := 0
 		for i, k := range strings.Split(v, ",") {
@@ -184,6 +215,7 @@ func checkSettings(o SectionOptions, s *Settings, c *pcfg.Checker) {
 			c.Errorf(pcfg.IndexPath(c.Field("signing_keys"), i), "%v", err)
 		}
 	}
+	checkKeys(s, c)
 	for i, p := range s.TrustedProxies {
 		if _, err := netip.ParsePrefix(strings.TrimSpace(p)); err != nil {
 			c.Errorf(pcfg.IndexPath(c.Field("trusted_proxies"), i), "%q is not a CIDR", p)
@@ -209,6 +241,35 @@ func checkSettings(o SectionOptions, s *Settings, c *pcfg.Checker) {
 		} else {
 			c.Errorf(path, "%s", p.Message)
 		}
+	}
+}
+
+// checkKeys applies the rules of the keys_file rings: the file must be
+// usable, and each ring's rotation a policy the ring accepts.
+func checkKeys(s *Settings, c *pcfg.Checker) {
+	if err := s.cookiePolicy().Check(); err != nil {
+		c.Errorf(c.Field("cookie_overlap"), "%s", policyError(err))
+	}
+	if err := s.signingPolicy().Check(); err != nil {
+		c.Errorf(c.Field("signing_overlap"), "%s", policyError(err))
+	}
+	if s.KeysFile == "" {
+		return
+	}
+	if err := keys.CheckFile(s.KeysFile, cookieSpec(s.cookiePolicy()), signingSpec(s.signingPolicy())); err != nil {
+		c.Errorf(c.Field("keys_file"), "%v", err)
+	}
+	abs := time.Duration(s.Session.AbsoluteTimeout)
+	if abs == 0 {
+		abs = config.DefaultAbsolute
+	}
+	ttl := time.Duration(s.UpstreamTokenTTL)
+	if ttl == 0 {
+		ttl = config.DefaultTokenTTL
+	}
+	for _, w := range keyPolicyWarnings(s.cookiePolicy(), s.signingPolicy(), abs, ttl) {
+		field, msg, _ := strings.Cut(w, " ")
+		c.Warnf(c.Field(field), "%s", msg)
 	}
 }
 

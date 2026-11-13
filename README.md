@@ -172,6 +172,12 @@ $ WICKET_CONFIG=wicket.json ./authz gateway     # :4180, admin API on 127.0.0.1:
 $ ./wicket/examples/demo.sh                     # nginx in Docker, OIDC and SAML logins, end to end
 ```
 
+`WICKET_KEYS_FILE` (or `keys_file` in the gateway section) moves the cookie
+keys and the upstream signing key onto rotating key rings in one file, which
+the first start fills from `WICKET_COOKIE_KEYS` and `WICKET_SIGNING_KEYS` so
+nobody is signed out; the published JWKS follows every rotation (see
+[docs/DESIGN.md](docs/DESIGN.md#key-rings-in-the-gateway)).
+
 The end-to-end responses are pinned byte for byte in golden transcripts
 recorded from wicket before the move, and CI replays them through
 `authz gateway` started from a wicket config file. Proxy snippets and the
