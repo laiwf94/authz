@@ -248,6 +248,23 @@ check, holding only the public key, that the log still holds every record
 it covered, unchanged: the chain alone cannot tell records cut from its end
 from a log that ended there.
 
+The tree head also makes records provable one at a time, without the log:
+`GET /admin/audit/proof?record=N` serves an RFC 6962 inclusion proof of
+record N against the newest checkpoint, which it carries, and `?from=M` a
+consistency proof that the log extends an earlier checkpoint of M records
+(`&size=S` proves against an earlier one instead). `authz audit prove
+-record N FILE` makes the same from the files, and an auditor checks either
+with the public key alone:
+
+```console
+$ curl -H "Authorization: Bearer $ADMIN" 'localhost:8081/admin/audit/proof?record=42' > call.proof
+$ ./authz audit prove -check call.proof -key audit.example.com+1d9f0a3c+AaW...
+OK call.proof: record 42 (tool_call at 2026-11-20T10:04:11.52Z) is in the 977 records signed by audit.example.com at 2026-11-20T10:05:00Z
+{"seq":42,...}
+$ curl -H "Authorization: Bearer $ADMIN" 'localhost:8081/admin/audit/proof?from=512' > grew.proof
+$ ./authz audit prove -check grew.proof -key audit.example.com+1d9f0a3c+AaW... -old saved.checkpoint
+```
+
 A sign-in, the check it leads to and the tool call that check allows then
 follow one another in one verified chain under one correlation ID; CI runs
 exactly that across the three processes. The format, the event types and

@@ -266,6 +266,7 @@ Administrators (`TOOLGATE_ADMIN_ADDR`, default `127.0.0.1:8081`), `Authorization
 | `GET /admin/policy`, `POST /admin/policy/reload` | Policy hash; reload now (also on SIGHUP and when the file changes). |
 | `GET /admin/audit/head` | Record count and head hash, to anchor the log elsewhere. |
 | `GET /admin/audit/checkpoint` | The newest signed checkpoint of the audit log (`text/plain`, a signed note), with `AUTHZ_AUDIT_SIGNING_KEY` set; 404 without it. Check a log against it with `authz audit verify -key`. |
+| `GET /admin/audit/proof` | An RFC 6962 proof over the audit log as JSON, with `AUTHZ_AUDIT_SIGNING_KEY` set: `?record=N` that record N is in the log, `?from=M` that the log extends its first M records; against the newest checkpoint, which it carries, or the first `size=S` records. 400 for bad parameters, 404 without a key or out of range. Check it with `authz audit prove -check`. |
 | `GET /metrics` | Prometheus metrics. |
 
 JSON-RPC errors from the gateway use codes outside the range JSON-RPC and MCP

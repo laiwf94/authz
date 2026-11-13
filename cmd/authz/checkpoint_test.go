@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -166,9 +167,53 @@ func TestMainAuditCheckpoints(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	// The mcp admin API proves a sign-on denial the gateway logged and a
+	// tool call it logged itself are in the log, and that the log grew
+	// from the auditor's checkpoint: authz audit prove -check verifies
+	// each with the public key alone.
+	proofs := map[string]string{}
+	for _, event := range []string{"authn.access_denied", "tool_call"} {
+		n := firstRecordOf(t, chain, event, saved.Size)
+		proofs[event] = n
+	}
+	proofs["consistency"] = ""
+	pubKey := filepath.Join(dir, "auditor.pub")
+	os.WriteFile(pubKey, []byte(vkey+"\n"), 0o644)
+	for name, rec := range proofs {
+		q := "from=" + strconv.FormatUint(saved.Size, 10)
+		if rec != "" {
+			q = "record=" + rec
+		}
+		req, _ := http.NewRequest("GET", "http://"+mcpAdmin+"/admin/audit/proof?"+q, nil)
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		f := filepath.Join(dir, name+".proof")
+		os.WriteFile(f, []byte(do(req, 200)), 0o600)
+		args := "audit prove -check " + f + " -key " + pubKey
+		want := "OK " + f + ": record " + rec + " (" + name + " at "
+		if rec == "" {
+			args += " -old " + savedFile
+			want = "OK " + f + ": the "
+		}
+		code, out, errs := runToEnd(t, args)
+		if code != 0 || !strings.HasPrefix(out, want) {
+			t.Fatalf("%s: exit %d %q %s", args, code, out, errs)
+		}
+	}
 	stop(t, gwCmd)
 	stop(t, mcpCmd)
 	stop(t, serveCmd)
+
+	// The operator proves from the files too, once the writers stopped.
+	rec := proofs["tool_call"]
+	code, out, errs := runToEnd(t, "audit prove -record "+rec+" "+chain)
+	if code != 0 {
+		t.Fatalf("prove from the file: exit %d %q %s", code, out, errs)
+	}
+	offline := filepath.Join(dir, "offline.proof")
+	os.WriteFile(offline, []byte(out), 0o600)
+	if code, out, errs := runToEnd(t, "audit prove -check "+offline+" -key "+pubKey); code != 0 || !strings.Contains(out, "record "+rec+" (tool_call at ") {
+		t.Fatalf("check the offline proof: exit %d %q %s", code, out, errs)
+	}
 
 	segs, err := audit.Segments(chain)
 	if err != nil || len(segs) < 3 {
@@ -180,7 +225,7 @@ func TestMainAuditCheckpoints(t *testing.T) {
 	}
 	head := fmt.Sprintf("OK %s: %d records in %d segments, head %s\n", chain, cr.Records, len(segs)+1, cr.Head)
 	// The auditor's checkpoint, from before the rotations that followed.
-	code, out, errs := runToEnd(t, "audit verify -key "+vkey+" -checkpoint "+savedFile+" "+chain)
+	code, out, errs = runToEnd(t, "audit verify -key "+vkey+" -checkpoint "+savedFile+" "+chain)
 	if code != 0 || !strings.HasPrefix(out, head) ||
 		!strings.Contains(out, fmt.Sprintf("checkpoint signed by audit.test at %s covers %d of the %d records", saved.Time.Format(time.RFC3339), saved.Size, cr.Records)) {
 		t.Fatalf("verify against the saved checkpoint: exit %d %q %s", code, out, errs)
@@ -244,4 +289,28 @@ func countRecords(t *testing.T, path string) uint64 {
 		t.Fatal(err)
 	}
 	return cr.Records
+}
+
+// firstRecordOf is the number of the first record of event after record
+// after in the log at path, across its segments.
+func firstRecordOf(t *testing.T, path, event string, after uint64) string {
+	t.Helper()
+	segs, err := audit.Segments(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range append(segs, path) {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+			var r audit.Record
+			if json.Unmarshal([]byte(line), &r) == nil && r.Event == event && r.Seq > after {
+				return strconv.FormatUint(r.Seq, 10)
+			}
+		}
+	}
+	t.Fatalf("no %s record after %d in %s", event, after, path)
+	return ""
 }

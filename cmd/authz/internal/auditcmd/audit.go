@@ -5,6 +5,10 @@
 //	authz audit verify [-head HASH] [-key KEY [-checkpoint NOTE]] FILE
 //	                                        check the chain across every segment of FILE,
 //	                                        and against a signed checkpoint
+//	authz audit prove -record N|-from M [-size S] FILE
+//	                                        print an RFC 6962 inclusion or consistency proof
+//	authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE]
+//	                                        check one with only the public key
 //	authz audit keygen -out FILE NAME      make a checkpoint signing key
 package auditcmd
 
@@ -24,7 +28,7 @@ import (
 )
 
 // Summary is the one-line description shown in "authz help".
-const Summary = "verify the platform's audit log across its segments and against signed checkpoints"
+const Summary = "verify the platform's audit log across its segments and against signed checkpoints, and prove records are in it"
 
 // Exit codes of "authz audit".
 const (
@@ -34,6 +38,8 @@ const (
 )
 
 const usage = `usage: authz audit verify [-head HASH] [-key KEY [-checkpoint NOTE]] FILE
+       authz audit prove -record N|-from M [-size S] FILE
+       authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE]
        authz audit keygen -out FILE NAME
 
 verify checks the hash chain of the audit log that authz serve
@@ -62,6 +68,28 @@ or "FAIL FILE: reason". Exit codes: 0 verified, 1 failed, 2 usage error or
 unreadable file. "authz mcp audit verify" is the MCP gateway's check, kept
 as toolgate had it: the chain only, not the schemas.
 
+prove prints, as JSON, an RFC 6962 proof over the records of FILE, checked
+by verify first: with -record N that record N is in the log (the proof
+carries the record), with -from M that the log extends its first M records,
+the size of an earlier checkpoint. It is for the tree of the records the
+newest checkpoint FILE.checkpoint covers, which it carries, or, with -size S,
+for the first S records. GET /admin/audit/proof serves the same from a
+running authz mcp.
+
+prove -check PROOF checks a proof (a file, or - for standard input) with
+only the public key, without the log:
+
+  -key KEY          the public key, as for verify
+  -checkpoint NOTE  the signed checkpoint to check against, of the proof's
+                    size; default the one the proof carries
+  -old NOTE         for a consistency proof, the earlier checkpoint the
+                    auditor kept, of the size the proof starts from: needed
+
+Prints "OK PROOF: record N (EVENT at TIME) is in the M records signed by
+NAME at TIME" and the record, or "OK PROOF: the M records signed by NAME at
+TIME extend the K signed at TIME", or "FAIL PROOF: reason", with the exit
+codes of verify.
+
 keygen makes an Ed25519 key named NAME for signing checkpoints. The
 signing key goes to FILE, created with mode 0600 (an existing file is not
 replaced): point AUTHZ_AUDIT_SIGNING_KEY_FILE at it, or put its contents in
@@ -70,7 +98,7 @@ printed.
 `
 
 // Run is the "authz audit" subcommand.
-func Run(_ context.Context, args []string, _ func(string) string, _ io.Reader, stdout, stderr io.Writer) int {
+func Run(_ context.Context, args []string, _ func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage) }
@@ -83,6 +111,8 @@ func Run(_ context.Context, args []string, _ func(string) string, _ io.Reader, s
 	switch fs.Arg(0) {
 	case "verify":
 		return verifyCmd(fs.Args()[1:], stdout, stderr)
+	case "prove":
+		return proveCmd(fs.Args()[1:], stdin, stdout, stderr)
 	case "keygen":
 		return keygenCmd(fs.Args()[1:], stdout, stderr)
 	case "":

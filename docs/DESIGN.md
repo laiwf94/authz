@@ -800,6 +800,54 @@ records with another tree head rebuilds the tree once, then refuses the
 log, as a checkpoint of a changed last record does. `VerifyChain` computes
 the tree head of every log it verifies (`ChainResult.Root`).
 
+### Inclusion and consistency proofs
+
+An inclusion proof that record N is in the tree of S records is PATH(N-1,
+D[S]) of RFC 6962 section 2.1.1: the roots of the subtrees beside the path
+from the leaf to the root, deepest first. A consistency proof from M to S
+records is PROOF(M, D[S]) of section 2.1.2. Both are lists of the roots of
+disjoint ranges of leaves (`merkle.InclusionSpans`,
+`merkle.ConsistencySpans`), so a `merkle.Prover` computes them in one
+pass over the records in order: it keeps a compact range for the span
+being read and one for the whole tree, and needs no stored interior nodes
+and no leaves in memory. Proving costs a read of the log up to S, about
+310 ns a record (`BenchmarkInclusionProver`, two node hashes per leaf), and
+O(log S) memory; a proof holds at most 64 hashes. They are checked by the
+algorithms of RFC 9162 sections 2.1.3.2 and 2.1.4.2 (`VerifyInclusion`,
+`VerifyConsistency`, about 2.7 µs for 2^16 leaves), which also take the
+trivial cases of a tree that did not grow and of the empty tree. The
+inclusion and consistency proofs of the published eight-leaf vectors are
+checked byte for byte, every leaf and pair of sizes up to 70 match the RFC's
+recursion as written, and at random sizes up to 2^17 every changed hash,
+leaf, root, index or length fails.
+
+`audit.ProveInclusion` and `audit.ProveConsistency` read the segments in
+order up to S. Each segment must be named for the record after the last
+one read and each file's first record must be that record, so a rotation
+between listing the segments and opening the active file is seen and the
+proof starts again (three tries); a segment that is gone stops it. The
+chain is not checked on this path: a proof over records changed on disk
+does not lead to the signed tree head, which `Log.InclusionProof` and
+`Log.ConsistencyProof` compare before they hand out a proof against the
+newest checkpoint. A `Proof` is JSON carrying the kind, tree size and
+root, the record's line (`entry`) and leaf hash or the earlier size and
+root, the hashes, and the signed checkpoint of its size when the proof is
+for the newest one. `Proof.Check` takes a checkpoint opened with the public
+key: the entry must be record N by its `seq`, its leaf hash must lead to
+the checkpoint's tree head, and for a consistency proof the auditor's
+earlier checkpoint must be of the size and root the proof starts from.
+
+The mcp admin API serves `GET /admin/audit/proof?record=N` and
+`?from=M`, against the newest checkpoint (signed then if records were
+added) or with `&size=S` against an earlier one the auditor kept (S at most
+the newest checkpoint's size; out of range is 404, like a log without a
+signing key). `authz audit prove -record N|-from M [-size S] FILE` makes
+the same proof from the files after `verify` passes, taking S and the
+checkpoint from `FILE.checkpoint`, and `authz audit prove -check PROOF
+-key KEY [-checkpoint NOTE] [-old NOTE]` checks one with the public key
+alone; a consistency proof needs `-old`, since a tree head the proof
+carries itself proves nothing.
+
 ## One configuration file (internal/platform/config)
 
 Every subcommand reads its part of one versioned JSON document. A section

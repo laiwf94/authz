@@ -175,6 +175,16 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **Inclusion and consistency proofs over the audit log** ([#81](https://github.com/laiwf94/authz/issues/81)).
+  `internal/platform/merkle` makes and checks RFC 6962 inclusion and
+  consistency proofs (RFC 9162 verification), checked against the published
+  test vectors and the RFC's recursion, in one pass over the leaves with
+  O(log n) memory. `GET /admin/audit/proof?record=N` (or `?from=M`, with an
+  optional `&size=S`) on the mcp admin API serves a JSON proof against the
+  newest signed checkpoint, which it carries; `authz audit prove -record
+  N|-from M [-size S] FILE` makes the same from the files, and `authz audit
+  prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE]` checks one with
+  only the public key.
 - **A Merkle tree over the audit log** ([#81](https://github.com/laiwf94/authz/issues/81)).
   `internal/platform/merkle` is the RFC 6962 tree (leaf and node hashing
   with the 0x00 and 0x01 prefixes, checked against the published test

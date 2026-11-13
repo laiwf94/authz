@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -386,4 +387,15 @@ func (res ChainResult) Covers(c Checkpoint) error {
 			c.Time.Format(time.RFC3339), c.Size)
 	}
 	return nil
+}
+
+// PeekCheckpoint reads the checkpoint in a signed note without checking
+// any signature: to learn which tree size a proof should be for, never to
+// trust what it says. OpenCheckpoint is the check.
+func PeekCheckpoint(msg []byte) (Checkpoint, error) {
+	split := bytes.LastIndex(msg, []byte("\n\n"))
+	if split < 0 {
+		return Checkpoint{}, errMalformedNote
+	}
+	return ParseCheckpoint(msg[:split+1])
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +46,7 @@ func (g *Gateway) AdminHandler(adminToken string) http.Handler {
 	route("POST /admin/policy/reload", g.reloadPolicy)
 	route("GET /admin/audit/head", g.auditHead)
 	route("GET /admin/audit/checkpoint", g.auditCheckpoint)
+	route("GET /admin/audit/proof", g.auditProof)
 	mux.Handle("/", hs.Wrap("other", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "no such endpoint")
 	}))
@@ -212,4 +214,64 @@ func (g *Gateway) Refresh(ctx context.Context) {
 	for _, name := range g.upNames {
 		_, _ = g.toolsOf(ctx, g.ups[name])
 	}
+}
+
+// auditProof serves an RFC 6962 proof over the audit log's records, as
+// JSON (audit.Proof): with ?record=N that record N is in the log, with
+// ?from=M that the log extends its first M records, an auditor's earlier
+// checkpoint. Either is against the newest checkpoint, which the proof
+// carries, or with &size=S against the first S records, a checkpoint the
+// auditor kept. "authz audit prove -check" checks one with only the public
+// key.
+func (g *Gateway) auditProof(w http.ResponseWriter, r *http.Request) error {
+	q := r.URL.Query()
+	num := func(name string) (uint64, error) {
+		v := q.Get(name)
+		if v == "" {
+			return 0, nil
+		}
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil || n == 0 || strconv.FormatUint(n, 10) != v {
+			return 0, httpx.BadRequest("%s must be a record count from 1", name)
+		}
+		return n, nil
+	}
+	for name := range q {
+		if name != "record" && name != "from" && name != "size" || len(q[name]) != 1 {
+			return httpx.BadRequest("the parameters are record or from, and size, each at most once")
+		}
+	}
+	record, err := num("record")
+	if err != nil {
+		return err
+	}
+	from, err := num("from")
+	if err != nil {
+		return err
+	}
+	size, err := num("size")
+	if err != nil {
+		return err
+	}
+	var p audit.Proof
+	switch {
+	case (record == 0) == (from == 0):
+		return httpx.BadRequest("give record=N for an inclusion proof or from=M for a consistency proof")
+	case record != 0:
+		p, err = g.opt.Audit.InclusionProof(record, size)
+	default:
+		p, err = g.opt.Audit.ConsistencyProof(from, size)
+	}
+	switch {
+	case errors.Is(err, audit.ErrNoSigner):
+		return &httpx.Error{Status: http.StatusNotFound, Code: "not_found",
+			Msg: "the audit log signs no checkpoints, so it has no tree to prove against; set AUTHZ_AUDIT_SIGNING_KEY"}
+	case errors.Is(err, audit.ErrProofRange):
+		return &httpx.Error{Status: http.StatusNotFound, Code: "not_found", Msg: strings.TrimPrefix(err.Error(), "audit: ")}
+	case err != nil:
+		return err
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(w, http.StatusOK, p)
+	return nil
 }
