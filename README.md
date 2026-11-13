@@ -213,6 +213,12 @@ policy language, approvals, pinning, both MCP eras and the move from the
 toolgate binary are in [toolgate/README.md](toolgate/README.md) and
 [toolgate/docs/DESIGN.md](toolgate/docs/DESIGN.md).
 
+`TOOLGATE_KEYS_FILE` (or `keys_file` in the mcp section) moves the agent
+token signing keys onto a rotating `agent` key ring in the process's key
+ring file, which the first start fills from `TOOLGATE_SIGNING_KEYS` so no
+token is refused; `authz mcp token mint` signs with its current key (see
+[docs/DESIGN.md](docs/DESIGN.md#key-rings-in-the-agent-gateway)).
+
 ## One audit chain
 
 `authz serve`, `authz gateway` and `authz mcp` append to the same

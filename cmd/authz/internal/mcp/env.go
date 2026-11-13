@@ -20,6 +20,7 @@ var gatewayEnv = []string{
 	"ADDR", "ADMIN_ADDR", "ADMIN_TOKEN", "CONFIG", "POLICY", "AUDIT_LOG", "AUDIT_KEY",
 	"STATE_DIR", "SIGNING_KEYS", "ALLOWED_ORIGINS", "POLICY_POLL", "LOG_LEVEL",
 	"TLS_CERT", "TLS_KEY", "TLS_CLIENT_CA", "DRAIN_DELAY", "DRAIN_TIMEOUT",
+	"KEYS_FILE", "SIGNING_ROTATE_EVERY", "SIGNING_OVERLAP",
 }
 
 // compatEnv returns a getenv that answers each TOOLGATE_<suffix> lookup with

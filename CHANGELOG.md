@@ -191,6 +191,21 @@ link the roadmap issue they come from.
   before, the signing keys as a configured ring, and `WICKET_COOKIE_KEYS` is
   no longer required when `WICKET_KEYS_FILE` is set. A cached upstream token
   is re-signed once its key stops signing.
+- **`authz mcp` rotates its agent token signing keys on its own** ([#76](https://github.com/laiwf94/authz/issues/76)).
+  `keys_file` in the mcp section (or `TOOLGATE_KEYS_FILE`, also
+  `AUTHZ_MCP_KEYS_FILE`) names the process's key ring file, and signed agent
+  tokens are minted and verified on its HS256 `agent` ring through
+  `identity.Config.Ring` (`signing_rotate_every` and `signing_overlap`, both
+  24h by default, or `TOOLGATE_SIGNING_ROTATE_EVERY` and
+  `TOOLGATE_SIGNING_OVERLAP`). On the first start with a keys file
+  `signing_keys` seeds the ring under its key ids, so tokens already issued
+  keep verifying; once the file holds the ring the keys are ignored, with a
+  warning, and a change to them applies on restart. `authz mcp token mint`
+  signs with the file's current key without writing the file. `authz check`
+  checks the file and the agents config's tokens section and warns about an
+  overlap shorter than the longest token lifetime. Under `authz run` the
+  parts share one file. Without a keys file, `TOOLGATE_SIGNING_KEYS` works as
+  before, as a configured ring.
 
 ### Agent gateway (agents)
 

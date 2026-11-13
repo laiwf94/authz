@@ -15,6 +15,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/policy"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/keys"
 )
 
 // SectionName is the name of the mcp section of the platform configuration
@@ -52,6 +53,17 @@ type Settings struct {
 	StateDir string `json:"state_dir"`
 	// SigningKeys is TOOLGATE_SIGNING_KEYS: kid=<64 hex>[,kid=<64 hex>...].
 	SigningKeys pcfg.Secret `json:"signing_keys"`
+	// KeysFile is TOOLGATE_KEYS_FILE: the process's ring file
+	// (internal/platform/keys). Agent tokens are signed and verified on its
+	// HS256 "agent" ring, created when the file lacks it (from
+	// signing_keys when those are set) and rotated on its schedule.
+	KeysFile string `json:"keys_file"`
+	// SigningRotateEvery is TOOLGATE_SIGNING_ROTATE_EVERY: how long a
+	// signing key on the agent ring stays current; 0 never rotates it.
+	SigningRotateEvery pcfg.Duration `json:"signing_rotate_every"`
+	// SigningOverlap is TOOLGATE_SIGNING_OVERLAP: how long a retired
+	// signing key keeps verifying tokens.
+	SigningOverlap pcfg.Duration `json:"signing_overlap"`
 	// AllowedOrigins is TOOLGATE_ALLOWED_ORIGINS.
 	AllowedOrigins []string `json:"allowed_origins"`
 	// PolicyPoll is TOOLGATE_POLICY_POLL; 0 disables polling.
@@ -92,6 +104,11 @@ func defaultSettings(s *Settings) {
 	s.PolicyPoll = pcfg.Duration(defaultPolicyPoll)
 	s.LogLevel = "info"
 	s.DrainTimeout = pcfg.Duration(httpserver.DefaultDrainTimeout)
+	s.SigningRotateEvery, s.SigningOverlap = pcfg.Duration(DefaultSigningPolicy.RotateEvery), pcfg.Duration(DefaultSigningPolicy.Overlap)
+}
+
+func (s *Settings) signingPolicy() keys.Policy {
+	return keys.Policy{RotateEvery: time.Duration(s.SigningRotateEvery), Overlap: time.Duration(s.SigningOverlap)}
 }
 
 func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
@@ -169,10 +186,38 @@ func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
 			s.agents, s.auth = gc, auth
 		}
 	}
+	checkKeys(s, gc, c)
 	if err := new(slog.Level).UnmarshalText([]byte(s.LogLevel)); err != nil {
 		c.Errorf(c.Field("log_level"), "%q is not debug, info, warn or error", s.LogLevel)
 	}
 	checkHTTP(s, c)
+}
+
+// checkKeys applies the rules of the keys_file agent ring: the file must
+// be usable, the rotation a policy the ring accepts, and the agents config
+// must have the tokens section signed tokens need.
+func checkKeys(s *Settings, gc *gateway.Config, c *pcfg.Checker) {
+	p := s.signingPolicy()
+	if err := p.Check(); err != nil {
+		c.Errorf(c.Field("signing_overlap"), "%s", policyError(err))
+	}
+	if s.KeysFile == "" {
+		return
+	}
+	if err := keys.CheckFile(s.KeysFile, agentSpec(p)); err != nil {
+		c.Errorf(c.Field("keys_file"), "%v", err)
+	}
+	if gc == nil {
+		return
+	}
+	if gc.Tokens == nil {
+		c.Errorf(c.Field("keys_file"), "the agents config %s has no tokens section, which signed agent tokens need", s.Config)
+		return
+	}
+	for _, w := range keyPolicyWarnings(p, gc.MaxTokenTTL()) {
+		field, msg, _ := strings.Cut(w, " ")
+		c.Warnf(c.Field(field), "%s", msg)
+	}
 }
 
 // checkHTTP applies the rules httpserver.FromEnv and httpserver.Listen

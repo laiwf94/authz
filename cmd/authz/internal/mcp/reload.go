@@ -16,9 +16,11 @@ import (
 
 	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/agents/gateway"
+	"github.com/laiwf94/authz/internal/agents/identity"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/keys"
 )
 
 // ConfigEnv names the platform configuration file when -config is not
@@ -75,7 +77,8 @@ func serveArgs(prog string, args []string, getenv func(string) string, stderr io
 func sectionConfig(s *Settings) (config, error) {
 	c := config{addr: s.Addr, adminAddr: s.AdminAddr, adminToken: s.AdminToken.Value(), configPath: s.Config,
 		policyPath: s.Policy, auditPath: s.AuditLog,
-		auditRot: part.AuditRotation(s.AuditRotateBytes, s.AuditRotateAge), stateDir: s.StateDir, poll: time.Duration(s.PolicyPoll)}
+		auditRot: part.AuditRotation(s.AuditRotateBytes, s.AuditRotateAge), stateDir: s.StateDir, poll: time.Duration(s.PolicyPoll),
+		keysFile: s.KeysFile, signingPol: s.signingPolicy()}
 	var err error
 	if c.auditKey, err = hex.DecodeString(s.AuditKey.Value()); err != nil || len(c.auditKey) != 32 {
 		return c, errors.New("$.mcp.audit_key must be 64 hex characters")
@@ -160,6 +163,7 @@ type reloader struct {
 	level *slog.LevelVar
 
 	mu            sync.Mutex
+	fileRing      *keys.Ring // the keys_file's agent ring; nil without one
 	log           *slog.Logger
 	gw            *gateway.Gateway
 	pol           *policy.Store
@@ -172,10 +176,13 @@ type reloader struct {
 
 // start hands the reloader the running gateway. The watcher is started
 // after it, so reload and refused always have a gateway and a log.
-func (r *reloader) start(log *slog.Logger, gw *gateway.Gateway, pol *policy.Store, cfg config, gc *gateway.Config) {
+func (r *reloader) start(log *slog.Logger, gw *gateway.Gateway, pol *policy.Store, cfg config, gc *gateway.Config, ring *keys.Ring) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.log, r.gw, r.pol = log, gw, pol
+	if cfg.keysFile != "" {
+		r.fileRing = ring
+	}
 	r.started, r.applied = cfg, cfg
 	r.startedAgents, r.appliedAgents = gc, gc
 	r.policyHash = pol.Current().Hash
@@ -192,9 +199,15 @@ func (r *reloader) reload(_, cur *pcfg.Config, warnings pcfg.Problems) {
 	}
 	var applied []string
 	agentsChanged := !sameAgents(r.appliedAgents, s.agents)
-	keysChanged := !sameKeys(r.applied, cfg)
+	// With a keys_file the signing keys only seeded its agent ring, which
+	// rotates on its own.
+	keysChanged := r.fileRing == nil && !sameKeys(r.applied, cfg)
 	if agentsChanged || keysChanged {
-		if err := r.gw.SetAgents(s.agents, s.auth); err != nil {
+		auth, err := r.authenticator(s.agents, cfg)
+		if err == nil {
+			err = r.gw.SetAgents(s.agents, auth)
+		}
+		if err != nil {
 			r.log.Error("configuration change refused; keeping the running agents", "error", err.Error())
 		} else {
 			if agentsChanged {
@@ -238,6 +251,20 @@ func (r *reloader) reload(_, cur *pcfg.Config, warnings pcfg.Problems) {
 	}
 }
 
+// authenticator is the authenticator for the agents config gc: on the
+// keys_file's agent ring, which keeps rotating under it, or on cfg's
+// signing keys as a configured ring.
+func (r *reloader) authenticator(gc *gateway.Config, cfg config) (*identity.Authenticator, error) {
+	ring := r.fileRing
+	if ring == nil {
+		var err error
+		if ring, err = configuredRing(cfg, time.Now()); err != nil {
+			return nil, err
+		}
+	}
+	return gc.NewRingAuthenticator(ring)
+}
+
 // refused logs a change the watcher would not load. The policy store
 // looks at its file too: when the policy is what broke the change, it is
 // rejected there as well, with its own log line, metric and audit record,
@@ -279,6 +306,9 @@ func restartOnly(a, b config, ga, gb *gateway.Config) []string {
 	out = append(out, part.AuditRotationChanges(a.auditRot, b.auditRot)...)
 	add(string(a.auditKey) != string(b.auditKey), "audit_key")
 	add(a.stateDir != b.stateDir, "state_dir")
+	add(a.keysFile != "" && !sameKeys(a, b), "signing_keys")
+	add(a.keysFile != b.keysFile, "keys_file")
+	add(a.signingPol != b.signingPol, "signing_rotation")
 	add(!slices.Equal(a.origins, b.origins), "allowed_origins")
 	add(a.poll != b.poll, "policy_poll")
 	add(!reflect.DeepEqual(a.http.TLS, b.http.TLS), "tls")

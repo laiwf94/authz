@@ -532,6 +532,39 @@ and a flag before the subcommand is a usage error with exit 2.
   two-container example in the README through the image's `/mcpfake` and
   `/toolgate` links with `TOOLGATE_*` variables only.
 
+### Key rings in the agent gateway
+
+Every signed agent token is now signed and verified on an HS256 key ring
+of `internal/platform/keys`, through `identity.Config.Ring`
+(`gateway.Config.NewRingAuthenticator`): the ring's current key signs, and
+its next key and its retired keys inside their overlap verify.
+
+- Without a keys file, `TOOLGATE_SIGNING_KEYS` becomes a configured ring
+  (`keys.Configured`): the first key signs, every listed key verifies with
+  no expiry, nothing rotates on its own, and the key ids and toolgate's
+  rule for them (1 to 32 letters, digits, `_` or `-`) are kept, so tokens
+  verify exactly as before. A change to `signing_keys` in the platform file
+  still applies in place: the reload builds a new ring.
+- `TOOLGATE_KEYS_FILE` (`keys_file`) puts the tokens on the `agent` ring of
+  the process's key ring file, the same `keys.File` serve and the sign-on
+  gateway use, rotated by `TOOLGATE_SIGNING_ROTATE_EVERY` and
+  `TOOLGATE_SIGNING_OVERLAP` (`signing_rotate_every`, `signing_overlap`;
+  both 24h by default, longer than the 24h limit of
+  `tokens.max_ttl_seconds`). An overlap shorter than the agents config's
+  longest token lifetime is warned about by the gateway and `authz check`.
+  The agents config must have its tokens section.
+- A ring the file lacks starts from the signing keys when they are set
+  (`keys.Spec.Seed`): the active key stays current, the others are retired
+  for the overlap, so the first start with a keys file refuses no token.
+  Once the file holds the ring the signing keys are ignored, with a
+  warning, and a change to them is logged as applying on restart.
+- The authenticator reads the ring on every token, so a rotation needs no
+  reload; an agents config reload builds a new authenticator on the same
+  ring. `authz mcp token mint` with `TOOLGATE_KEYS_FILE` reads the file,
+  never writes it, and signs with the ring's current key.
+- Under `authz run`, the parts naming one file share its rings, rotated and
+  saved once.
+
 ## One audit log (internal/platform/audit)
 
 toolgate's hash-chained writer moved to `internal/platform/audit` in week 2

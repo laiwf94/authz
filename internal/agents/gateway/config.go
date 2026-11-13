@@ -14,6 +14,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/jsonrpc"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/agents/ratelimit"
+	"github.com/laiwf94/authz/internal/platform/keys"
 )
 
 // MaxConfigBytes bounds the configuration file.
@@ -234,4 +235,30 @@ func (c *Config) NewAuthenticator(keys map[string][]byte, activeKey string) (*id
 		cfg.MaxTTL = time.Duration(c.Tokens.MaxTTLSeconds) * time.Second
 	}
 	return identity.New(cfg)
+}
+
+// NewRingAuthenticator builds the authenticator for this configuration
+// with signed tokens on an HS256 key ring (internal/platform/keys): its
+// current key signs, and every key it accepts verifies, so the ring may
+// rotate under the authenticator. A nil ring accepts static keys only.
+func (c *Config) NewRingAuthenticator(ring *keys.Ring) (*identity.Authenticator, error) {
+	cfg := identity.Config{Agents: c.identityAgents()}
+	if ring != nil {
+		if c.Tokens == nil {
+			return nil, errors.New("config: signing keys are set but the config has no tokens section")
+		}
+		cfg.Ring = ring
+		cfg.Issuer, cfg.Audience = c.Tokens.Issuer, c.Tokens.Audience
+		cfg.MaxTTL = time.Duration(c.Tokens.MaxTTLSeconds) * time.Second
+	}
+	return identity.New(cfg)
+}
+
+// MaxTokenTTL is the longest lifetime a signed token may have under this
+// configuration: tokens.max_ttl_seconds, or identity.DefaultMaxTTL.
+func (c *Config) MaxTokenTTL() time.Duration {
+	if c.Tokens == nil || c.Tokens.MaxTTLSeconds == 0 {
+		return identity.DefaultMaxTTL
+	}
+	return time.Duration(c.Tokens.MaxTTLSeconds) * time.Second
 }

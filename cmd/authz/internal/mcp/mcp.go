@@ -34,6 +34,11 @@
 //	TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters; keys the argument digests in the audit log (required)
 //	TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        directory for trusted tool definitions and approvals; empty keeps them in memory only
 //	TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,kid=<64 hex>...] for signed agent tokens; the first signs new tokens
+//	TOOLGATE_KEYS_FILE        AUTHZ_MCP_KEYS_FILE        the process's key ring file, instead of the key list: agent tokens are
+//	                                                     signed and verified on its HS256 "agent" ring, which rotates on its own;
+//	                                                     a ring the file lacks starts from TOOLGATE_SIGNING_KEYS when set
+//	TOOLGATE_SIGNING_ROTATE_EVERY AUTHZ_MCP_SIGNING_ROTATE_EVERY  rotation period of the agent ring (default 24h; 0s never)
+//	TOOLGATE_SIGNING_OVERLAP  AUTHZ_MCP_SIGNING_OVERLAP  how long its retired keys verify tokens (default 24h)
 //	TOOLGATE_ALLOWED_ORIGINS  AUTHZ_MCP_ALLOWED_ORIGINS  comma-separated browser origins allowed to call /mcp (default none)
 //	TOOLGATE_POLICY_POLL      AUTHZ_MCP_POLICY_POLL      how often to check the policy file (default "2s"; "0" disables; SIGHUP always reloads)
 //	TOOLGATE_LOG_LEVEL        AUTHZ_MCP_LOG_LEVEL        debug, info, warn or error (default info)
@@ -63,6 +68,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -76,6 +82,7 @@ import (
 	"github.com/laiwf94/authz/internal/platform/audit"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/logging"
 )
 
@@ -121,6 +128,14 @@ different values is an error:
   TOOLGATE_AUDIT_KEY        AUTHZ_MCP_AUDIT_KEY        64 hex characters keying argument digests (required)
   TOOLGATE_STATE_DIR        AUTHZ_MCP_STATE_DIR        tool pins and approvals; empty keeps them in memory
   TOOLGATE_SIGNING_KEYS     AUTHZ_MCP_SIGNING_KEYS     kid=<64 hex>[,...] for signed agent tokens
+  TOOLGATE_KEYS_FILE        AUTHZ_MCP_KEYS_FILE        the process's key ring file, instead of the key list:
+                                                       agent tokens are signed and verified on its "agent"
+                                                       ring, created when missing (from the signing keys
+                                                       when set), rotated on its own and saved after every
+                                                       rotation; "token mint" signs with its current key
+  TOOLGATE_SIGNING_ROTATE_EVERY  AUTHZ_MCP_SIGNING_ROTATE_EVERY  how long a signing key on that ring
+                                                       stays current (default 24h; 0s never rotates it)
+  TOOLGATE_SIGNING_OVERLAP  AUTHZ_MCP_SIGNING_OVERLAP  how long a retired signing key verifies (default 24h)
   TOOLGATE_ALLOWED_ORIGINS  AUTHZ_MCP_ALLOWED_ORIGINS  browser origins allowed to call /mcp (default none)
   TOOLGATE_POLICY_POLL      AUTHZ_MCP_POLICY_POLL      policy file check interval (default "2s"; "0" disables)
   TOOLGATE_LOG_LEVEL        AUTHZ_MCP_LOG_LEVEL        debug, info, warn or error (default info)
@@ -242,6 +257,8 @@ type config struct {
 	stateDir        string
 	keys            map[string][]byte
 	activeKey       string
+	keysFile        string      // TOOLGATE_KEYS_FILE: agent tokens on its agent ring
+	signingPol      keys.Policy // TOOLGATE_SIGNING_ROTATE_EVERY and _OVERLAP
 	origins         []string
 	poll            time.Duration
 	logLevel        slog.Level
@@ -256,6 +273,9 @@ func required(getenv func(string) string, name string) (string, error) {
 	return v, nil
 }
 
+// kidRe is toolgate's rule for signing key ids.
+var kidRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+
 func parseKeys(v string) (map[string][]byte, string, error) {
 	keys := map[string][]byte{}
 	active := ""
@@ -269,6 +289,9 @@ func parseKeys(v string) (map[string][]byte, string, error) {
 		if !ok || err != nil || len(k) != 32 {
 			return nil, "", errors.New("TOOLGATE_SIGNING_KEYS must be kid=<64 hex characters>, comma-separated")
 		}
+		if !kidRe.MatchString(kid) {
+			return nil, "", fmt.Errorf("TOOLGATE_SIGNING_KEYS key id %q must be 1 to 32 letters, digits, '_' or '-'", kid)
+		}
 		if _, dup := keys[kid]; dup {
 			return nil, "", fmt.Errorf("TOOLGATE_SIGNING_KEYS repeats key id %q", kid)
 		}
@@ -281,7 +304,7 @@ func parseKeys(v string) (map[string][]byte, string, error) {
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
-	c := config{addr: "127.0.0.1:8080", adminAddr: "127.0.0.1:8081", poll: defaultPolicyPoll}
+	c := config{addr: "127.0.0.1:8080", adminAddr: "127.0.0.1:8081", poll: defaultPolicyPoll, signingPol: DefaultSigningPolicy}
 	if v := getenv("TOOLGATE_ADDR"); v != "" {
 		c.addr = v
 	}
@@ -318,6 +341,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 	c.stateDir = getenv("TOOLGATE_STATE_DIR")
 	if c.keys, c.activeKey, err = parseKeys(getenv("TOOLGATE_SIGNING_KEYS")); err != nil {
 		return c, err
+	}
+	c.keysFile = getenv("TOOLGATE_KEYS_FILE")
+	if c.signingPol, err = parsePolicy(getenv("TOOLGATE_SIGNING_ROTATE_EVERY"), getenv("TOOLGATE_SIGNING_OVERLAP"), DefaultSigningPolicy); err != nil {
+		return c, fmt.Errorf("TOOLGATE_SIGNING_ROTATE_EVERY, TOOLGATE_SIGNING_OVERLAP: %s", policyError(err))
 	}
 	for _, o := range strings.Split(getenv("TOOLGATE_ALLOWED_ORIGINS"), ",") {
 		if o = strings.TrimSpace(o); o != "" {
@@ -387,13 +414,14 @@ func runIn(ctx context.Context, h part.Host, getenv func(string) string, logOut 
 	if err != nil {
 		return err
 	}
-	auth, err := gc.NewAuthenticator(cfg.keys, cfg.activeKey)
-	if err != nil {
+	// The agents and keys must make an authenticator before anything
+	// opens, as toolgate checked them.
+	if _, err := gc.NewAuthenticator(cfg.keys, cfg.activeKey); err != nil {
 		return err
 	}
 	level := new(slog.LevelVar)
 	level.Set(cfg.logLevel)
-	return serveGateway(ctx, h, getenv, cfg, gc, auth, level, logOut, ready, nil)
+	return serveGateway(ctx, h, getenv, cfg, gc, level, logOut, ready, nil)
 }
 
 // fileMode is a gateway started from the platform configuration file.
@@ -414,13 +442,13 @@ func serveFile(ctx context.Context, path string, getenv func(string) string, log
 		return err
 	}
 	level.Set(cfg.logLevel)
-	return serveGateway(ctx, part.Host{}, getenv, cfg, s.agents, s.auth, level, logOut, ready, &fileMode{path: path, watcher: w, rl: rl, getenv: getenv})
+	return serveGateway(ctx, part.Host{}, getenv, cfg, s.agents, level, logOut, ready, &fileMode{path: path, watcher: w, rl: rl, getenv: getenv})
 }
 
 // serveGateway runs the gateway until ctx ends. fm is nil when it was
 // configured from the environment. h is the process the gateway is a part
 // of; its zero value is a process of its own.
-func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, cfg config, gc *gateway.Config, auth *identity.Authenticator, level *slog.LevelVar,
+func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, cfg config, gc *gateway.Config, level *slog.LevelVar,
 	logOut io.Writer, ready func(gw, admin string), fm *fileMode) error {
 	// The platform handler: request lines carry the correlation ID their
 	// audit records do, and its tap feeds the secret scan. No subcommand
@@ -431,6 +459,16 @@ func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, 
 			log.Warn("TOOLGATE_ variables are ignored with a configuration file; use its AUTHZ_MCP_ overrides",
 				"config", fm.path, "ignored", ignored)
 		}
+	}
+	// Agent tokens are signed and verified on a key ring: the keys file's
+	// agent ring, or the signing keys as a configured one.
+	ring, fk, err := agentRing(h, cfg, gc, time.Now(), log, fm != nil)
+	if err != nil {
+		return err
+	}
+	auth, err := gc.NewRingAuthenticator(ring)
+	if err != nil {
+		return err
 	}
 	pol, err := policy.OpenStore(cfg.policyPath, nil)
 	if err != nil {
@@ -468,6 +506,13 @@ func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, 
 		return err
 	}
 	defer gw.Close()
+	if fk != nil {
+		kctx, stopKeys := context.WithCancel(ctx)
+		stopped := fk.start(kctx, cfg.keysFile, log)
+		defer func() { stopKeys(); <-stopped }()
+		log.Info("agent tokens on a key ring", "keys_file", cfg.keysFile, "ring", keys.RingAgent,
+			"signing_rotate_every", cfg.signingPol.RotateEvery.String(), "signing_overlap", cfg.signingPol.Overlap.String())
+	}
 
 	// Longer than the worst case for one call: a tool-list refresh (120 s)
 	// plus an approval wait (60 s), a slot wait (1 s) and the call itself
@@ -482,7 +527,7 @@ func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, 
 	bg, cancelBG := context.WithCancel(ctx)
 	defer cancelBG()
 	if fm != nil {
-		fm.rl.start(log, gw, pol, cfg, gc)
+		fm.rl.start(log, gw, pol, cfg, gc, ring)
 		go func() { _ = fm.watcher.Run(bg) }()
 		log.Info("configuration loaded", "config", fm.path, "sources", len(fm.watcher.Current().Sources()))
 	}
@@ -643,18 +688,15 @@ func token(prog, sub string, args []string, getenv func(string) string, stdin io
 		if err != nil {
 			return err
 		}
-		keys, active, err := parseKeys(getenv("TOOLGATE_SIGNING_KEYS"))
+		ring, err := mintRing(getenv)
 		if err != nil {
 			return err
-		}
-		if len(keys) == 0 {
-			return errors.New("TOOLGATE_SIGNING_KEYS is required to mint tokens")
 		}
 		gc, err := readGatewayConfig(path, nil) // upstream credentials are not needed to mint
 		if err != nil {
 			return err
 		}
-		auth, err := gc.NewAuthenticator(keys, active)
+		auth, err := gc.NewRingAuthenticator(ring)
 		if err != nil {
 			return err
 		}
@@ -667,4 +709,32 @@ func token(prog, sub string, args []string, getenv func(string) string, stdin io
 	default:
 		return errors.New("usage: " + prog + " token new | hash | mint -sub ID [-owner NAME] [-scope \"a b\"] [-ttl 15m]")
 	}
+}
+
+// mintRing is the ring "token mint" signs with: the agent ring of
+// TOOLGATE_KEYS_FILE, read and not written, so the token is signed by the
+// key the running gateway signs with; or else the signing keys.
+func mintRing(getenv func(string) string) (*keys.Ring, error) {
+	if path := getenv("TOOLGATE_KEYS_FILE"); path != "" {
+		f, err := keys.OpenFile(path, nil)
+		if err != nil {
+			return nil, err
+		}
+		r := f.Set().Ring(keys.RingAgent)
+		switch {
+		case r == nil:
+			return nil, fmt.Errorf("%s has no %s ring yet; authz mcp serve adds it when it starts with this keys file", path, keys.RingAgent)
+		case r.Alg() != keys.HS256:
+			return nil, fmt.Errorf("%s: ring %s holds %s keys, want %s", path, keys.RingAgent, r.Alg(), keys.HS256)
+		}
+		return r, nil
+	}
+	ks, active, err := parseKeys(getenv("TOOLGATE_SIGNING_KEYS"))
+	if err != nil {
+		return nil, err
+	}
+	if len(ks) == 0 {
+		return nil, errors.New("TOOLGATE_SIGNING_KEYS or TOOLGATE_KEYS_FILE is required to mint tokens")
+	}
+	return configuredRing(config{keys: ks, activeKey: active}, time.Now())
 }
