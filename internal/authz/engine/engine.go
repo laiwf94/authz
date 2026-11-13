@@ -114,6 +114,12 @@ func (e argError) Is(target error) bool { return target == ErrInvalidArgument }
 
 func invalid(format string, args ...any) error { return argError(fmt.Sprintf(format, args...)) }
 
+// InvalidArgument returns an error that matches ErrInvalidArgument and
+// whose text is the reason alone, as the engine's own are. Other Engine
+// implementations (the fake in internal/authz/enginetest) use it so their
+// callers can tell request errors apart the same way.
+func InvalidArgument(format string, args ...any) error { return invalid(format, args...) }
+
 // CheckRequest is one permission check. Subject may be a userset
 // (group:eng#member).
 type CheckRequest struct {

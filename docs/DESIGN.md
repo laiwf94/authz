@@ -275,6 +275,43 @@ Pages are in ID order, the wildcard first, at most 1,000 per call; the
 cursor is the last ID returned. Each page walks the graph again at the
 same snapshot, so pages read at one token agree with each other.
 
+## The engine contract and the fake (internal/authz/enginetest)
+
+`engine.Engine` is what the HTTP handlers, the gateway and the MCP proxy
+ask. `enginetest.Run` is its contract as a test suite: every consistency
+mode and token rule, the answers of every query on a fixed sharing fixture
+(nested groups in a cycle, a folder tree, a wildcard, an exclusion, an
+intersection), paging, every request limit and the sentinel error it
+returns, atomic writes, preconditions, deletes by filter, cancellation,
+concurrent read-your-writes, and on random graphs that `Check`,
+`CheckBulk`, `LookupResources`, `LookupSubjects` and a recursive `Expand`
+agree with each other. It runs against the real engine (with and without
+the check cache) and against `enginetest.Fake`.
+
+The fake is for the tests of the other tracks, which need an engine in
+the same process without a store: `enginetest.NewFake(schema,
+relationships...)`. It is deterministic (revisions count from 1, tokens
+use a fixed test key, `minimize_latency` reads the head, results come in a
+fixed order) and fails on demand: `Fail(store.ErrUnavailable)` makes every
+call fail and `ExpireBefore(rev)` makes older snapshots expire.
+`enginetest.NewLocal` gives the real engine over an in-memory store with
+the same token key when a test wants that instead.
+
+The fake answers by a different method from the engine: it solves the
+schema's rules as one boolean equation per `object#relation`. Exclusion is
+not monotone, so it computes the alternating fixpoint: the subtracted
+sides are read from an assumption, the rest is solved as a least
+fixpoint, and alternating from "nothing holds" climbs to the answer. On
+data with no cycle through an exclusion this is the stratified answer, the
+one the engine gives; on data with such a cycle there is no two-valued
+answer and the fake returns the work-limit error. Lookups check every
+candidate the data names, plus one ID it does not name, which holds
+exactly when a wildcard does. `TestFakeMatchesLocal` feeds both engines
+the same random writes and deletes over two schemas, one of which
+subtracts a recursive permission, and requires equal results for every
+query at every revision: answers, pages and cursors, expand trees with
+their node limits, revisions and tokens.
+
 ## API security
 
 - API keys are compared as SHA-256 digests with `subtle.ConstantTimeCompare`
