@@ -209,6 +209,21 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **Audit query** ([#81](https://github.com/laiwf94/authz/issues/81)).
+  `authz audit query [-full] [-limit N] [-count] [-read-only] FILE TERM...`
+  prints the records of every segment that all terms match, as their JSON
+  lines, checking the chain as it reads and failing with `FAIL FILE: reason`
+  (exit 1) where it breaks. Terms are `KEY=VALUE` or `KEY!=VALUE` over
+  `track`, `event`, `tenant`, `actor`, `subject`, `action`, `decision`,
+  `correlation`, an agent's `agent`, `tool` and `rule`, any payload field
+  as `data.NAME`, and `since`/`until` (RFC 3339, a date or `-24h`); values
+  take comma lists, quotes and a trailing `*`. toolgate's records, which
+  have no envelope, are read from their payload (actor the agent, subject
+  `tool:NAME`). The first query to read a rotated-out segment writes a sparse
+  time index beside it (`FILE.<first record>.idx`, an entry every 64 KiB),
+  and later queries bounded in time skip what lies outside their window:
+  16 ms instead of 176 ms for the last tenth of 50,000 records. The summary
+  on standard error says how many records were skipped unread.
 - **Inclusion and consistency proofs over the audit log** ([#81](https://github.com/laiwf94/authz/issues/81)).
   `internal/platform/merkle` makes and checks RFC 6962 inclusion and
   consistency proofs (RFC 9162 verification), checked against the published

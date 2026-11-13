@@ -617,6 +617,24 @@ func verify(r io.Reader, allowTorn bool, s *Schemas) (Result, error) {
 // number, its line without the newline (the caller may keep it) and the
 // line's hash.
 func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result, lines int, each func(uint64, []byte, [sha256.Size]byte)) (Result, error) {
+	var v visitor
+	if each != nil {
+		v = func(rec *Record, line []byte, sum [sha256.Size]byte) error {
+			each(rec.Seq, line, sum)
+			return nil
+		}
+	}
+	return verifyRecords(r, allowTorn, s, res, lines, v)
+}
+
+// visitor is given each verified record: the record, its line without the
+// newline and the line's hash. An error stops the read and is returned as
+// it is, with the result up to and including that record.
+type visitor func(rec *Record, line []byte, sum [sha256.Size]byte) error
+
+// verifyRecords is verifyFrom with a visitor that is given the decoded
+// record and may stop the read.
+func verifyRecords(r io.Reader, allowTorn bool, s *Schemas, res Result, lines int, each visitor) (Result, error) {
 	br := bufio.NewReaderSize(r, 64<<10)
 	for n := lines + 1; ; n++ {
 		line, err := readLine(br)
@@ -677,7 +695,9 @@ func verifyFrom(r io.Reader, allowTorn bool, s *Schemas, res Result, lines int, 
 		res.Records++
 		res.Size += int64(len(line)) + 1
 		if each != nil {
-			each(rec.Seq, line, sum)
+			if err := each(&rec, line, sum); err != nil {
+				return res, err
+			}
 		}
 	}
 }

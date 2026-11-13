@@ -9,6 +9,8 @@
 //	                                        print an RFC 6962 inclusion or consistency proof
 //	authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE]
 //	                                        check one with only the public key
+//	authz audit query [-full] [-limit N] [-count] [-read-only] FILE [TERM...]
+//	                                        print the records every TERM matches
 //	authz audit keygen -out FILE NAME      make a checkpoint signing key
 package auditcmd
 
@@ -28,7 +30,7 @@ import (
 )
 
 // Summary is the one-line description shown in "authz help".
-const Summary = "verify the platform's audit log across its segments and against signed checkpoints, and prove records are in it"
+const Summary = "verify the platform's audit log across its segments and against signed checkpoints, prove records are in it, and query it"
 
 // Exit codes of "authz audit".
 const (
@@ -40,6 +42,7 @@ const (
 const usage = `usage: authz audit verify [-head HASH] [-key KEY [-checkpoint NOTE]] FILE
        authz audit prove -record N|-from M [-size S] FILE
        authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE]
+       authz audit query [-full] [-limit N] [-count] [-read-only] FILE [TERM...]
        authz audit keygen -out FILE NAME
 
 verify checks the hash chain of the audit log that authz serve
@@ -90,6 +93,39 @@ NAME at TIME" and the record, or "OK PROOF: the M records signed by NAME at
 TIME extend the K signed at TIME", or "FAIL PROOF: reason", with the exit
 codes of verify.
 
+query prints the records of FILE, across every segment and oldest first,
+that every TERM matches, each as the JSON line it is in the log, while
+checking the chain as verify does. A term is KEY=VALUE or KEY!=VALUE; a
+value is a comma-separated list of alternatives, or one double-quoted
+string, and a value ending in * matches by prefix:
+
+  track             authz, authn, agents or audit
+  event             the event type, such as tool_call or authn.login_failed
+  tenant actor subject action decision correlation
+                    the envelope's fields; an agent's tool call has actor
+                    the agent, subject tool:NAME and action its event type
+  agent tool rule   an agent's records: the payload's agent, tool, and
+                    rule_id or constraint_rule_id
+  data.NAME         any payload field
+  since until       at or after since and before until: an RFC 3339 time,
+                    a date (2006-01-02) or a duration before now (-24h)
+
+For example: authz audit query audit.log track=agents decision=deny
+since=-24h. A query with since or until skips the segments, and the parts
+of a segment, whose records all fall outside its times, using the time
+index FILE.<first record>.idx that the first query to read a rotated-out
+segment writes beside it; those records are not read, and the summary
+says how many. verify, or query -full, reads every record.
+
+  -full             read every record, so the whole chain is checked
+  -limit N          stop after N matching records
+  -count            print the number of matching records instead
+  -read-only        write no time index files, as on a copy of a log
+
+A summary goes to standard error. A broken chain prints "FAIL FILE:
+reason" there, after the records read before it, with the exit codes of
+verify.
+
 keygen makes an Ed25519 key named NAME for signing checkpoints. The
 signing key goes to FILE, created with mode 0600 (an existing file is not
 replaced): point AUTHZ_AUDIT_SIGNING_KEY_FILE at it, or put its contents in
@@ -113,6 +149,8 @@ func Run(_ context.Context, args []string, _ func(string) string, stdin io.Reade
 		return verifyCmd(fs.Args()[1:], stdout, stderr)
 	case "prove":
 		return proveCmd(fs.Args()[1:], stdin, stdout, stderr)
+	case "query":
+		return queryCmd(fs.Args()[1:], time.Now, stdout, stderr)
 	case "keygen":
 		return keygenCmd(fs.Args()[1:], stdout, stderr)
 	case "":

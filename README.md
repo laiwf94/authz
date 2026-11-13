@@ -277,6 +277,23 @@ $ curl -H "Authorization: Bearer $ADMIN" 'localhost:8081/admin/audit/proof?from=
 $ ./authz audit prove -check grew.proof -key audit.example.com+1d9f0a3c+AaW... -old saved.checkpoint
 ```
 
+`authz audit query FILE TERM...` reads the log back across every segment,
+checking the chain as it goes, and prints the records every term matches as
+the JSON lines they are. Terms filter on track, event type, tenant, actor,
+subject, action, decision and correlation ID, on an agent's agent, tool and
+rule, on any payload field (`data.NAME`), and on time (`since`, `until`):
+
+```console
+$ ./authz audit query /var/lib/authz/audit.jsonl track=agents agent=alice-bot decision=deny since=-24h
+{"seq":977,"time":"2026-11-20T10:04:11.52Z",...,"event":"tool_call","data":{"agent":"alice-bot",...,"decision":"deny","rule_id":"default-deny",...}}
+authz audit query: 1 of 1204 records matched; 310 read with the chain checked, 894 outside the times skipped by the time index (authz audit verify reads them)
+$ ./authz audit query -count /var/lib/authz/audit.jsonl track=authn decision=deny subject=app:wiki,app:crm
+```
+
+A query bounded in time skips the segments, and the parts of segments, that
+hold nothing in its window, using a sparse time index the first query
+writes beside each rotated-out segment (`audit.jsonl.<first record>.idx`).
+
 A sign-in, the check it leads to and the tool call that check allows then
 follow one another in one verified chain under one correlation ID; CI runs
 exactly that across the three processes. The format, the event types and

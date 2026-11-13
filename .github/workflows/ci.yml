@@ -78,6 +78,8 @@ jobs:
           go test ./internal/agents/policy -run=^$ -fuzz=FuzzCases -fuzztime=20s
           go test ./internal/agents/identity -run=^$ -fuzz=FuzzAuthenticate -fuzztime=20s
           go test ./internal/platform/audit -run=^$ -fuzz=FuzzVerify -fuzztime=20s
+          go test ./internal/platform/audit -run=^$ -fuzz=FuzzParseFilter -fuzztime=20s
+          go test ./internal/platform/audit -run=^$ -fuzz=FuzzParseIndex -fuzztime=20s
           go test ./internal/platform/logging -run=^$ -fuzz=FuzzParseTraceparent -fuzztime=20s
           go test ./internal/platform/logging -run=^$ -fuzz=FuzzScan -fuzztime=20s
           go test ./internal/platform/merkle -run=^$ -fuzz=FuzzUnmarshal -fuzztime=20s

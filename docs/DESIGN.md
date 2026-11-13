@@ -958,6 +958,75 @@ checkpoint from `FILE.checkpoint`, and `authz audit prove -check PROOF
 alone; a consistency proof needs `-old`, since a tree head the proof
 carries itself proves nothing.
 
+### Query and the time index
+
+`audit.Query` streams the records of a log that match an `audit.Filter`,
+oldest first, across every segment, and `authz audit query FILE TERM...`
+prints them as the lines they are. A filter is a list of `KEY=VALUE` or
+`KEY!=VALUE` terms that must all hold; a value is a comma-separated list
+of alternatives (or one double-quoted string), and a trailing `*` matches
+by prefix. The keys are the envelope's fields (`tenant`, `actor`,
+`subject`, `action`, `decision`, `correlation`), `track` and `event`,
+`agent`, `tool` and `rule` (the payload's `rule_id` or
+`constraint_rule_id`) for the agents track, `data.NAME` for any payload
+field, and `since` and `until` (RFC 3339, a date or `-24h`). toolgate's
+records carry no envelope, so a query reads theirs from the payload: actor
+the agent, subject `tool:NAME`, action the event type, decision the
+payload's, with an approval's `approved` and `denied` as allow and deny. A
+filter is at most 4 KiB and 64 terms, so the same parser can take one from
+a request.
+
+The query checks the chain as it reads, by the same code as `verify`
+(`verifyRecords`): each record links to the one before and carries the
+next sequence number, each payload matches its schema, and each segment
+continues the one before it, a check made at the segment's first record
+before that record is handed out. A record is handed out once it is linked
+to the records before it, so a change to it is found at the next record and
+the query fails after what it already printed. The active file is opened
+before the segments are listed; a rotation in between names the open file
+as a segment, and the listing is cut before it, so a rotation during a
+query never shows as a gap. A torn final line of the active file is a write
+in progress and ends the query.
+
+A query bounded in time need not read the whole log. The first query to
+read a rotated-out segment in full writes `SEGMENT.idx` beside it
+(atomically; not with `-read-only`, and never again while it describes the
+segment): the segment's first record, record count, size, chain start,
+previous segment and head, its earliest and latest record times, and an
+entry every 64 KiB holding the entry's record, byte offset, the hash it
+links to, and the latest time of any record before it:
+
+```
+authz audit index 1
+segment audit.jsonl.00000000000000000835 first 835 records 4211 size 1048702
+start 5be1… previous audit.jsonl.00000000000000000001
+head 9f3a…
+time 2026-11-20T08:00:00.12Z 2026-11-20T09:59:58.7Z
+entry 1103 65551 c41e… 2026-11-20T08:07:43.91Z
+…
+```
+
+Writers sharing a file stamp records with their own clocks, so times need
+not rise; an entry's time is therefore the latest of every record before
+it, never the entry's own. A segment whose times all fall outside
+`[since, until)` is not opened, and a segment that is read starts at the
+last entry whose earlier records are all before `since`. What is read is
+still checked against the index: it must begin at the entry's record with
+the hash the entry names and end at the index's record count and head,
+and a skipped segment must have the size its index records and be
+continued by the next segment from the head its index records. An index
+that does not describe its segment (another name, another size, a line out
+of shape) is ignored and made again. The index cannot vouch for the
+records it lets a query skip, and the summary says how many it skipped;
+`authz audit verify` or `query -full` read them all. The active segment
+has no index: the rotation limit bounds how much of it a query reads.
+
+On 4 cores, over 50,000 records in 1 MiB segments (`BenchmarkQuery`), a
+full read with schema checks runs at about 165,000 records a second (6 µs
+each, mostly decoding JSON), a query for the last tenth of the time range
+reads it in 16 ms with the indexes against 176 ms without, about 3 million
+records a second of log covered.
+
 ## One configuration file (internal/platform/config)
 
 Every subcommand reads its part of one versioned JSON document. A section
