@@ -194,3 +194,51 @@ func TestProveUsage(t *testing.T) {
 		t.Errorf("unsigned log: %+v", p)
 	}
 }
+
+// An auditor checks a claim about the record a proof proves, written as
+// query terms: the proof must hold and the record must match every term.
+func TestProveCheckTerms(t *testing.T) {
+	dir := t.TempDir()
+	keyFile, vkey := keygen(t, dir, "audit.example")
+	path := filepath.Join(dir, "audit.jsonl")
+	signedLog(t, path, keyFile, 6, audit.Rotation{})
+	pf := filepath.Join(dir, "denial.proof")
+	p := proveTo(t, pf, "-record", "4", path)
+
+	code, out, errs := run("prove", "-check", pf, "-key", vkey, "track=authn", "decision=deny", "subject=x.example", "since=2000-01-01")
+	if code != OK || errs != "" || !strings.HasPrefix(out, "OK "+pf+": record 4 (authn.access_denied at ") ||
+		!strings.Contains(out, " records signed by audit.example at ") ||
+		!strings.Contains(out, " and matches track=authn decision=deny subject=x.example since=2000-01-01T00:00:00Z\n"+p.Entry+"\n") {
+		t.Fatalf("matching terms: %d %q %q", code, out, errs)
+	}
+	for _, terms := range [][]string{
+		{"decision=allow"},
+		{"track=authn", "decision!=deny"},
+		{"track=agents"},
+		{"data.host=y.example"},
+		{"until=2000-01-02"},
+	} {
+		code, out, _ := run(append([]string{"prove", "-check", pf, "-key", vkey}, terms...)...)
+		if code != Failed || !strings.HasPrefix(out, "FAIL "+pf+": record 4 (authn.access_denied at ") ||
+			!strings.Contains(out, ", but does not match ") || strings.Contains(out, p.Entry) {
+			t.Errorf("%v: %d %q", terms, code, out)
+		}
+	}
+	// A proof that fails is reported as such, whatever the terms say.
+	_, other := keygen(t, dir, "other.example")
+	if code, out, _ := run("prove", "-check", pf, "-key", other, "decision=deny"); code != Failed || !strings.Contains(out, "checkpoint in the proof") {
+		t.Errorf("another key: %d %q", code, out)
+	}
+	// Terms that do not parse, and terms for a consistency proof.
+	if code, _, errs := run("prove", "-check", pf, "-key", vkey, "colour=red"); code != Usage || !strings.Contains(errs, "authz audit prove: filter:") {
+		t.Errorf("unknown key: %d %q", code, errs)
+	}
+	if code, _, errs := run("prove", "-check", pf, "-key", vkey, path); code != Usage || !strings.Contains(errs, "authz audit prove: filter:") {
+		t.Errorf("a FILE after -check: %d %q", code, errs)
+	}
+	cf := filepath.Join(dir, "cons.proof")
+	proveTo(t, cf, "-from", "2", path)
+	if code, _, errs := run("prove", "-check", cf, "-key", vkey, "-old", pf, "decision=deny"); code != Usage || !strings.Contains(errs, "holds no record") {
+		t.Errorf("terms for a consistency proof: %d %q", code, errs)
+	}
+}

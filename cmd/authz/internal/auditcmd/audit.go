@@ -7,8 +7,9 @@
 //	                                        and against a signed checkpoint
 //	authz audit prove -record N|-from M [-size S] FILE
 //	                                        print an RFC 6962 inclusion or consistency proof
-//	authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE]
-//	                                        check one with only the public key
+//	authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE] [TERM...]
+//	                                        check one with only the public key, and
+//	                                        that the record it proves matches every TERM
 //	authz audit query [-full] [-limit N] [-count] [-read-only] FILE [TERM...]
 //	                                        print the records every TERM matches
 //	authz audit export -key KEY [-checkpoint NOTE] [-out FILE] FILE
@@ -43,7 +44,7 @@ const (
 
 const usage = `usage: authz audit verify [-head HASH] [-key KEY [-checkpoint NOTE]] FILE
        authz audit prove -record N|-from M [-size S] FILE
-       authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE]
+       authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE] [TERM...]
        authz audit query [-full] [-limit N] [-count] [-read-only] FILE [TERM...]
        authz audit export -key KEY [-checkpoint NOTE] [-out FILE] FILE
        authz audit keygen -out FILE NAME
@@ -91,10 +92,16 @@ only the public key, without the log:
   -old NOTE         for a consistency proof, the earlier checkpoint the
                     auditor kept, of the size the proof starts from: needed
 
+With TERMs, written as for query below, the record an inclusion proof
+proves must also match every one of them, so an auditor's claim such as
+"a denial of alice's sign-in was logged" is checked, not read by eye:
+authz audit prove -check denial.proof -key KEY track=authn decision=deny
+actor=alice. A record that is in the log but does not match fails.
+
 Prints "OK PROOF: record N (EVENT at TIME) is in the M records signed by
-NAME at TIME" and the record, or "OK PROOF: the M records signed by NAME at
-TIME extend the K signed at TIME", or "FAIL PROOF: reason", with the exit
-codes of verify.
+NAME at TIME[ and matches TERMS]" and the record, or "OK PROOF: the M
+records signed by NAME at TIME extend the K signed at TIME", or "FAIL
+PROOF: reason", with the exit codes of verify.
 
 query prints the records of FILE, across every segment and oldest first,
 that every TERM matches, each as the JSON line it is in the log, while
@@ -161,7 +168,7 @@ func Run(_ context.Context, args []string, _ func(string) string, stdin io.Reade
 	case "verify":
 		return verifyCmd(fs.Args()[1:], stdout, stderr)
 	case "prove":
-		return proveCmd(fs.Args()[1:], stdin, stdout, stderr)
+		return proveCmd(fs.Args()[1:], time.Now, stdin, stdout, stderr)
 	case "query":
 		return queryCmd(fs.Args()[1:], time.Now, stdout, stderr)
 	case "export":

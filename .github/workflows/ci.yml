@@ -149,6 +149,13 @@ jobs:
         run: go run ./cmd/authz mcp policy test toolgate/examples/policy.json toolgate/examples/policy_cases.json
       - name: Demo (agents)
         run: ./toolgate/examples/demo.sh
+      # One signed audit chain end to end (#81): serve, gateway and mcp as
+      # three processes rotating one busy log, verify against the newest
+      # checkpoint, an auditor holding only the public key proving that an
+      # agent's call was denied (examples/audit/auditor.sh) and refusing a
+      # false claim about it, and a removed middle segment named.
+      - name: Demo (audit)
+        run: ./examples/audit/demo.sh
       # Both images carry /wicket -> /authz, and a config served through
       # /wicket, the gateway image and authz gateway answers byte for byte
       # the same: docs/proxies.md, "Moving from wicket".

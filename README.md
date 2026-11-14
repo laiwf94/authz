@@ -240,97 +240,143 @@ configuration changes reach a running process are covered in
 
 ## One audit chain
 
-`authz serve`, `authz gateway` and `authz mcp` append to the same
-hash-chained audit log, and may share one file on a host: each append locks
-the file, reads what the others wrote since and chains its record after
-them. Each record is checked against its event's typed schema before it is
-written, and carries the request's correlation ID: the trace ID of its
-`traceparent`, or a new one, which is also on the request's log lines and is
-passed on to upstreams.
+Every part of the platform writes to one hash-chained audit log: `authz
+serve` its writes, schema changes and (with `GRANTD_AUDIT_CHECKS=true`)
+every check decision; `authz gateway` sign-ins, logouts, admin actions and
+denials; `authz mcp` tool calls, approvals and quarantines. So a sign-in, a
+permission change and an agent's tool call are links of the same chain, and
+one signed checkpoint covers them all. Run as three processes on a host,
+the three subcommands may share one file: each append locks it, reads what
+the others wrote since and chains its record after them. Every record is
+checked against its event's typed schema before it is written, and carries
+the request's correlation ID, the trace ID of its `traceparent` or a new
+one, which is also on the request's log lines and is passed on to
+upstreams.
+
+A log nobody but the operator can check proves little, so the log is built
+for an auditor who trusts only a public key:
+
+| Piece | What it gives | Files beside `audit.jsonl` |
+|---|---|---|
+| Hash chain | no record changed, removed or reordered, except at the end | |
+| Segments | the file rotates by size or age; the chain runs on across segments, and a missing one is named | `audit.jsonl.<first record>` |
+| Signed checkpoints | the record count, the RFC 6962 tree head and the last record's hash, signed with Ed25519 in the signed note format: records cut from the end are caught | `.checkpoint`, `.tree` |
+| Proofs | one record is in the log, or today's log extends an earlier checkpoint, in about log2(N) hashes, checked without the log | |
+| Query | records by track, tenant, actor, agent, tool, rule, decision, payload field and time, read with the chain checked; a sparse time index skips the rest | `.<first record>.idx` |
+| Retention | old segments go once an exported checkpoint covers them; the tree head and the proofs of what is left are unchanged | `.exported`, `.base` |
+
+### Setting it up
 
 ```console
-$ export GRANTD_AUDIT_LOG=/var/lib/authz/audit.jsonl GRANTD_AUDIT_CHECKS=true   # writes, schema changes and every check decision
-$ export WICKET_AUDIT_LOG=/var/lib/authz/audit.jsonl                            # sign-ins, logouts, admin actions, denials
-$ export AUTHZ_MCP_AUDIT_LOG=/var/lib/authz/audit.jsonl                         # tool calls, approvals, quarantines
-$ export GRANTD_AUDIT_ROTATE_BYTES=67108864 WICKET_AUDIT_ROTATE_BYTES=67108864 AUTHZ_MCP_AUDIT_ROTATE_BYTES=67108864
-$ ./authz audit verify /var/lib/authz/audit.jsonl                               # every segment, one chain
-$ ./authz audit keygen -out /etc/authz/audit.key audit.example.com              # prints the public key
+$ ./authz audit keygen -out /etc/authz/audit.key audit.example.com     # the auditor gets the public key it prints
 audit.example.com+1d9f0a3c+AaW...
-$ export AUTHZ_AUDIT_SIGNING_KEY_FILE=/etc/authz/audit.key                      # every subcommand signs checkpoints
-$ curl -H "Authorization: Bearer $ADMIN" localhost:8081/admin/audit/checkpoint > saved.checkpoint
-$ ./authz audit verify -key audit.example.com+1d9f0a3c+AaW... -checkpoint saved.checkpoint /var/lib/authz/audit.jsonl
+$ export AUTHZ_AUDIT_SIGNING_KEY_FILE=/etc/authz/audit.key             # every subcommand signs checkpoints with it
+$ export GRANTD_AUDIT_LOG=/var/lib/authz/audit.jsonl GRANTD_AUDIT_CHECKS=true
+$ export WICKET_AUDIT_LOG=/var/lib/authz/audit.jsonl
+$ export AUTHZ_MCP_AUDIT_LOG=/var/lib/authz/audit.jsonl
+$ export GRANTD_AUDIT_ROTATE_BYTES=67108864 WICKET_AUDIT_ROTATE_BYTES=67108864 AUTHZ_MCP_AUDIT_ROTATE_BYTES=67108864
+$ export AUTHZ_AUDIT_RETAIN_BYTES=1073741824                           # optional: keep about 1 GiB of old segments
 ```
 
-With `*_AUDIT_ROTATE_BYTES` or `*_AUDIT_ROTATE_AGE` (or `audit_rotate_bytes`
-and `audit_rotate_age` in a section) the file is cut into segments, older
-ones beside it as `audit.jsonl.<first record number>`, each linked to the
-one before. Every process writing the file must set the same limits; one
-that does not is refused at start.
+`*_AUDIT_ROTATE_BYTES` and `*_AUDIT_ROTATE_AGE` (or `audit_rotate_bytes`
+and `audit_rotate_age` in a section of the configuration file) cut the
+file into segments; older ones sit beside it named for their first record,
+each linked to the one before. Every process writing the file must set the
+same limits, and one that does not is refused at start. With the signing
+key, each subcommand writes a checkpoint to `audit.jsonl.checkpoint` on
+start, every `AUTHZ_AUDIT_CHECKPOINT_INTERVAL` (default `1m`) when records
+were added, after each rotation and on shutdown. The key, the interval and
+the retention limits are platform-wide variables, read by all three
+subcommands; `authz check` reports a malformed or missing one before
+anything starts.
 
-With a signing key the log signs its own state: a checkpoint, in the signed
-note format of the Go checksum database and transparency logs, names the
-number of records, the RFC 6962 Merkle tree head over all of them and the
-hash of the last one. Each subcommand writes one
-to `audit.jsonl.checkpoint` on start, every
-`AUTHZ_AUDIT_CHECKPOINT_INTERVAL` (default `1m`) when records were added,
-after each rotation and on shutdown, and the mcp admin API serves the
-newest at `GET /admin/audit/checkpoint`. An auditor who keeps one can later
-check, holding only the public key, that the log still holds every record
-it covered, unchanged: the chain alone cannot tell records cut from its end
-from a log that ended there.
+### Checking it
 
-The tree head also makes records provable one at a time, without the log:
-`GET /admin/audit/proof?record=N` serves an RFC 6962 inclusion proof of
-record N against the newest checkpoint, which it carries, and `?from=M` a
-consistency proof that the log extends an earlier checkpoint of M records
-(`&size=S` proves against an earlier one instead). `authz audit prove
--record N FILE` makes the same from the files, and an auditor checks either
-with the public key alone:
+`authz audit verify` checks every segment as one chain and every record
+against its schema; with `-key` it also checks the newest checkpoint, or
+one the auditor saved, against the log. A segment that was removed,
+renamed, reordered or replaced is named:
 
 ```console
-$ curl -H "Authorization: Bearer $ADMIN" 'localhost:8081/admin/audit/proof?record=42' > call.proof
-$ ./authz audit prove -check call.proof -key audit.example.com+1d9f0a3c+AaW...
-OK call.proof: record 42 (tool_call at 2026-11-20T10:04:11.52Z) is in the 977 records signed by audit.example.com at 2026-11-20T10:05:00Z
-{"seq":42,...}
-$ curl -H "Authorization: Bearer $ADMIN" 'localhost:8081/admin/audit/proof?from=512' > grew.proof
-$ ./authz audit prove -check grew.proof -key audit.example.com+1d9f0a3c+AaW... -old saved.checkpoint
+$ ./authz audit verify -key audit.example.com+1d9f0a3c+AaW... /var/lib/authz/audit.jsonl
+OK /var/lib/authz/audit.jsonl: 829 records in 27 segments, head ac8735bc...
+OK /var/lib/authz/audit.jsonl: checkpoint signed by audit.example.com at 2026-11-20T10:05:00Z covers 807 of the 829 records
+$ rm /var/lib/authz/audit.jsonl.00000000000000000372                     # someone removes a middle segment
+$ ./authz audit verify /var/lib/authz/audit.jsonl
+FAIL /var/lib/authz/audit.jsonl: /var/lib/authz/audit.jsonl.00000000000000000404: records 372 to 403 are missing between audit.jsonl.00000000000000000343 and this segment; a segment (audit.jsonl.00000000000000000372) was removed
 ```
 
-`authz audit query FILE TERM...` reads the log back across every segment,
-checking the chain as it goes, and prints the records every term matches as
-the JSON lines they are. Terms filter on track, event type, tenant, actor,
-subject, action, decision and correlation ID, on an agent's agent, tool and
-rule, on any payload field (`data.NAME`), and on time (`since`, `until`):
+`authz audit query FILE TERM...` prints the records every term matches, as
+the JSON lines they are, checking the chain as it reads. Terms filter on
+`track`, `event`, `tenant`, `actor`, `subject`, `action`, `decision` and
+`correlation`, on an agent's `agent`, `tool` and `rule`, on any payload
+field (`data.NAME`), and on time (`since`, `until`). A query bounded in
+time skips the segments, and the parts of segments, that hold nothing in
+its window, using the time index the first query writes beside each
+rotated-out segment:
 
 ```console
-$ ./authz audit query /var/lib/authz/audit.jsonl track=agents agent=alice-bot decision=deny since=-24h
-{"seq":977,"time":"2026-11-20T10:04:11.52Z",...,"event":"tool_call","data":{"agent":"alice-bot",...,"decision":"deny","rule_id":"default-deny",...}}
+$ ./authz audit query /var/lib/authz/audit.jsonl track=agents agent=report-bot decision=deny since=-24h
+{"seq":977,"time":"2026-11-20T10:04:11.52Z",...,"event":"tool_call",...,"data":{"agent":"report-bot",...,"decision":"deny","rule_id":"default-deny",...}}
 authz audit query: 1 of 1204 records matched; 310 read with the chain checked, 894 outside the times skipped by the time index (authz audit verify reads them)
 $ ./authz audit query -count /var/lib/authz/audit.jsonl track=authn decision=deny subject=app:wiki,app:crm
 ```
 
-A query bounded in time skips the segments, and the parts of segments, that
-hold nothing in its window, using a sparse time index the first query
-writes beside each rotated-out segment (`audit.jsonl.<first record>.idx`).
+### Proving it to an auditor
+
+The auditor keeps the public key and the checkpoints they were given, and
+never needs the log or the admin token. The mcp admin API serves the newest
+checkpoint at `GET /admin/audit/checkpoint`, an RFC 6962 inclusion proof of
+record N at `GET /admin/audit/proof?record=N`, and a proof that the log
+extends an earlier checkpoint of M records at `?from=M` (both with
+`&size=S` for a checkpoint of S records); `authz audit prove -record N|-from
+M FILE` makes the same proofs from the files. `authz audit prove -check`
+checks one with the public key alone, and with query terms also checks that
+the record proved is what the auditor was told it is:
+
+```console
+$ curl -H "Authorization: Bearer $ADMIN" localhost:8081/admin/audit/checkpoint > evidence/checkpoint
+$ curl -H "Authorization: Bearer $ADMIN" "localhost:8081/admin/audit/proof?record=977&size=1204" > evidence/record.proof
+$ curl -H "Authorization: Bearer $ADMIN" "localhost:8081/admin/audit/proof?from=512&size=1204" > evidence/grew.proof
+$ examples/audit/auditor.sh audit.example.com+1d9f0a3c+AaW... saved.checkpoint evidence \
+    track=agents agent=report-bot tool=http_get decision=deny
+OK evidence/grew.proof: the 1204 records signed by audit.example.com at 2026-11-20T10:05:00Z extend the 512 signed at 2026-11-19T17:00:00Z
+OK evidence/record.proof: record 977 (tool_call at 2026-11-20T10:04:11.52Z) is in the 1204 records signed by audit.example.com at 2026-11-20T10:05:00Z and matches track=agents agent=report-bot tool=http_get decision=deny
+{"seq":977,...}
+```
+
+[examples/audit/auditor.sh](examples/audit/auditor.sh) is the auditor's
+side in full: the consistency proof shows the log shown now extends the one
+the auditor saw last time (nothing they were shown was dropped or
+rewritten since, and there is no second log), the inclusion proof shows the
+record is in it byte for byte, and the terms that it is a denial of that
+call. A claim the record does not back, such as `decision=allow`, fails.
+Then the newer checkpoint becomes the one they keep.
+[examples/audit/demo.sh](examples/audit/demo.sh), which CI runs, does the
+whole thing: three processes rotating one busy log, verify with the public
+key, the auditor's proof of an agent's denied call, a false claim refused,
+and a removed middle segment named by verify and query.
+
+### Retention
 
 With `AUTHZ_AUDIT_RETAIN_BYTES` or `AUTHZ_AUDIT_RETAIN_AGE` (and the
-signing key) the oldest rotated-out segments are removed once they are past
-the limit, but only those an exported checkpoint covers: one handed out by
-`POST /admin/audit/export` or `authz audit export`, which records it as
-`audit.jsonl.exported`. `audit.jsonl.base` keeps the removed records' count,
-last hash and Merkle range, so the auditor's checkpoint still verifies and
-proofs of the records left are unchanged.
+signing key), the oldest rotated-out segments are removed once they are
+past the limit, but only those an exported checkpoint covers: one handed
+out by `POST /admin/audit/export` or `authz audit export`, which records it
+as `audit.jsonl.exported`. `audit.jsonl.base` keeps the removed records'
+count, last hash and Merkle range, so the auditor's checkpoints still
+verify and proofs of the records left are unchanged:
 
-```
-$ export AUTHZ_AUDIT_RETAIN_BYTES=1073741824                                     # keep about 1 GiB of old segments
+```console
 $ ./authz audit export -key audit.example.com+1d9f0a3c+AaW... -out saved.checkpoint /var/lib/authz/audit.jsonl
 OK /var/lib/authz/audit.jsonl: checkpoint of 977 records signed by audit.example.com at 2026-11-20T10:05:00Z recorded as exported in /var/lib/authz/audit.jsonl.exported
 ```
 
-A sign-in, the check it leads to and the tool call that check allows then
+A sign-in, the check it leads to and the tool call that check allows
 follow one another in one verified chain under one correlation ID; CI runs
-exactly that across the three processes. The format, the event types and
-the locking are in [docs/DESIGN.md](docs/DESIGN.md#one-audit-log-internalplatformaudit).
+exactly that across the three processes. The format, the locking, the
+segment, checkpoint and index formats, and what each check does and does
+not prove are in [docs/DESIGN.md](docs/DESIGN.md#one-audit-log-internalplatformaudit).
 
 ## HTTP API
 

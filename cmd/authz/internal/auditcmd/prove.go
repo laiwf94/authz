@@ -15,13 +15,13 @@ import (
 )
 
 const proveUsage = `usage: authz audit prove -record N|-from M [-size S] FILE
-       authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE]`
+       authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE] [TERM...]`
 
 // maxProofBytes bounds a proof read by -check: a record of at most
 // audit.MaxLineBytes, escaped, and 64 hashes.
 const maxProofBytes = 8 << 20
 
-func proveCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func proveCmd(args []string, now func() time.Time, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("audit prove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), usage) }
@@ -39,7 +39,7 @@ func proveCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return Usage
 	}
 	if *checkFile != "" {
-		if fs.NArg() != 0 || *record != 0 || *from != 0 || *size != 0 {
+		if *record != 0 || *from != 0 || *size != 0 {
 			fmt.Fprintln(stderr, "authz audit prove: -check takes no FILE, -record, -from or -size\n"+proveUsage)
 			return Usage
 		}
@@ -47,7 +47,17 @@ func proveCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "authz audit prove: -check needs -key, the public key the checkpoints are signed with")
 			return Usage
 		}
-		return checkProof(*checkFile, *key, *cpPath, *oldPath, stdin, stdout, stderr)
+		// The terms the proved record must match, as query reads them.
+		var want *audit.Filter
+		if fs.NArg() > 0 {
+			f, err := audit.ParseFilterTerms(fs.Args(), now())
+			if err != nil {
+				fmt.Fprintln(stderr, "authz audit prove:", strings.TrimPrefix(err.Error(), "audit: "))
+				return Usage
+			}
+			want = f
+		}
+		return checkProof(*checkFile, *key, *cpPath, *oldPath, want, stdin, stdout, stderr)
 	}
 	if fs.NArg() != 1 || (*record == 0) == (*from == 0) || *key != "" || *cpPath != "" || *oldPath != "" {
 		fmt.Fprintln(stderr, proveUsage)
@@ -101,7 +111,10 @@ func proveCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return OK
 }
 
-func checkProof(proofPath, key, cpPath, oldPath string, stdin io.Reader, stdout, stderr io.Writer) int {
+// checkProof checks the proof in proofPath with the public key alone and,
+// when want is set, that the record it proves matches it: an auditor's
+// claim such as "a denial for this user was logged" holds only if both do.
+func checkProof(proofPath, key, cpPath, oldPath string, want *audit.Filter, stdin io.Reader, stdout, stderr io.Writer) int {
 	v, err := readVerifier(key)
 	if err != nil {
 		fmt.Fprintln(stderr, "authz audit prove: -key:", err)
@@ -135,6 +148,10 @@ func checkProof(proofPath, key, cpPath, oldPath string, stdin io.Reader, stdout,
 	}
 	if dec.More() {
 		return fail("not a proof: more than one JSON value")
+	}
+	if p.Kind == audit.ProofConsistency && want != nil {
+		fmt.Fprintln(stderr, "authz audit prove: a consistency proof holds no record for terms to match")
+		return Usage
 	}
 	if p.Kind == audit.ProofConsistency && oldPath == "" {
 		fmt.Fprintln(stderr, "authz audit prove: a consistency proof needs -old, the earlier checkpoint it starts from")
@@ -183,8 +200,16 @@ func checkProof(proofPath, key, cpPath, oldPath string, stdin io.Reader, stdout,
 	}
 	var r audit.Record
 	_ = json.Unmarshal([]byte(p.Entry), &r) // Check parsed it
-	fmt.Fprintf(stdout, "OK %s: record %d (%s at %s) is in the %d records %s\n%s\n",
-		proofPath, p.Record, r.Event, r.Time, cp.Size, signed, p.Entry)
+	if want != nil && !want.Match(&r, audit.Default()) {
+		return fail("record %d (%s at %s) is in the %d records %s, but does not match %s",
+			p.Record, r.Event, r.Time, cp.Size, signed, want)
+	}
+	matches := ""
+	if want != nil {
+		matches = " and matches " + want.String()
+	}
+	fmt.Fprintf(stdout, "OK %s: record %d (%s at %s) is in the %d records %s%s\n%s\n",
+		proofPath, p.Record, r.Event, r.Time, cp.Size, signed, matches, p.Entry)
 	return OK
 }
 

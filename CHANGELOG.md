@@ -273,6 +273,24 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **One audit chain, end to end** ([#81](https://github.com/laiwf94/authz/issues/81)).
+  Week 3 is complete: the platform's audit log rotates into segments that
+  verify as one chain, signs Ed25519 checkpoints in the signed note format,
+  proves records and growth with RFC 6962 proofs, answers queries through a
+  sparse time index and prunes only what an exported checkpoint covers.
+  New: `authz audit prove -check PROOF -key KEY ... TERM...` also requires
+  the proved record to match the query terms, so a claim such as
+  `decision=deny agent=report-bot` is checked, not read by eye.
+  `examples/audit/auditor.sh` is an auditor's script that holds only the
+  public key. It checks a consistency proof from the auditor's last
+  checkpoint and an inclusion proof of the claimed record, then keeps the
+  newer checkpoint. `examples/audit/demo.sh` (the new "Demo (audit)" CI
+  step) runs serve, gateway and mcp rotating one busy signed log, proves
+  an agent's denied call to the auditor, refuses a false claim about it,
+  and shows verify and query naming a removed middle segment. The README
+  audit section and the DESIGN audit section are rewritten around what
+  each layer proves and leaves open, with a table of the files beside the
+  log and a new "What an auditor can check".
 - **Fix: audit query on the records authz mcp writes for a request**
   ([#241](https://github.com/laiwf94/authz/issues/241)). They carry an
   envelope with only the correlation ID, and `actor`, `subject`, `action`

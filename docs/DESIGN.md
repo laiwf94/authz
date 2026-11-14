@@ -638,6 +638,40 @@ its next key and its retired keys inside their overlap verify.
 
 ## One audit log (internal/platform/audit)
 
+The platform keeps one record of what happened: sign-ins and denials from
+the gateway, writes, schema changes and check decisions from serve, tool
+calls and approvals from mcp, in one hash chain, usually one file that the
+three processes share. It is built so that someone who trusts only a public
+key can check it, not just the operator who runs it. Each layer below
+closes a gap the one before leaves open:
+
+| Layer | Proves | Leaves open | Section |
+|---|---|---|---|
+| Hash chain, typed schemas | no record changed, removed or reordered; every record well formed | records cut from the end; a whole rewritten log | One file, three writers |
+| Segments | the same across files, and names a missing, renamed or swapped one | the same | Segments |
+| Signed checkpoints | how many records there were and what the last one was, signed with Ed25519 | that the log a reader was shown is the one signed later | Checkpoints |
+| Merkle tree and proofs | one record is in a signed log; a signed log extends an earlier one; each in about log2(N) hashes, without the log | nothing about records nobody asks for | Merkle tree; Inclusion and consistency proofs |
+| Query and time index | finds records by who, what and when, with the chain checked as it reads | the records an index lets it skip (verify reads them) | Query and the time index |
+| Retention | removes only what an exported checkpoint covers, keeping tree heads and proofs | the removed records themselves | Retention |
+
+What lies beside `audit.jsonl`, all of it written atomically (temporary
+file, fsync, rename, directory fsync) except the segments, which are only
+appended to and then renamed by a hard link:
+
+| File | Holds | Written |
+|---|---|---|
+| `audit.jsonl` | the active segment | each append |
+| `audit.jsonl.<20-digit first record>` | a rotated-out segment | on rotation |
+| `audit.jsonl.checkpoint` | the newest signed checkpoint | open, timer, rotation, close, on demand |
+| `audit.jsonl.tree` | the Merkle compact range the checkpoint was signed over | before each checkpoint |
+| `audit.jsonl.<first record>.idx` | a segment's sparse time index | by the first query that reads it whole |
+| `audit.jsonl.exported` | the last checkpoint handed out for retention | on export |
+| `audit.jsonl.base` | what retention removed: count, last hash, compact range | before segments are removed |
+
+"What an auditor can check" at the end puts them together the way an
+auditor uses them, and `examples/audit/demo.sh`, which CI runs, does it end
+to end.
+
 toolgate's hash-chained writer moved to `internal/platform/audit` in week 2
 (#78) so that all three parts append to one chain. The line format is
 toolgate's, with an optional envelope between `event` and `data`:
@@ -724,6 +758,25 @@ writers' records the same way first, so `/admin/audit/head` reports the
 file's head and `authz mcp audit verify -head` holds for a shared file. Windows has no `flock` in the standard library,
 so there a log keeps one writer.
 
+`TestMainOneChain` (cmd/authz) runs the three writers end to end as a
+deployment would: serve, gateway and mcp as three processes of the binary with one
+`*_AUDIT_LOG` file, a fake identity provider, and a proxy configured like
+the nginx example in docs/proxies.md in front of an app. A traced browser
+signs in through the gateway; the proxy's forward-auth subrequest carries
+the browser's `traceparent`, the gateway's allowed answer hands one back,
+and the app passes it on to the check it asks serve and to the tool call it
+then makes through mcp, which passes it to the tool's server. The file must
+pass `VerifyWith` with records from all three writers, and under the
+browser's trace ID it must hold, in order, `authn.login_succeeded` (alice,
+`app:docs`), `authz.check_decided` (`doc:readme` `view` allow for
+`user:alice`) and the call's two `tool_call` records (alice's agent,
+`read_file`, allowed by `files-read`). A sign-in spans several browser
+requests, so in production the sign-in shares a trace ID with what follows
+only when the client keeps one trace across them; otherwise the session ID
+in `authn.login_succeeded` and the user in the later records tie them.
+`TestSharedWriterProcesses` has four processes append 600 records at once
+and requires one chain with each record once.
+
 ### Segments
 
 A log that only grows is hard to ship, keep or prune, so `Options.Rotation`
@@ -802,25 +855,6 @@ checks, denied forward-auth requests and tool calls interleave across ten
 segments, `authz audit verify` and `authz mcp audit verify` agree on the
 chain, a serve with other limits and a gateway with none are refused
 without writing anything, and a deleted middle segment is named.
-
-`TestMainOneChain` (cmd/authz) runs it end to end as a deployment would:
-serve, gateway and mcp as three processes of the binary with one
-`*_AUDIT_LOG` file, a fake identity provider, and a proxy configured like
-the nginx example in docs/proxies.md in front of an app. A traced browser
-signs in through the gateway; the proxy's forward-auth subrequest carries
-the browser's `traceparent`, the gateway's allowed answer hands one back,
-and the app passes it on to the check it asks serve and to the tool call it
-then makes through mcp, which passes it to the tool's server. The file must
-pass `VerifyWith` with records from all three writers, and under the
-browser's trace ID it must hold, in order, `authn.login_succeeded` (alice,
-`app:docs`), `authz.check_decided` (`doc:readme` `view` allow for
-`user:alice`) and the call's two `tool_call` records (alice's agent,
-`read_file`, allowed by `files-read`). A sign-in spans several browser
-requests, so in production the sign-in shares a trace ID with what follows
-only when the client keeps one trace across them; otherwise the session ID
-in `authn.login_succeeded` and the user in the later records tie them.
-`TestSharedWriterProcesses` has four processes append 600 records at once
-and requires one chain with each record once.
 
 ### Checkpoints
 
@@ -990,7 +1024,10 @@ the same proof from the files after `verify` passes, taking S and the
 checkpoint from `FILE.checkpoint`, and `authz audit prove -check PROOF
 -key KEY [-checkpoint NOTE] [-old NOTE]` checks one with the public key
 alone; a consistency proof needs `-old`, since a tree head the proof
-carries itself proves nothing.
+carries itself proves nothing. Query terms after the flags (`-check denial.proof -key
+KEY decision=deny agent=report-bot`) must all match the record an
+inclusion proof proves, or the check fails though the proof holds; see
+"What an auditor can check".
 
 ### Query and the time index
 
@@ -1124,6 +1161,54 @@ the log verifies, nothing past the exported checkpoint was removed, every
 checkpoint the auditor received over records still present verifies, and
 no covered segment was left. At the end it proves that the log extends the
 auditor's last checkpoint, using only the public key.
+
+### What an auditor can check
+
+An auditor holds the log's public key and the checkpoints they were handed
+before, and nothing else: not the log, not the admin token, not the
+operator's word. Asked to confirm a claim such as "the agent's call of
+http_get was denied", they get three files from the operator: a newer
+checkpoint, an inclusion proof of the record against it, and a consistency
+proof from their own last checkpoint to it (`GET
+/admin/audit/checkpoint`, then `/admin/audit/proof?record=N&size=S` and
+`?from=M&size=S`, or `authz audit prove` on the files).
+`examples/audit/auditor.sh` checks them in this order:
+
+1. `authz audit prove -check grew.proof -key KEY -checkpoint checkpoint
+   -old saved`: the checkpoint opens with the key, and the log it signs
+   extends the one the auditor's saved checkpoint signs. Every record the
+   auditor was shown before is still there and unchanged, and the operator
+   is not showing a second log, a fork, to this auditor alone.
+2. `authz audit prove -check record.proof -key KEY -checkpoint checkpoint
+   TERM...`: the record is leaf N-1 of the signed tree, byte for byte, and
+   it matches every term, read by the same `Filter.Match` as `authz audit
+   query`, so the claim is checked against the record's fields, not by
+   reading the JSON by eye. A record that is in the log but is not what the
+   claim says fails, as does a proof that does not lead to the signed tree
+   head, whatever the terms.
+3. Only when both hold does the newer checkpoint replace the saved one, so
+   next time the log must extend it.
+
+What this does not prove: that nothing else was logged that the operator
+did not mention (proofs are about records someone asks for), or that an
+event that happened was logged at all; a process that never wrote a record
+leaves nothing to prove. Within those limits, rewriting history the
+auditor has seen needs the signing key, and even with the key it shows as
+two checkpoints that are not consistent with each other, which the auditor
+holds.
+
+`examples/audit/demo.sh`, the "Demo (audit)" step in CI, runs the whole
+flow with the built binary. It starts serve, gateway and mcp as three
+processes writing one log that rotates every 16 KiB and signs a checkpoint
+every second, and keeps them busy from four concurrent clients: checks,
+denied forward-auth requests, allowed and denied tool calls. The auditor
+saves a checkpoint, four more clients run, and `authz audit verify -key`
+checks the 27-odd segments against the newest checkpoint. The operator
+finds the agent's denied calls with `authz audit query` and hands over the
+three files. `auditor.sh` accepts the claim that a call was denied by
+`default-deny` and refuses `decision=allow` for the same evidence. Finally
+a middle segment is removed from a copy of the log, and verify and query
+both fail, naming the removed segment and the records missing.
 
 ## One configuration file (internal/platform/config)
 
