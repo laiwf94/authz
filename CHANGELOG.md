@@ -273,6 +273,12 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **Fix: audit query on the records authz mcp writes for a request**
+  ([#241](https://github.com/laiwf94/authz/issues/241)). They carry an
+  envelope with only the correlation ID, and `actor`, `subject`, `action`
+  and `decision` terms matched none of them; a query for an agent's denied
+  calls found nothing. Those fields now come from the payload whenever the
+  envelope leaves them empty.
 - **Audit retention** ([#81](https://github.com/laiwf94/authz/issues/81)).
   `AUTHZ_AUDIT_RETAIN_BYTES` (at least 4096) and `AUTHZ_AUDIT_RETAIN_AGE`
   (at least 1h) remove the oldest rotated-out segments of a signed audit

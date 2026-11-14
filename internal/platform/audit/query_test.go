@@ -240,3 +240,41 @@ func FuzzParseIndex(f *testing.F) {
 		}
 	})
 }
+
+// The records authz mcp writes for a request carry an envelope with only
+// the correlation ID; their actor, subject, action and decision still come
+// from the payload (#241). An envelope field that is set wins.
+func TestFilterMatchCorrelatedAgentRecords(t *testing.T) {
+	call := rec(t, `{"seq":1,"time":"2026-11-16T10:00:00Z","prev":"","event":"tool_call","correlation_id":"c1","data":{"agent":"report-bot","auth":"static","tool":"http_get","decision":"deny","rule_id":"default-deny","stage":"refused"}}`)
+	denied := rec(t, `{"seq":2,"time":"2026-11-16T10:00:01Z","prev":"","event":"approval_decided","correlation_id":"c2","data":{"approval_id":"a1","decision":"denied","agent":"bob-bot","tool":"rm","args_sha256":"x","expires_at":"y"}}`)
+	set := rec(t, `{"seq":3,"time":"2026-11-16T10:00:02Z","prev":"","event":"tool_call","actor":"svc","subject":"tool:other","action":"call","decision":"allow","correlation_id":"c3","data":{"agent":"report-bot","auth":"static","tool":"read_file","decision":"deny","stage":"policy"}}`)
+	all := []*Record{call, denied, set}
+	for _, c := range []struct {
+		filter string
+		want   []uint64
+	}{
+		{"decision=deny", []uint64{1, 2}},
+		{"decision=allow", []uint64{3}},
+		{"actor=report-bot", []uint64{1}},
+		{"actor=svc,bob-bot", []uint64{2, 3}},
+		{"subject=tool:http_get,tool:rm", []uint64{1, 2}},
+		{"subject=tool:other", []uint64{3}},
+		{"action=tool_call", []uint64{1}},
+		{"action=approval_decided", []uint64{2}},
+		{"agent=report-bot tool=http_get decision=deny rule=default-deny correlation=c1", []uint64{1}},
+	} {
+		f, err := ParseFilter(c.filter, time.Time{})
+		if err != nil {
+			t.Fatalf("%q: %v", c.filter, err)
+		}
+		var got []uint64
+		for _, r := range all {
+			if f.Match(r, nil) {
+				got = append(got, r.Seq)
+			}
+		}
+		if !equalSeqs(got, c.want) {
+			t.Errorf("%q matched %v, want %v", c.filter, got, c.want)
+		}
+	}
+}

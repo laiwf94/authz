@@ -42,8 +42,9 @@ import (
 //	             an RFC 3339 time, a date (midnight UTC) or a duration
 //	             before now such as -24h; = only
 //
-// toolgate's records (the agents track) carry no envelope, so a query sees
-// theirs as derived from the payload: actor is the agent, subject is
+// toolgate's records (the agents track) carry no envelope, or one with only
+// the request's correlation ID, so a query sees the envelope fields they
+// leave empty as derived from the payload: actor is the agent, subject is
 // "tool:" and the tool, action is the event type, and decision is the
 // payload's, approved and denied read as allow and deny. A record a field
 // does not apply to has the empty value, which only "KEY=" (or KEY!=X)
@@ -366,24 +367,24 @@ func (v *view) field(key string) string {
 	case "correlation":
 		return r.CorrelationID
 	case "actor":
-		if r.Actor == "" && v.bare() {
+		if r.Actor == "" && v.agents() {
 			return v.str("agent")
 		}
 		return r.Actor
 	case "subject":
-		if r.Subject == "" && v.bare() {
+		if r.Subject == "" && v.agents() {
 			if t := v.str("tool"); t != "" {
 				return "tool:" + t
 			}
 		}
 		return r.Subject
 	case "action":
-		if r.Action == "" && v.bare() {
+		if r.Action == "" && v.agents() {
 			return r.Event
 		}
 		return r.Action
 	case "decision":
-		if r.Decision == "" && v.bare() {
+		if r.Decision == "" && v.agents() {
 			switch d := v.str("decision"); d {
 			case "approved":
 				return string(Allow)
@@ -402,10 +403,12 @@ func (v *view) field(key string) string {
 	return v.str(strings.TrimPrefix(key, "data."))
 }
 
-// bare reports whether the record is an agents-track record without an
-// envelope, whose envelope fields come from its payload.
-func (v *view) bare() bool {
-	return v.rec.Envelope == (Envelope{}) && TrackOf(v.rec.Event, v.s) == TrackAgents
+// agents reports whether the record is an agents-track record, whose
+// envelope fields, when empty, come from its payload. authz mcp writes the
+// records of a request with an envelope holding only the correlation ID
+// (#241), so the envelope as a whole need not be empty.
+func (v *view) agents() bool {
+	return TrackOf(v.rec.Event, v.s) == TrackAgents
 }
 
 // str is a payload field's text: a string's value, another scalar's JSON,

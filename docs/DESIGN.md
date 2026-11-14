@@ -1004,8 +1004,9 @@ by prefix. The keys are the envelope's fields (`tenant`, `actor`,
 `agent`, `tool` and `rule` (the payload's `rule_id` or
 `constraint_rule_id`) for the agents track, `data.NAME` for any payload
 field, and `since` and `until` (RFC 3339, a date or `-24h`). toolgate's
-records carry no envelope, so a query reads theirs from the payload: actor
-the agent, subject `tool:NAME`, action the event type, decision the
+records carry no envelope, or, written for a request, one holding only the
+correlation ID, so a query reads the envelope fields they leave empty from
+the payload (#241): actor the agent, subject `tool:NAME`, action the event type, decision the
 payload's, with an approval's `approved` and `denied` as allow and deny. A
 filter is at most 4 KiB and 64 terms, so the same parser can take one from
 a request.
