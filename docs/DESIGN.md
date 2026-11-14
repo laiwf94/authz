@@ -278,7 +278,8 @@ same snapshot, so pages read at one token agree with each other.
 ## The engine contract and the fake (internal/authz/enginetest)
 
 `engine.Engine` is what the HTTP handlers, the gateway and the MCP proxy
-ask. `enginetest.Run` is its contract as a test suite: every consistency
+ask (under `authz run`, the gateway and mcp get serve's engine from
+`part.Host.Engine`; see "Several subcommands in one process"). `enginetest.Run` is its contract as a test suite: every consistency
 mode and token rule, the answers of every query on a fixed sharing fixture
 (nested groups in a cycle, a folder tree, a wildcard, an exclusion, an
 intersection), paging, every request limit and the sentinel error it
@@ -1530,8 +1531,36 @@ alone; what changes is what each takes from its process, a `part.Host`:
   the one error that caused it. A part that stops after binding ends the
   process context, which drains the others as SIGTERM does.
 
+- **One engine.** The serve part hands its `engine.Local` to the others
+  through `part.Engines`: serve calls `Host.ProvideEngine` as soon as its
+  API server exists (before binding, so a part asking while it starts
+  cannot deadlock against the group), and `run` calls `Engines.Stop` with
+  serve's error when serve returns. The gateway and mcp call
+  `Host.Engine(ctx)` when they need it: it waits for serve, returns
+  `ErrNoEngine` at once when the process has no serve part (or the
+  subcommand runs alone), and an error matching `ErrEngineStopped`, with
+  serve's own error inside, once serve has stopped or failed to start.
+  Being the same engine, an in-process check shares the HTTP API's check
+  cache, its `minimize_latency` snapshot and its token key, so tokens pass
+  freely between the two, and it is counted in the same `grantd_check_*`
+  metrics. Against the raw check engine it costs under 2 µs
+  (`BenchmarkInProcessCheck`).
+
 SIGHUP goes to the gateway, which reloads its configuration, and to mcp,
 which reloads its policy.
+
+`TestOneEngineThreePaths` (cmd/authz/internal/runcmd) starts serve, the
+gateway and mcp in one process and checks one relationship (a doc viewer
+through a group) three ways: over serve's `/v1/check`, and in process
+through the engine the gateway's and mcp's Hosts were handed. With the
+token of an HTTP write, all three answer allowed with
+`at_least_as_fresh` and `at_exact_snapshot` and return the same token,
+and serve's `/metrics` counts all six checks. A delete written in process
+through mcp's engine is denied over HTTP and through the gateway with its
+token, while the first token still reads the old snapshot on every path;
+an HTTP write is seen in process with its token. After shutdown the
+gateway's Host reports `ErrEngineStopped`. `TestNoEngineWithoutServe`
+covers a process without serve and one whose serve fails to start.
 
 `TestRunSurvivesSIGKILLMidWrite` (cmd/authz) holds the shared process to
 the crash guarantees each part has alone. Four times, while all three parts

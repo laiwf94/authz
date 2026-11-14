@@ -467,6 +467,9 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 	if err != nil {
 		return err
 	}
+	// Under "authz run" the gateway and mcp parts ask this engine in
+	// process, with the tokens the API returns.
+	h.ProvideEngine(srv.Engine())
 	g, err := h.Binder()(cfg.http, httpserver.Spec{
 		Name:    "api",
 		Addr:    cfg.addr,

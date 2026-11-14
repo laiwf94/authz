@@ -3,7 +3,8 @@
 // a listener group and keeps a metrics registry of its own; under
 // "authz run" every subcommand joins one httpserver.Shared group and writes
 // to one registry, so the process has one readiness flip, one drain and one
-// metrics exposition.
+// metrics exposition, and the serve part hands its engine to the others
+// for in-process checks.
 package part
 
 import (
@@ -28,6 +29,10 @@ type Host struct {
 	// the same keys_file share its rings, rotated once. Nil opens a file of
 	// the subcommand's own.
 	Keys *keys.Files
+	// Engines carries the serve part's grantd engine to the other parts
+	// of the process (see Engines). Nil means there is none: the
+	// subcommand runs alone, or the process has no serve part.
+	Engines *Engines
 }
 
 // Binder returns Bind, or httpserver.Bind when it is not set.

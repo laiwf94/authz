@@ -7,7 +7,10 @@
 //     readiness probe at once and drains every listener within one bound;
 //   - one metrics registry: each part's /metrics answers with the metrics
 //     of all three;
-//   - one log output, each line saying which part wrote it.
+//   - one log output, each line saying which part wrote it;
+//   - one grantd engine: serve's, which the gateway and mcp parts get from
+//     part.Host.Engine and ask in process, with the same cache, snapshots
+//     and consistency tokens as serve's HTTP API.
 //
 // A part that cannot start stops the others before anything is bound, and
 // one that fails later stops the process the same way SIGTERM does.
@@ -21,6 +24,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -209,10 +213,17 @@ func run(ctx context.Context, parts []string, opts httpserver.Options, getenv fu
 	errs := make([]error, len(parts))
 	var wg sync.WaitGroup
 	keyFiles := new(keys.Files) // parts naming one keys_file share its rings
+	var engines *part.Engines   // serve's engine, asked in process by the others
+	if slices.Contains(parts, "serve") {
+		engines = part.NewEngines()
+	}
 	for i, p := range parts {
-		h := part.Host{Name: p, Bind: shared.Part(i), Metrics: reg, Keys: keyFiles}
+		h := part.Host{Name: p, Bind: shared.Part(i), Metrics: reg, Keys: keyFiles, Engines: engines}
 		wg.Go(func() {
 			errs[i] = starters[p](pctx, h, getenv, path, logOut, hups[p])
+			if p == "serve" {
+				engines.Stop(errs[i])
+			}
 			// A part that returns stops the others: before binding by
 			// aborting the group, after it by ending the process context.
 			shared.Abort(fmt.Errorf("%s: %w", p, errOrExit(errs[i])))

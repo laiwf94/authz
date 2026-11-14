@@ -58,6 +58,38 @@ link the roadmap issue they come from.
   start stops the others before anything is bound (exit 1). Killed with
   SIGKILL while all three parts write and restarted, no acknowledged
   relationship, session or approval decision is lost.
+- **In-process checks for every track**
+  ([#80](https://github.com/laiwf94/authz/issues/80)). `internal/authz/engine`
+  is the one Go interface for `Check`, `CheckBulk`, `LookupResources`,
+  `LookupSubjects`, `Expand`, `ReadRelationships`, `Write` and
+  `DeleteRelationships`, with every consistency mode and token; the HTTP
+  handlers answer through it with unchanged responses. Under `authz run`
+  the gateway and mcp parts get serve's engine in process from
+  `part.Host.Engine`, sharing its cache, snapshots, tokens and metrics; an
+  in-process check costs under 2 µs over the raw engine.
+- **`POST /v1/expand`** ([#80](https://github.com/laiwf94/authz/issues/80))
+  returns who holds a permission on one object as a userset tree (union,
+  intersection, exclusion and arrow nodes); `recursive` follows usersets
+  and arrows, `max_nodes` (default 1,000, at most 100,000) bounds it.
+- **`POST /v1/lookup/subjects`**
+  ([#80](https://github.com/laiwf94/authz/issues/80)) pages through the
+  subjects (or `group#member` usersets) holding a permission on one
+  object; a wildcard comes back as `user:*` with the IDs it `excluded`.
+  Cycles are solved exactly.
+- **`POST /v1/relationships/delete`**
+  ([#80](https://github.com/laiwf94/authz/issues/80)) deletes everything
+  matching a filter in one revision and one log record, up to `limit`
+  (at most 1,000), with preconditions; over the limit it answers 412
+  unless `allow_partial` is set.
+- **Schema dry runs** ([#80](https://github.com/laiwf94/authz/issues/80)).
+  `PUT /v1/schema?dry_run=true` writes nothing and lists the changes, the
+  permissions whose answers can change and the stored relationships the
+  schema would break; `authz ctl schema write -dry-run` prints the same and
+  exits 1 when something would break.
+- **`internal/authz/enginetest`**
+  ([#80](https://github.com/laiwf94/authz/issues/80)): the engine contract
+  as a test suite, and a deterministic in-memory fake engine for the
+  sign-on and agent tests.
 
 ### Sign-on (authn)
 

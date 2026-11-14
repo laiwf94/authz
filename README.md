@@ -127,6 +127,16 @@ and `AUTHZ_DRAIN_TIMEOUT`; a part's own TLS or drain setting is refused.
 `-parts serve,gateway` runs a subset. If a part cannot start, nothing is
 bound and the command exits 1 naming that part.
 
+Under `authz run` there is one grantd engine. The gateway and mcp parts ask
+serve's engine in process (`part.Host.Engine` hands it to them): no network
+hop, the same check cache, and the same consistency tokens as the HTTP API,
+so a token from a `/v1/relationships/write` is good for an in-process check
+and the other way round. In-process checks show in
+`grantd_check_duration_seconds` on every `/metrics`. Gateway route rules
+and MCP tool rules that make such checks come with the sign-on and agent
+roadmap weeks ([#82](https://github.com/laiwf94/authz/issues/82),
+[#87](https://github.com/laiwf94/authz/issues/87)).
+
 ```console
 $ authz run -config authz.json
 $ authz run -parts serve,mcp
@@ -375,7 +385,7 @@ cmd/authz/internal/serve    authz serve (formerly grantd): configuration and sta
 cmd/authz/internal/ctl      authz ctl: HTTP client for schema, relationships, checks
 cmd/authz/internal/checkcmd authz check: validate the config file, environment, schema and relationship files
 cmd/authz/internal/runcmd   authz run: serve, gateway and mcp in one process, one listener group and one registry
-cmd/authz/internal/part     what a serving subcommand takes from its process: listeners, registry, log name
+cmd/authz/internal/part     what a serving subcommand takes from its process: listeners, registry, log name, the engine
 internal/authz/schema       schema language: lexer, parser, validation, canonical printer
 internal/authz/store        multi-version relationship store and write-ahead log
 internal/authz/check        check engine, result cache, lookups
