@@ -79,9 +79,11 @@ type IdP struct {
 	cert   *x509.Certificate
 	mux    *http.ServeMux
 
-	mu     sync.Mutex
-	codes  map[string]*grant
-	tokens map[string]*grant
+	mu        sync.Mutex
+	codes     map[string]*grant
+	tokens    map[string]*grant
+	refreshes map[string]*grant // live refresh tokens
+	down      bool              // the token endpoint answers 503
 }
 
 // New generates fresh signing keys and builds the IdP.
@@ -105,7 +107,8 @@ func New(cfg Config) (*IdP, error) {
 	if err != nil {
 		return nil, err
 	}
-	i := &IdP{cfg: cfg, rsaKey: rk, cert: cert, codes: map[string]*grant{}, tokens: map[string]*grant{}}
+	i := &IdP{cfg: cfg, rsaKey: rk, cert: cert, codes: map[string]*grant{}, tokens: map[string]*grant{},
+		refreshes: map[string]*grant{}}
 	i.mux = http.NewServeMux()
 	i.mux.HandleFunc("GET /.well-known/openid-configuration", i.discovery)
 	i.mux.HandleFunc("GET /jwks", i.jwks)

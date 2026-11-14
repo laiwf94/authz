@@ -94,6 +94,7 @@ type Server struct {
 	limiter  *rateLimiter
 	admin    [sha256.Size]byte
 	reloadMu sync.Mutex
+	revalMu  sync.Mutex // one revalidation pass at a time
 
 	tokenMu sync.Mutex
 	tokens  map[string]cachedToken

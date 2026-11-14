@@ -36,6 +36,13 @@ const (
 	ProviderOIDC      = "oidc"
 	ProviderSAML      = "saml"
 	maxDisplayNameLen = 64
+	// Revalidation bounds: often enough to matter, rarely enough not to
+	// hammer the provider, and a grace that can't outlive a working day.
+	MinRevalidateInterval = 30 * time.Second
+	MaxRevalidateInterval = 24 * time.Hour
+	MaxRevalidateGrace    = 24 * time.Hour
+	RevalidateEnd         = "end"
+	RevalidateGrace       = "grace"
 )
 
 var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -55,6 +62,13 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	}
 	*d = Duration(v)
 	return nil
+}
+
+// MarshalJSON writes the duration as UnmarshalJSON reads it ("5m0s"), so a
+// document that embeds a provider (the gateway section of the one
+// configuration file) round-trips.
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
 }
 
 // Config is the whole file.
@@ -85,20 +99,21 @@ type Provider struct {
 	DisplayName string `json:"display_name"`
 
 	// OpenID Connect.
-	Issuer                string   `json:"issuer"`
-	ClientID              string   `json:"client_id"`
-	ClientSecretEnv       string   `json:"client_secret_env"`
-	ClientSecretFile      string   `json:"client_secret_file"`
-	ClientAuth            string   `json:"client_auth"`
-	Scopes                []string `json:"scopes"`
-	Algorithms            []string `json:"algorithms"`
-	EmailClaim            string   `json:"email_claim"`
-	NameClaim             string   `json:"name_claim"`
-	GroupsClaim           string   `json:"groups_claim"`
-	Userinfo              bool     `json:"userinfo"`
-	TrustedAudiences      []string `json:"trusted_audiences"`
-	CAFile                string   `json:"ca_file"`
-	PostLogoutRedirectURL string   `json:"post_logout_redirect_url"`
+	Issuer                string     `json:"issuer"`
+	ClientID              string     `json:"client_id"`
+	ClientSecretEnv       string     `json:"client_secret_env"`
+	ClientSecretFile      string     `json:"client_secret_file"`
+	ClientAuth            string     `json:"client_auth"`
+	Scopes                []string   `json:"scopes"`
+	Algorithms            []string   `json:"algorithms"`
+	EmailClaim            string     `json:"email_claim"`
+	NameClaim             string     `json:"name_claim"`
+	GroupsClaim           string     `json:"groups_claim"`
+	Userinfo              bool       `json:"userinfo"`
+	TrustedAudiences      []string   `json:"trusted_audiences"`
+	CAFile                string     `json:"ca_file"`
+	PostLogoutRedirectURL string     `json:"post_logout_redirect_url"`
+	Revalidate            Revalidate `json:"revalidate"`
 
 	// SAML 2.0.
 	IdPMetadataFile string `json:"idp_metadata_file"`
@@ -115,6 +130,23 @@ type Provider struct {
 	// Filled in by Load.
 	ClientSecret string `json:"-"`
 }
+
+// Revalidate asks an OpenID provider, with the session's refresh token,
+// whether each session still stands. A refusal (invalid_grant) always ends
+// the session; OnFailure says what happens when the provider can't be asked.
+type Revalidate struct {
+	// Interval between confirmations of one session; 0 turns revalidation
+	// off.
+	Interval Duration `json:"interval"`
+	// OnFailure is "end" (the default: a session the provider can't vouch
+	// for ends at once) or "grace" (it lives on for Grace past its due
+	// time, then ends unless the provider confirms it).
+	OnFailure string   `json:"on_failure"`
+	Grace     Duration `json:"grace"`
+}
+
+// Enabled says revalidation is on.
+func (r Revalidate) Enabled() bool { return r.Interval > 0 }
 
 // App is one protected application.
 type App struct {
@@ -283,6 +315,7 @@ func (c *Config) validateProviders(getenv func(string) string, pc *Result) map[s
 		switch p.Type {
 		case ProviderOIDC:
 			p.validateOIDC(path, getenv, pc)
+			p.Revalidate.validate(path+".revalidate", time.Duration(c.Session.AbsoluteTimeout), pc)
 		case ProviderSAML:
 			p.validateSAML(path, pc)
 		default:
@@ -465,7 +498,7 @@ func (p *Provider) validateSAML(path string, pc *Result) {
 		"client_auth": p.ClientAuth != "", "scopes": len(p.Scopes) > 0, "algorithms": len(p.Algorithms) > 0,
 		"email_claim": p.EmailClaim != "", "name_claim": p.NameClaim != "", "groups_claim": p.GroupsClaim != "",
 		"userinfo": p.Userinfo, "trusted_audiences": len(p.TrustedAudiences) > 0,
-		"post_logout_redirect_url": p.PostLogoutRedirectURL != ""} {
+		"post_logout_redirect_url": p.PostLogoutRedirectURL != "", "revalidate": p.Revalidate != (Revalidate{})} {
 		if set {
 			pc.Errorf(path+"."+name, "OpenID Connect setting on a saml provider")
 		}
@@ -487,5 +520,35 @@ func (p *Provider) validateSAML(path string, pc *Result) {
 		pc.Errorf(path+".sp_cert_file", "sp_key_file and sp_cert_file go together")
 	case p.SignRequests && p.SPKeyFile == "":
 		pc.Errorf(path+".sign_requests", "sign_requests needs sp_key_file and sp_cert_file")
+	}
+}
+
+func (r *Revalidate) validate(path string, absolute time.Duration, pc *Result) {
+	if !r.Enabled() {
+		if r.OnFailure != "" || r.Grace != 0 {
+			pc.Errorf(path+".interval", "set an interval to turn revalidation on")
+		}
+		return
+	}
+	iv := time.Duration(r.Interval)
+	if iv < MinRevalidateInterval || iv > MaxRevalidateInterval {
+		pc.Errorf(path+".interval", "must be between %s and %s", MinRevalidateInterval, MaxRevalidateInterval)
+	} else if absolute > 0 && iv >= absolute {
+		pc.Warnf(path+".interval", "sessions end (absolute_timeout %s) before they are first revalidated", absolute)
+	}
+	switch r.OnFailure {
+	case "":
+		r.OnFailure = RevalidateEnd
+		fallthrough
+	case RevalidateEnd:
+		if r.Grace != 0 {
+			pc.Errorf(path+".grace", "grace needs on_failure %q", RevalidateGrace)
+		}
+	case RevalidateGrace:
+		if time.Duration(r.Grace) < time.Second || time.Duration(r.Grace) > MaxRevalidateGrace {
+			pc.Errorf(path+".grace", "on_failure %q needs a grace between 1s and %s", RevalidateGrace, MaxRevalidateGrace)
+		}
+	default:
+		pc.Errorf(path+".on_failure", "%q is not %q or %q", r.OnFailure, RevalidateEnd, RevalidateGrace)
 	}
 }

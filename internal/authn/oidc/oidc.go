@@ -276,17 +276,72 @@ func (p *Provider) AuthURL(ctx context.Context, state, nonce, verifier string) (
 	return u.String(), nil
 }
 
+// MaxRefreshTokenBytes bounds a refresh token this relying party keeps. Real
+// ones run from a few dozen bytes (opaque handles) to two kilobytes (signed
+// tokens); the bound keeps one, sealed with a binding to its session, inside
+// the 4096 bytes a sealed value may take.
+const MaxRefreshTokenBytes = 3000
+
+// usableRefreshToken says a refresh token can be kept and sent back.
+func usableRefreshToken(t string) bool {
+	return t != "" && len(t) <= MaxRefreshTokenBytes && isPrintableASCII(t)
+}
+
 // Result is a completed login.
 type Result struct {
 	Identity policy.Identity
+	// RefreshToken is the provider's refresh token, or "" when it issued
+	// none. It is a credential: callers seal it before storing it and never
+	// log it.
+	RefreshToken string
 }
 
 type tokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	IDToken     string `json:"id_token"`
-	Error       string `json:"error"`
-	ErrorDesc   string `json:"error_description"`
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	IDToken      string `json:"id_token"`
+	RefreshToken string `json:"refresh_token"`
+	Error        string `json:"error"`
+	ErrorDesc    string `json:"error_description"`
+}
+
+// tokenRequest posts form to the token endpoint with the client's
+// authentication and decodes the answer. reason labels every failure.
+func (p *Provider) tokenRequest(ctx context.Context, m *Metadata, form url.Values, reason string) (*tokenResponse, int, error) {
+	switch p.cfg.ClientAuth {
+	case ClientSecretPost:
+		form.Set("client_id", p.cfg.ClientID)
+		form.Set("client_secret", p.cfg.ClientSecret)
+	case ClientAuthNone:
+		form.Set("client_id", p.cfg.ClientID)
+	}
+	tctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(tctx, http.MethodPost, m.TokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, 0, fail(reason, "%v", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	if p.cfg.ClientAuth == ClientSecretBasic {
+		// RFC 6749 section 2.3.1: form-encode both parts before Basic.
+		req.SetBasicAuth(url.QueryEscape(p.cfg.ClientID), url.QueryEscape(p.cfg.ClientSecret))
+	}
+	body, status, _, err := do(p.cfg.HTTPClient, req)
+	if err != nil {
+		return nil, 0, fail(reason, "%v", err)
+	}
+	var tr tokenResponse
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return nil, status, fail(reason, "status %d, undecodable body", status)
+	}
+	if status != http.StatusOK {
+		return &tr, status, fail(reason, "status %d, error %q", status, printable(tr.Error, 64))
+	}
+	if tr.AccessToken != "" && !strings.EqualFold(tr.TokenType, "Bearer") {
+		return nil, status, fail(reason, "token_type %q is not Bearer", printable(tr.TokenType, 32))
+	}
+	return &tr, status, nil
 }
 
 // Exchange redeems an authorization code, validates the ID token against
@@ -305,41 +360,12 @@ func (p *Provider) Exchange(ctx context.Context, code, verifier, nonce string) (
 		"redirect_uri":  {p.cfg.RedirectURL},
 		"code_verifier": {verifier},
 	}
-	switch p.cfg.ClientAuth {
-	case ClientSecretPost:
-		form.Set("client_id", p.cfg.ClientID)
-		form.Set("client_secret", p.cfg.ClientSecret)
-	case ClientAuthNone:
-		form.Set("client_id", p.cfg.ClientID)
-	}
-	tctx, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(tctx, http.MethodPost, m.TokenEndpoint, strings.NewReader(form.Encode()))
+	tr, _, err := p.tokenRequest(ctx, m, form, ReasonTokenExchange)
 	if err != nil {
-		return nil, fail(ReasonTokenExchange, "%v", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	if p.cfg.ClientAuth == ClientSecretBasic {
-		// RFC 6749 section 2.3.1: form-encode both parts before Basic.
-		req.SetBasicAuth(url.QueryEscape(p.cfg.ClientID), url.QueryEscape(p.cfg.ClientSecret))
-	}
-	body, status, _, err := do(p.cfg.HTTPClient, req)
-	if err != nil {
-		return nil, fail(ReasonTokenExchange, "%v", err)
-	}
-	var tr tokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return nil, fail(ReasonTokenExchange, "status %d, undecodable body", status)
-	}
-	if status != http.StatusOK {
-		return nil, fail(ReasonTokenExchange, "status %d, error %q", status, printable(tr.Error, 64))
+		return nil, err
 	}
 	if tr.IDToken == "" {
 		return nil, fail(ReasonTokenExchange, "no id_token in the token response")
-	}
-	if tr.AccessToken != "" && !strings.EqualFold(tr.TokenType, "Bearer") {
-		return nil, fail(ReasonTokenExchange, "token_type %q is not Bearer", printable(tr.TokenType, 32))
 	}
 	claims, err := p.VerifyIDToken(ctx, tr.IDToken, nonce, tr.AccessToken)
 	if err != nil {
@@ -354,11 +380,83 @@ func (p *Provider) Exchange(ctx context.Context, code, verifier, nonce string) (
 	if err != nil {
 		return nil, err
 	}
-	return &Result{Identity: id}, nil
+	res := &Result{Identity: id}
+	// A refresh token this relying party can't keep doesn't spoil a good
+	// login: the session just has none (and revalidation treats it so).
+	if usableRefreshToken(tr.RefreshToken) {
+		res.RefreshToken = tr.RefreshToken
+	}
+	return res, nil
+}
+
+// Refreshed is a refresh the provider accepted.
+type Refreshed struct {
+	// RefreshToken is the token to use next time: a new one when the
+	// provider rotates refresh tokens, otherwise the one that was sent.
+	RefreshToken string
+	// Rotated says the provider issued a new refresh token.
+	Rotated bool
+}
+
+// Refresh redeems a refresh token (RFC 6749 section 6) to ask the provider
+// whether the user's sign-in still stands. A nil error means it does. An
+// error with Reason ReasonRefreshRefused means the provider answered no
+// (invalid_grant: the token, its session or its user is gone); any other
+// error means the answer could not be had (the provider is down, slow, or
+// misconfigured) and says nothing about the user.
+//
+// When the provider sends a new ID token it is checked as OpenID Connect
+// Core section 12.2 asks: same issuer, signed, for this client, current,
+// and for the same subject. A different subject is a refusal.
+func (p *Provider) Refresh(ctx context.Context, refreshToken, subject string) (*Refreshed, error) {
+	if refreshToken == "" || len(refreshToken) > MaxRefreshTokenBytes {
+		return nil, fail(ReasonRefreshFailed, "missing or oversized refresh token")
+	}
+	m, err := p.Discover(ctx)
+	if err != nil {
+		return nil, fail(ReasonRefreshFailed, "%v", err)
+	}
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}}
+	tr, status, err := p.tokenRequest(ctx, m, form, ReasonRefreshFailed)
+	if err != nil {
+		// RFC 6749 section 5.2: invalid_grant is the provider saying the
+		// grant is invalid, expired or revoked. Every other error code is
+		// about the request or the client, not the user.
+		if tr != nil && (status == http.StatusBadRequest || status == http.StatusUnauthorized) && tr.Error == "invalid_grant" {
+			return nil, fail(ReasonRefreshRefused, "status %d, error %q", status, tr.Error)
+		}
+		return nil, err
+	}
+	if tr.AccessToken == "" {
+		return nil, fail(ReasonRefreshFailed, "no access_token in the token response")
+	}
+	if tr.IDToken != "" {
+		claims, err := p.verifyIDToken(ctx, tr.IDToken, "", false, tr.AccessToken)
+		if err != nil {
+			return nil, &Error{Reason: ReasonRefreshFailed, Err: err}
+		}
+		if subtle.ConstantTimeCompare([]byte(claims.Subject), []byte(subject)) != 1 {
+			return nil, fail(ReasonRefreshRefused, "the refreshed ID token is for another subject")
+		}
+	}
+	if tr.RefreshToken != "" && !usableRefreshToken(tr.RefreshToken) {
+		return nil, fail(ReasonRefreshFailed, "the new refresh_token is longer than %d bytes or not printable ASCII", MaxRefreshTokenBytes)
+	}
+	out := &Refreshed{RefreshToken: refreshToken}
+	if tr.RefreshToken != "" && tr.RefreshToken != refreshToken {
+		out.RefreshToken, out.Rotated = tr.RefreshToken, true
+	}
+	return out, nil
 }
 
 // VerifyIDToken applies OpenID Connect Core section 3.1.3.7.
 func (p *Provider) VerifyIDToken(ctx context.Context, raw, nonce, accessToken string) (*jose.Claims, error) {
+	return p.verifyIDToken(ctx, raw, nonce, true, accessToken)
+}
+
+// verifyIDToken checks an ID token; checkNonce is false only for a token
+// from a refresh, which answers no login request (Core section 12.2).
+func (p *Provider) verifyIDToken(ctx context.Context, raw, nonce string, checkNonce bool, accessToken string) (*jose.Claims, error) {
 	tok, err := jose.Parse(raw)
 	if err != nil {
 		return nil, fail(ReasonIDToken, "%v", err)
@@ -391,7 +489,7 @@ func (p *Provider) VerifyIDToken(ctx context.Context, raw, nonce, accessToken st
 		}
 		return nil, fail(ReasonClaims, "%v", err)
 	}
-	if claims.Nonce == "" || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(nonce)) != 1 {
+	if checkNonce && (claims.Nonce == "" || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(nonce)) != 1) {
 		return nil, fail(ReasonNonce, "nonce does not match the login request")
 	}
 	if claims.Subject == "" || len(claims.Subject) > maxSubjectLength || !isPrintableASCII(claims.Subject) {

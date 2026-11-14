@@ -92,6 +92,15 @@ type SessionRevoked struct {
 	By       string `json:"by"`
 }
 
+// SessionEnded is a session the identity provider ended: a refused or
+// failed revalidation. Envelope: actor (the user's subject), subject (the
+// session), action "session.end".
+type SessionEnded struct {
+	Provider string `json:"provider"`
+	Session  string `json:"session"`
+	Reason   string `json:"reason"` // refresh_refused, refresh_failed, ...
+}
+
 // AccessDenied is a forward-auth request refused by an application's
 // policy. Envelope: subject (the application), action "access", decision
 // deny.
@@ -211,6 +220,7 @@ const (
 	EventLogout           = "authn.logout"
 	EventLogoutRejected   = "authn.logout_rejected"
 	EventSessionRevoked   = "authn.session_revoked"
+	EventSessionEnded     = "authn.session_ended"
 	EventAccessDenied     = "authn.access_denied"
 	EventConfigLoaded     = "authn.config_loaded"
 	EventConfigLoadFailed = "authn.config_load_failed"
@@ -233,6 +243,7 @@ func (LoginRejected) AuditEvent() string        { return EventLoginRejected }
 func (Logout) AuditEvent() string               { return EventLogout }
 func (LogoutRejected) AuditEvent() string       { return EventLogoutRejected }
 func (SessionRevoked) AuditEvent() string       { return EventSessionRevoked }
+func (SessionEnded) AuditEvent() string         { return EventSessionEnded }
 func (AccessDenied) AuditEvent() string         { return EventAccessDenied }
 func (ConfigLoaded) AuditEvent() string         { return EventConfigLoaded }
 func (ConfigLoadFailed) AuditEvent() string     { return EventConfigLoadFailed }
@@ -257,6 +268,7 @@ func Defs() []Def {
 		{TrackAuthn, Logout{}, NeedActor | NeedAction},
 		{TrackAuthn, LogoutRejected{}, NeedAction | NeedDecision},
 		{TrackAuthn, SessionRevoked{}, NeedActor | NeedSubject | NeedAction},
+		{TrackAuthn, SessionEnded{}, NeedActor | NeedSubject | NeedAction},
 		{TrackAuthn, AccessDenied{}, NeedSubject | NeedAction | NeedDecision},
 		{TrackAuthn, ConfigLoaded{}, NeedAction},
 		{TrackAuthn, ConfigLoadFailed{}, NeedAction},

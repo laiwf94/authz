@@ -188,6 +188,11 @@ the first start fills from `WICKET_COOKIE_KEYS` and `WICKET_SIGNING_KEYS` so
 nobody is signed out; the published JWKS follows every rotation (see
 [docs/DESIGN.md](docs/DESIGN.md#key-rings-in-the-gateway)).
 
+`"revalidate": {"interval": "5m"}` on an OpenID provider confirms every
+session with its refresh token at that interval and ends it when the
+provider refuses (a disabled user), or by `on_failure` (`end` or `grace`)
+when the provider can't be asked.
+
 The end-to-end responses are pinned byte for byte in golden transcripts
 recorded from wicket before the move, and CI replays them through
 `authz gateway` started from a wicket config file. Proxy snippets and the

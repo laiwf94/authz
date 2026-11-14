@@ -252,6 +252,24 @@ link the roadmap issue they come from.
   moving from configured keys to a keys file, one file per process,
   what to alert on, retiring a compromised key, and how configuration and
   secret files reload.
+- **Sessions revalidate with the identity provider** ([#79](https://github.com/laiwf94/authz/issues/79)).
+  `"revalidate": {"interval": "5m"}` on an OpenID provider makes the gateway
+  redeem each session's refresh token every interval (RFC 6749 section 6;
+  a new ID token must be for the same subject, OpenID Connect Core 12.2). A
+  provider that answers `invalid_grant` (the user was disabled, or their
+  provider session ended) ends the session within one interval plus 10
+  seconds, audited as `authn.session_ended` with reason `refresh_refused`.
+  When the provider can't be asked, `on_failure` decides: `end` (the
+  default) ends the session at once, `grace` with `"grace": "15m"` keeps it
+  until the grace has passed since its due time and ends it then unless the
+  provider answers. Refresh tokens are kept only for providers that
+  revalidate, sealed with the session key ring and bound to their provider
+  and subject, in the session log; they never appear in logs or the admin
+  API. A rotated token is fsynced before it is used. Revalidations are
+  counted in `wicket_revalidations_total{provider,result}` and ended
+  sessions in `wicket_sessions_ended_total{reason}`. The interval is 30s to
+  24h, the grace at most 24h, and `revalidate` on a SAML provider is an
+  error. `authz fakeidp` now issues rotating refresh tokens.
 
 ### Agent gateway (agents)
 

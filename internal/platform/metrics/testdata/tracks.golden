@@ -80,6 +80,13 @@ wicket_logins_total{result="success",reason="ok"} 9
 # HELP wicket_rate_limited_total Requests refused by the login rate limit.
 # TYPE wicket_rate_limited_total counter
 wicket_rate_limited_total 2
+# HELP wicket_revalidations_total Session revalidations by provider and result: confirmed, refused, failed (ended) or kept (inside the grace).
+# TYPE wicket_revalidations_total counter
+wicket_revalidations_total{provider="corp",result="confirmed"} 1
+wicket_revalidations_total{provider="corp",result="refused"} 1
+# HELP wicket_sessions_ended_total Sessions ended because the identity provider no longer vouched for them.
+# TYPE wicket_sessions_ended_total counter
+wicket_sessions_ended_total{reason="refresh_refused"} 1
 # HELP grantd_head_revision Newest committed revision.
 # TYPE grantd_head_revision gauge
 grantd_head_revision 42

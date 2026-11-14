@@ -41,6 +41,11 @@ const (
 	ReasonUserinfo      = "userinfo_failed"
 	ReasonUnknownKey    = "unknown_signing_key"
 	ReasonClaims        = "claims_invalid"
+	// ReasonRefreshRefused is a refresh the provider answered with
+	// invalid_grant: the user's sign-in there has ended.
+	ReasonRefreshRefused = "refresh_refused"
+	// ReasonRefreshFailed is a refresh that got no answer about the user.
+	ReasonRefreshFailed = "refresh_failed"
 )
 
 // NewHTTPClient returns the client used for back-channel calls: bounded

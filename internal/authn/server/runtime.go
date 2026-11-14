@@ -37,6 +37,7 @@ type provider struct {
 	oidc              *oidc.Provider
 	saml              *saml.SP
 	postLogout        string
+	reval             revalidation
 }
 
 type app struct {
@@ -75,6 +76,7 @@ func buildRuntime(ctx context.Context, cfg *config.Config, o buildOptions) (*run
 				GroupsClaim: pc.GroupsClaim, UseUserinfo: pc.Userinfo, TrustedAudiences: pc.TrustedAudiences,
 				Skew: skew, HTTPClient: client, Now: o.now,
 			})
+			p.reval = revalidationOf(pc.Revalidate)
 		case config.ProviderSAML:
 			p.saml, err = buildSAML(ctx, cfg, pc, client, skew, o)
 		}

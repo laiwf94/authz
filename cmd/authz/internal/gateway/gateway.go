@@ -578,6 +578,12 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 			"cookie_rotate_every", st.cookiePol.RotateEvery.String(), "cookie_overlap", st.cookiePol.Overlap.String(),
 			"signing_rotate_every", st.signingPol.RotateEvery.String(), "signing_overlap", st.signingPol.Overlap.String())
 	}
+	// Sessions at providers with revalidate set are confirmed with their
+	// refresh tokens on a schedule, beside the serving loop.
+	rctx, stopReval := context.WithCancel(ctx)
+	revalDone := make(chan struct{})
+	go func() { srv.RunRevalidation(rctx, server.RevalidateEvery); close(revalDone) }()
+	defer func() { stopReval(); <-revalDone }()
 	g, err := h.Binder()(st.http,
 		httpserver.Spec{Name: "public", Addr: st.addr, Handler: srv.Handler(),
 			Limits: httpserver.Limits{WriteTimeout: 45 * time.Second, MaxHeaderBytes: 32 << 10}},

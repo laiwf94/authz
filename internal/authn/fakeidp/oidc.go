@@ -187,8 +187,17 @@ func (i *IdP) token(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, http.StatusUnauthorized, "invalid_client", "client authentication failed")
 		return
 	}
-	if f.Get("grant_type") != "authorization_code" {
-		tokenError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code")
+	if i.tokenDown() {
+		tokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "the token endpoint is down")
+		return
+	}
+	switch f.Get("grant_type") {
+	case "authorization_code":
+	case "refresh_token":
+		i.refreshGrant(w, clientID, f.Get("refresh_token"))
+		return
+	default:
+		tokenError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code and refresh_token")
 		return
 	}
 	i.mu.Lock()
@@ -221,7 +230,7 @@ func (i *IdP) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": access, "token_type": "Bearer",
-		"expires_in": int(tokenTTL.Seconds()), "id_token": idToken})
+		"expires_in": int(tokenTTL.Seconds()), "id_token": idToken, "refresh_token": i.issueRefresh(clientID, g.user)})
 }
 
 // SignJWT signs claims with the IdP's RSA key (RS256).

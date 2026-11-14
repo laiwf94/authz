@@ -226,6 +226,45 @@ plus a timestamp update, about 140 ns, and the parallel forward-auth
 benchmark still reaches roughly 900,000 decisions per second on 16 cores.
 Sharding is easy if a deployment ever needs more.
 
+### Revalidation
+
+Without revalidation a session lives until it expires even after the user
+is disabled at the provider. With `"revalidate": {"interval": "5m"}` on an
+OpenID provider the gateway asks the provider about every session at that
+interval, with the session's refresh token (RFC 6749 section 6):
+
+- At login the refresh token is sealed with the session key ring (purpose
+  `refresh`) around a 16-byte hash of the provider and subject, and stored
+  with the session; providers without `revalidate` get no token stored. The
+  session log carries it on the create record and on a `revalidate` record
+  (`{"op":"revalidate","id":...,"t":...,"refresh":...}`) when the provider
+  rotates it. A rotated token is fsynced before the pass moves on, since the
+  provider may already refuse the old one; a confirmation without rotation
+  is not, because losing it only makes the session due again sooner.
+  Compaction keeps the latest token and confirmation time. The token is not
+  in `GET /admin/sessions`, and no log line or error carries it.
+- Every 10 seconds a pass takes, per provider and oldest confirmation
+  first, up to 2,000 sessions last confirmed an interval ago, and redeems
+  their tokens with 8 requests in flight at most. Passes never overlap and
+  stop after 2 minutes; whatever is left goes in the next one.
+- `invalid_grant` is the provider saying no: the session ends at once and
+  `authn.session_ended` is audited with reason `refresh_refused`. So is a
+  new ID token for another subject (OpenID Connect Core 12.2: same issuer,
+  audience, signature and subject; no nonce is expected).
+- Anything else is no answer: the provider down, a 5xx, a timeout, a
+  client error such as `invalid_client`, a bad ID token, or a session with
+  no usable token (the provider issued none, or it no longer opens). With
+  `on_failure` `end` (the default) the session ends with reason
+  `refresh_failed` (or `no_refresh_token`, `refresh_token_unreadable`). With
+  `grace` it is kept, retried every pass, and ended once `interval + grace`
+  has passed since its last confirmation.
+
+Refresh tokens longer than 3,000 bytes or with characters outside printable
+ASCII are not kept (the sealed value must fit seal's 4,096-byte limit); such
+a session follows `on_failure` at its first revalidation, and the login
+logs a warning. Some providers issue refresh tokens only for the
+`offline_access` scope; add it to `scopes` for them.
+
 ### JWKS cache
 
 Keys are fetched from the discovered `jwks_uri` on first use and cached for
@@ -370,7 +409,7 @@ expensive work.
 
 | Failure | Behavior |
 |---|---|
-| Identity provider down | New logins fail with a 502 page and an audit reason (`discovery_failed`, `token_exchange_failed`, `jwks_failed`). Existing sessions are unaffected: `/auth` never calls the provider. Cached metadata and keys keep working while they are fresh, and stale ones keep working if a refresh fails. |
+| Identity provider down | New logins fail with a 502 page and an audit reason (`discovery_failed`, `token_exchange_failed`, `jwks_failed`). Existing sessions are unaffected: `/auth` never calls the provider. With `revalidate`, sessions due for revalidation end (`on_failure` `end`) or live on for the grace (`grace`). Cached metadata and keys keep working while they are fresh, and stale ones keep working if a refresh fails. |
 | Provider rotates keys | The first token with the new `kid` triggers a re-fetch. |
 | Disk full or failing | Logins fail cleanly (503); revocations take effect in memory and the admin API says they were not saved. A log that can't be repaired refuses writes until restart. |
 | Crash or `kill -9` | Sessions and revocations that were acknowledged are recovered; a torn last record is dropped. Idle timers may be up to a minute older. |
@@ -400,6 +439,7 @@ expensive work.
 | SAML confirmation | NotOnOrAfter at most 24 hours ahead | Bounds replay-cache retention. |
 | Replay cache | 100,000 assertion IDs | Fails closed when full. |
 | Back-channel calls | 10 s each, 1 MiB responses, 25 s per callback | |
+| Revalidation | interval 30 s - 24 h, grace at most 24 h; 2,000 sessions per provider per pass, 8 requests in flight, 2 min per pass; refresh tokens 3,000 bytes | Bounds the load on the provider and the session record. |
 | Upstream token | 10 s - 15 min (default 2 min); 100,000 cached | |
 | Login rate | 30 per minute per client address (default) | |
 | HTTP server | 32 KiB headers, 15 s read, 45 s write | |
@@ -436,7 +476,9 @@ The audit log is one JSON line per event with `"audit":true`:
 `login_succeeded`, `login_failed` (with a reason code such as
 `state_cookie_missing`, `nonce_mismatch`, `signature_wrapping`,
 `assertion_replayed`), `login_rejected`, `access_denied`, `logout`,
-`logout_rejected`, `session_revoked`, `config_loaded`, `config_load_failed`.
+`logout_rejected`, `session_revoked`, `session_ended` (a session the
+provider refused or could not vouch for at revalidation, with its reason),
+`config_loaded`, `config_load_failed`.
 Entries carry the request id, provider, subject, email, public session id and
 client address. They contain personal data; the session log does too, and is
 created with mode 0600.

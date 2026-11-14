@@ -45,6 +45,11 @@ func registerTracks(r *Registry) {
 	}
 	r.Counter("wicket_logins_total", `result="failure",reason="`+"bad_state"+`"`, "Completed logins by result.").Inc()
 	r.Counter("wicket_logins_total", `result="success",reason="ok"`, "Completed logins by result.").Add(9)
+	for _, res := range []string{"confirmed", "refused"} {
+		r.Counter("wicket_revalidations_total", `provider="corp",result="`+res+`"`,
+			"Session revalidations by provider and result: confirmed, refused, failed (ended) or kept (inside the grace).").Inc()
+	}
+	r.Counter("wicket_sessions_ended_total", `reason="refresh_refused"`, "Sessions ended because the identity provider no longer vouched for them.").Inc()
 
 	// toolgate: internal/agents/gateway and internal/agents/httpx, whose
 	// prefix is "toolgate" for the gateway and "mcpfake" for the fake server.

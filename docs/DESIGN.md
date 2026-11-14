@@ -491,6 +491,13 @@ now exits 2, as every subcommand does.
   `/wicket`, the gateway image's entrypoint and `authz gateway`, and compares
   the responses.
 
+**Revalidation** (#79). Sessions at an OpenID provider with `revalidate`
+set are confirmed with their refresh tokens on a schedule, and end when the
+provider refuses or, by the `on_failure` policy, when it can't be asked.
+The tokens are sealed with the session ring and bound to their provider and
+subject; see
+[wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md#revalidation).
+
 ### Key rings in the gateway
 
 Without a keys file the gateway keeps wicket's two key lists.

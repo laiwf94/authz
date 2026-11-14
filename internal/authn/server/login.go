@@ -286,7 +286,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		s.loginFailed(w, r, rt, pid, st.App, reasonOf(err), err)
 		return
 	}
-	s.finishLogin(w, r, rt, st, res.Identity, time.Time{}, http.StatusFound)
+	s.finishLogin(w, r, rt, st, res.Identity, time.Time{}, res.RefreshToken, http.StatusFound)
 }
 
 // handleACS finishes a SAML login: POST /saml/{provider}/acs.
@@ -318,18 +318,28 @@ func (s *Server) handleACS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 303 turns the IdP's POST into a GET of the return URL.
-	s.finishLogin(w, r, rt, st, res.Identity, res.SessionNotOnOrAfter, http.StatusSeeOther)
+	s.finishLogin(w, r, rt, st, res.Identity, res.SessionNotOnOrAfter, "", http.StatusSeeOther)
 }
 
 // finishLogin replaces any existing session with a new one (a fresh id at
 // every login prevents session fixation) and returns the user to the app.
-func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime, st *loginState, id policy.Identity, notAfter time.Time, status int) {
+// A refresh token is kept, sealed, only for a provider that revalidates.
+func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime, st *loginState, id policy.Identity, notAfter time.Time, refresh string, status int) {
 	if old, _ := s.currentSession(r, rt); old != nil {
 		if _, err := s.sessions.Revoke(old.ID); err != nil {
 			s.log.ErrorContext(r.Context(), "revoking the previous session", "request_id", requestIDFrom(r.Context()), "error", err.Error())
 		}
 	}
-	secret, sess, err := s.sessions.Create(id, notAfter)
+	sealed := ""
+	if p := rt.providers[id.Provider]; p != nil && p.reval.enabled() {
+		if refresh != "" {
+			sealed = s.sealRefresh(id.Provider, id.Subject, refresh)
+		} else {
+			s.log.WarnContext(r.Context(), "the provider issued no usable refresh token; the session can't be revalidated and follows on_failure",
+				"request_id", requestIDFrom(r.Context()), "provider", id.Provider)
+		}
+	}
+	secret, sess, err := s.sessions.CreateWithRefresh(id, notAfter, sealed)
 	if err != nil {
 		s.loginFailed(w, r, rt, st.Provider, st.App, reasonOf(err), err)
 		return

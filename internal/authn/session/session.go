@@ -53,8 +53,25 @@ type Session struct {
 	LastSeen  time.Time       `json:"last_seen_at"`
 	ExpiresAt time.Time       `json:"expires_at"` // absolute expiry
 
+	// refresh is the identity provider's refresh token, sealed by the
+	// caller: the store only keeps it, and it never leaves through List or
+	// the admin API. revalidated is when the provider last confirmed the
+	// session (CreatedAt until it first does).
+	refresh       string
+	revalidated   time.Time
 	persistedSeen time.Time
 }
+
+// Revalidated returns when the identity provider last confirmed the
+// session: its creation, or the latest accepted refresh.
+func (s *Session) Revalidated() time.Time { return s.revalidated }
+
+// MaxSealedRefreshBytes bounds a sealed refresh token the store keeps: the
+// longest value internal/platform/seal opens.
+const MaxSealedRefreshBytes = 4096
+
+// ErrTooLarge is a sealed refresh token longer than MaxSealedRefreshBytes.
+var ErrTooLarge = errors.New("session: sealed refresh token too large")
 
 // Options configures a Store.
 type Options struct {
@@ -184,6 +201,16 @@ func (s *Store) snapshot() []*Session {
 // absolute expiry is the configured timeout, or notAfter if that is earlier
 // (an identity provider may cap the session, e.g. SAML SessionNotOnOrAfter).
 func (s *Store) Create(id policy.Identity, notAfter time.Time) (string, *Session, error) {
+	return s.CreateWithRefresh(id, notAfter, "")
+}
+
+// CreateWithRefresh is Create for a session the identity provider can be
+// asked about again: sealedRefresh is its refresh token, already sealed by
+// the caller, kept until the session ends and handed back by Due.
+func (s *Store) CreateWithRefresh(id policy.Identity, notAfter time.Time, sealedRefresh string) (string, *Session, error) {
+	if len(sealedRefresh) > MaxSealedRefreshBytes {
+		return "", nil, ErrTooLarge
+	}
 	var raw [secretBytes]byte
 	_, _ = rand.Read(raw[:])
 	secret := base64.RawURLEncoding.EncodeToString(raw[:])
@@ -197,7 +224,8 @@ func (s *Store) Create(id policy.Identity, notAfter time.Time) (string, *Session
 	if !exp.After(now) {
 		return "", nil, ErrExpired
 	}
-	sess := &Session{ID: IDFromSecret(secret), Identity: id, CreatedAt: now, LastSeen: now, ExpiresAt: exp, persistedSeen: now}
+	sess := &Session{ID: IDFromSecret(secret), Identity: id, CreatedAt: now, LastSeen: now, ExpiresAt: exp,
+		refresh: sealedRefresh, revalidated: now, persistedSeen: now}
 
 	if len(s.byID) >= s.opts.MaxSessions {
 		s.sweepLocked(now)
@@ -214,7 +242,7 @@ func (s *Store) Create(id policy.Identity, notAfter time.Time) (string, *Session
 		sort.Slice(evict, func(i, j int) bool { return evict[i].CreatedAt.Before(evict[j].CreatedAt) })
 		evict = evict[:len(evict)-s.opts.MaxPerSubject+1]
 	}
-	recs := []record{{Op: opCreate, Session: sess}}
+	recs := []record{createRecord(sess)}
 	for _, e := range evict {
 		recs = append(recs, record{Op: opRevoke, ID: e.ID})
 	}
@@ -254,6 +282,82 @@ func (s *Store) Lookup(secret string) (*Session, error) {
 	}
 	cp := *sess
 	return &cp, nil
+}
+
+// Due is a session whose identity provider should be asked again.
+type Due struct {
+	ID          string
+	Subject     string
+	Refresh     string    // sealed; "" when the provider issued none
+	Revalidated time.Time // last confirmation
+}
+
+// Due returns the live sessions of provider last confirmed at or before
+// before, oldest confirmation first, at most limit of them (0: all).
+func (s *Store) Due(provider string, before time.Time, limit int) []Due {
+	now := s.opts.Now()
+	s.mu.Lock()
+	var out []Due
+	for k, set := range s.bySubject {
+		if p, _, _ := strings.Cut(k, "\x00"); p != provider {
+			continue
+		}
+		for id := range set {
+			sess := s.byID[id]
+			if s.live(sess, now) && !sess.revalidated.After(before) {
+				out = append(out, Due{ID: id, Subject: sess.Identity.Subject, Refresh: sess.refresh, Revalidated: sess.revalidated})
+			}
+		}
+	}
+	s.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Revalidated.Equal(out[j].Revalidated) {
+			return out[i].Revalidated.Before(out[j].Revalidated)
+		}
+		return out[i].ID < out[j].ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// Revalidated records that the identity provider confirmed the session at
+// at. A non-empty sealedRefresh replaces the stored refresh token (the
+// provider rotated it) and is fsynced before Revalidated returns, since the
+// old token may no longer work. Without one the record is not fsynced: a
+// lost confirmation only makes the session due again sooner. It returns
+// ErrNotFound when the session ended in the meantime.
+func (s *Store) Revalidated(id, sealedRefresh string, at time.Time) error {
+	if len(sealedRefresh) > MaxSealedRefreshBytes {
+		return ErrTooLarge
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.byID[id]
+	if !ok || !s.live(sess, s.opts.Now()) {
+		return ErrNotFound
+	}
+	rotated := sealedRefresh != "" && sealedRefresh != sess.refresh
+	rec := record{Op: opRevalidate, ID: id, Time: at}
+	if rotated {
+		rec.Refresh = sealedRefresh
+	}
+	if err := s.append(rotated, rec); err != nil {
+		if rotated {
+			// The provider may already refuse the old token; keep the new
+			// one in memory so this process can go on using it.
+			sess.refresh = sealedRefresh
+		}
+		return err
+	}
+	if rotated {
+		sess.refresh = sealedRefresh
+	}
+	if at.After(sess.revalidated) {
+		sess.revalidated = at
+	}
+	return nil
 }
 
 // Revoke ends the session with this public id. It returns false if no such

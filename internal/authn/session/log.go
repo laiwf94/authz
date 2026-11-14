@@ -17,6 +17,9 @@ const (
 	opCreate = "create"
 	opTouch  = "touch"
 	opRevoke = "revoke"
+	// opRevalidate is the identity provider confirming a session, with a
+	// new sealed refresh token when it rotated the old one.
+	opRevalidate = "revalidate"
 )
 
 // maxRecordBytes bounds one log line, so a damaged file can't make replay
@@ -29,6 +32,21 @@ type record struct {
 	Session *Session  `json:"session,omitempty"`
 	ID      string    `json:"id,omitempty"`
 	Time    time.Time `json:"t,omitzero"`
+	// Refresh is the session's sealed refresh token: on a create record
+	// when it has one, and on a revalidate record when it was rotated.
+	Refresh string `json:"refresh,omitempty"`
+	// Revalidated is, on a create record, when the identity provider last
+	// confirmed the session, if after its creation (compaction keeps it).
+	Revalidated time.Time `json:"revalidated,omitzero"`
+}
+
+// createRecord is the record that recreates sess on replay.
+func createRecord(sess *Session) record {
+	r := record{Op: opCreate, Session: sess, Refresh: sess.refresh}
+	if sess.revalidated.After(sess.CreatedAt) {
+		r.Revalidated = sess.revalidated
+	}
+	return r
 }
 
 // castagnoli is the checksum table of the log's framing (CRC-32C, as in
@@ -159,10 +177,24 @@ func (r *replayer) apply(rec record) error {
 			r.order = append(r.order, rec.Session.ID)
 		}
 		rec.Session.persistedSeen = rec.Session.LastSeen
+		rec.Session.refresh = rec.Refresh
+		rec.Session.revalidated = rec.Session.CreatedAt
+		if rec.Revalidated.After(rec.Session.CreatedAt) {
+			rec.Session.revalidated = rec.Revalidated
+		}
 		r.byID[rec.Session.ID] = rec.Session
 	case opTouch:
 		if s := r.byID[rec.ID]; s != nil && rec.Time.After(s.LastSeen) {
 			s.LastSeen, s.persistedSeen = rec.Time, rec.Time
+		}
+	case opRevalidate:
+		if s := r.byID[rec.ID]; s != nil {
+			if rec.Refresh != "" {
+				s.refresh = rec.Refresh
+			}
+			if rec.Time.After(s.revalidated) {
+				s.revalidated = rec.Time
+			}
 		}
 	case opRevoke:
 		delete(r.byID, rec.ID)
@@ -215,6 +247,10 @@ func validate(rec record) error {
 		if len(rec.ID) != 32 {
 			return errors.New("record without an id")
 		}
+	case opRevalidate:
+		if len(rec.ID) != 32 || rec.Time.IsZero() {
+			return errors.New("revalidate without an id or time")
+		}
 	default:
 		return fmt.Errorf("unknown op %q", rec.Op)
 	}
@@ -253,7 +289,7 @@ func (l *logFile) compact(live []*Session) error {
 	}
 	recs := make([]record, len(live))
 	for i, s := range live {
-		recs[i] = record{Op: opCreate, Session: s}
+		recs[i] = createRecord(s)
 	}
 	if err := l.s.Replace(recs); err != nil {
 		l.broken = l.s.Err()
