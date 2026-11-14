@@ -76,6 +76,12 @@ func do(client *http.Client, req *http.Request) (body []byte, status int, maxAge
 	if err != nil {
 		return nil, resp.StatusCode, -1, err
 	}
+	// A response that completes after the request's deadline is no answer:
+	// the transport can still deliver one the server wrote only because it
+	// saw the client give up (#234).
+	if cerr := req.Context().Err(); cerr != nil {
+		return nil, 0, -1, cerr
+	}
 	if len(body) > maxResponseBytes {
 		return nil, resp.StatusCode, -1, fmt.Errorf("response larger than %d bytes", maxResponseBytes)
 	}

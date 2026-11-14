@@ -109,10 +109,25 @@ func FetchIdPMetadata(ctx context.Context, client *http.Client, u string) (*IdPM
 		return nil, fmt.Errorf("fetching saml metadata: %w", err)
 	}
 	defer resp.Body.Close()
+	// A response that completes after the deadline is no answer: the
+	// transport can still deliver one the server wrote only because it saw
+	// the client give up, such as an empty 200 (#234).
+	late := func() error {
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("fetching saml metadata: %w", cerr)
+		}
+		return nil
+	}
+	if err := late(); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetching saml metadata: status %d", resp.StatusCode)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, MaxXMLBytes+1))
+	if lerr := late(); lerr != nil {
+		return nil, lerr
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fetching saml metadata: %w", err)
 	}
