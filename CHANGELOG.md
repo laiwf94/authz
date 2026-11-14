@@ -239,6 +239,20 @@ link the roadmap issue they come from.
   parts share one file. Without a keys file, `TOOLGATE_SIGNING_KEYS` works as
   before, as a configured ring.
 
+- **Every key rotates in one running process with nothing refused** ([#76](https://github.com/laiwf94/authz/issues/76)).
+  Under `authz run` with serve, the gateway and mcp on one keys file, the
+  consistency, session, upstream and agent rings all rotate on schedule
+  while people sign in, apps check relationships and agents call tools:
+  credentials issued under a key that has since stopped signing keep
+  working until its overlap ends, and the published JWKS always holds the
+  key that signs. CI holds this to a test that rotates every ring each
+  second under load and allows no failed request
+  (`TestRunRotatesEveryKey`). [docs/OPERATIONS.md](docs/OPERATIONS.md) is
+  the operator's guide: the rings and their settings, choosing overlaps,
+  moving from configured keys to a keys file, one file per process,
+  what to alert on, retiring a compromised key, and how configuration and
+  secret files reload.
+
 ### Agent gateway (agents)
 
 - **Audit query** ([#81](https://github.com/laiwf94/authz/issues/81)).

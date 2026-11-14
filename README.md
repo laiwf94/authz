@@ -229,6 +229,10 @@ ring file, which the first start fills from `TOOLGATE_SIGNING_KEYS` so no
 token is refused; `authz mcp token mint` signs with its current key (see
 [docs/DESIGN.md](docs/DESIGN.md#key-rings-in-the-agent-gateway)).
 
+Running in production, rotating keys, retiring a compromised one and how
+configuration changes reach a running process are covered in
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 ## One audit chain
 
 `authz serve`, `authz gateway` and `authz mcp` append to the same
