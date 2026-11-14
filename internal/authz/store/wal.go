@@ -34,11 +34,24 @@ var crcTable = crc32.MakeTable(crc32.Castagnoli)
 var ErrCorrupt = wal.ErrCorrupt
 
 type walRecord struct {
-	Rev     Revision       `json:"rev"`
+	Rev Revision `json:"rev"`
+	// Time is the revision's commit time in Unix nanoseconds. A
+	// checkpoint carries its head's. Logs written before commit times were
+	// recorded have none, which recovery reads as 0.
+	Time    int64          `json:"time,omitempty"`
 	Type    string         `json:"type"`
 	Changes []Change       `json:"changes,omitempty"`
 	Schema  string         `json:"schema,omitempty"`
 	Rels    []Relationship `json:"rels,omitempty"`
+	// Expiring holds a checkpoint's relationships that have an expiry;
+	// Rels holds the rest, so a checkpoint without any reads as before.
+	Expiring []expiringRel `json:"expiring,omitempty"`
+}
+
+// expiringRel is a relationship and its expiry in Unix nanoseconds.
+type expiringRel struct {
+	Relationship Relationship `json:"relationship"`
+	ExpiresAt    int64        `json:"expires_at"`
 }
 
 var walOptions = wal.Options[walRecord]{Sync: wal.SyncAlways, MaxRecord: maxRecordSize}
@@ -78,8 +91,16 @@ func (w *walLog) append(rec walRecord) error {
 
 // checkpoint atomically replaces the log with a single record holding the
 // full current state.
-func (w *walLog) checkpoint(head Revision, schemaSrc string, rels []Relationship) error {
-	return w.f.Replace([]walRecord{{Rev: head, Type: recCheckpoint, Schema: schemaSrc, Rels: rels}})
+func (w *walLog) checkpoint(head Revision, t int64, schemaSrc string, live []Stored) error {
+	rec := walRecord{Rev: head, Time: t, Type: recCheckpoint, Schema: schemaSrc}
+	for _, st := range live {
+		if st.ExpiresAt.IsZero() {
+			rec.Rels = append(rec.Rels, st.Relationship)
+		} else {
+			rec.Expiring = append(rec.Expiring, expiringRel{Relationship: st.Relationship, ExpiresAt: st.ExpiresAt.UnixNano()})
+		}
+	}
+	return w.f.Replace([]walRecord{rec})
 }
 
 func (w *walLog) close() error { return w.f.Close() }

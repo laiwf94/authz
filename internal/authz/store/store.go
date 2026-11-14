@@ -8,8 +8,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/laiwf94/authz/internal/authz/schema"
+	"github.com/laiwf94/authz/internal/platform/clock"
 )
 
 // Revision identifies a consistent snapshot. Every committed write gets the
@@ -51,6 +53,11 @@ const (
 type Update struct {
 	Op           Op           `json:"op"`
 	Relationship Relationship `json:"relationship"`
+	// ExpiresAt, on a touch or create, ends the relationship: it stops
+	// being visible at the first revision whose commit time is at or after
+	// it. Zero means it never expires. Touching a relationship that exists
+	// with another expiry, or none, replaces its expiry. Deletes ignore it.
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
 }
 
 // Precondition guards a write: it must hold at the moment of the write.
@@ -109,27 +116,69 @@ type Change struct {
 	Revision     Revision     `json:"revision"`
 	Op           Op           `json:"op"` // OpTouch or OpDelete
 	Relationship Relationship `json:"relationship"`
+	// ExpiresAt is the expiry a touch set, in UTC; zero for none and on
+	// deletes. A relationship that reaches its expiry has no change of its
+	// own: it is simply not visible from that revision on.
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
 }
 
-type version struct{ created, deleted Revision } // deleted == 0: still alive
+// Stored is a relationship as a snapshot holds it, with its expiry.
+type Stored struct {
+	Relationship
+	ExpiresAt time.Time // in UTC; zero when it never expires
+}
 
+// version is one life of a relationship: visible from revision created
+// until revision deleted (0: not deleted), and only at revisions whose
+// commit time is before expires (Unix nanoseconds, 0: never expires).
+// Commit times never go backwards, so an expired version stays expired.
+type version struct {
+	created, deleted Revision
+	expires          int64
+}
+
+func (v version) visibleAt(rev Revision, t int64) bool {
+	return v.created <= rev && (v.deleted == 0 || v.deleted > rev) && (v.expires == 0 || t < v.expires)
+}
+
+// entry holds every kept version of one relationship. rel never carries an
+// expiry; each version has its own. At most one version, the last, is open
+// (not deleted).
 type entry struct {
 	rel      Relationship
 	versions []version
 }
 
-func (e *entry) alive() bool {
-	return len(e.versions) > 0 && e.versions[len(e.versions)-1].deleted == 0
+// open returns the last version when it is not deleted, expired or not.
+func (e *entry) open() (*version, bool) {
+	if e == nil || len(e.versions) == 0 || e.versions[len(e.versions)-1].deleted != 0 {
+		return nil, false
+	}
+	return &e.versions[len(e.versions)-1], true
 }
 
-func (e *entry) visibleAt(rev Revision) bool {
+// liveAt returns the open version when it has not expired at commit time t:
+// the relationship exists for a write committed at t.
+func (e *entry) liveAt(t int64) (version, bool) {
+	v, ok := e.open()
+	if !ok || (v.expires != 0 && t >= v.expires) {
+		return version{}, false
+	}
+	return *v, true
+}
+
+// visibleAt returns the version the snapshot at rev, committed at t, sees.
+func (e *entry) visibleAt(rev Revision, t int64) (version, bool) {
 	for i := len(e.versions) - 1; i >= 0; i-- {
-		v := e.versions[i]
-		if v.created <= rev && (v.deleted == 0 || v.deleted > rev) {
-			return true
+		if v := e.versions[i]; v.visibleAt(rev, t) {
+			return v, true
 		}
 	}
-	return false
+	return version{}, false
+}
+
+func (e *entry) stored(v version) Stored {
+	return Stored{Relationship: e.rel, ExpiresAt: expiryTime(v.expires)}
 }
 
 // Store is a multi-version relationship store. It is safe for concurrent use.
@@ -144,12 +193,24 @@ type Store struct {
 	retention Revision
 	wal       *walLog
 	notify    chan struct{} // closed and replaced after every commit
+	clock     clock.Clock
+	// times holds the commit time, in Unix nanoseconds, of every revision
+	// from minRev to head: times[rev-minRev]. They never go backwards.
+	times []int64
+	// expiring counts open versions with an expiry. While it is zero no
+	// visibility depends on commit times, and log records leave the time
+	// out (see logTimeLocked).
+	expiring int
 }
 
 // Options configures a Store.
 type Options struct {
 	Dir       string   // directory for the write-ahead log; empty keeps everything in memory
 	Retention Revision // history kept for snapshot reads; 0 means DefaultRetention
+	// Clock stamps each revision with its commit time, which decides when
+	// relationships with an expiry stop being visible; nil is the wall
+	// clock.
+	Clock clock.Clock
 }
 
 // Open creates a store, recovering state from the write-ahead log in
@@ -159,6 +220,8 @@ func Open(opts Options) (*Store, error) {
 		byType:    map[string]map[string]map[string]*entry{},
 		retention: opts.Retention,
 		notify:    make(chan struct{}),
+		clock:     clock.Or(opts.Clock),
+		times:     []int64{0},
 	}
 	if s.retention == 0 {
 		s.retention = DefaultRetention
@@ -172,12 +235,16 @@ func Open(opts Options) (*Store, error) {
 	}
 	s.wal = w
 	// Compact the log into a checkpoint so recovery time stays bounded.
-	if err := w.checkpoint(s.head, s.schemaSrc, s.aliveLocked()); err != nil {
+	// Relationships already expired at the head are left out of it.
+	headTime := s.headTimeLocked()
+	if err := w.checkpoint(s.head, headTime, s.schemaSrc, s.liveLocked(headTime)); err != nil {
 		w.close()
 		return nil, err
 	}
 	s.minRev = s.head
+	s.times = []int64{headTime}
 	s.changes = nil
+	s.gcExpiredLocked()
 	return s, nil
 }
 
@@ -207,6 +274,59 @@ func (s *Store) MinRevision() Revision {
 	return s.minRev
 }
 
+// RevisionTime returns the commit time of rev, for any revision from
+// MinRevision to Head. Commit times never go backwards: a revision gets the
+// clock's time or its predecessor's, whichever is later. Revision 0, before
+// any write, and revisions recovered from a log written before commit times
+// were recorded have the zero time.
+func (s *Store) RevisionTime(rev Revision) (time.Time, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, err := s.snapshotLocked(rev)
+	if err != nil || t == 0 {
+		return time.Time{}, err
+	}
+	return time.Unix(0, t).UTC(), nil
+}
+
+func (s *Store) headTimeLocked() int64 { return s.times[len(s.times)-1] }
+
+// nextTimeLocked is the commit time the next revision gets: the clock's
+// time, but never before the head's, so an expired relationship never
+// becomes visible again.
+func (s *Store) nextTimeLocked() int64 {
+	return max(s.clock.Now().UnixNano(), s.headTimeLocked())
+}
+
+// setTimeLocked records t as rev's commit time, raised to the head's when
+// it is earlier (records from logs without times carry 0).
+func (s *Store) setTimeLocked(rev Revision, t int64) {
+	t = max(t, s.headTimeLocked())
+	for Revision(len(s.times)) <= rev-s.minRev {
+		s.times = append(s.times, t)
+	}
+}
+
+// logTimeLocked is the commit time to put in the log record of a revision
+// committed at t: t when an open version has an expiry or the revision
+// sets one, else 0, which leaves it out. Commit times only decide what a
+// snapshot sees when some relationship can expire, so a log written by a
+// store that never held one is byte for byte the log of a store without
+// expiry, and a store that never sees an expiry writes the same log as
+// before it had commit times. Recovery gives a record without a time its
+// predecessor's; no recovered visibility depends on it.
+func (s *Store) logTimeLocked(t int64, changes []Change) int64 {
+	if s.expiring > 0 {
+		return t
+	}
+	for _, c := range changes {
+		if !c.ExpiresAt.IsZero() {
+			return t
+		}
+	}
+	return 0
+}
+
 // Schema returns the current schema and its source, or nil before one is written.
 func (s *Store) Schema() (*schema.Schema, string) {
 	s.mu.RLock()
@@ -224,18 +344,19 @@ func (s *Store) WriteSchema(src string) (Revision, error) {
 	canonical := sc.String()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, r := range s.aliveLocked() {
+	t := s.nextTimeLocked()
+	for _, r := range s.aliveLocked(t) {
 		if err := checkAgainst(sc, r); err != nil {
 			return 0, fmt.Errorf("%w: existing relationship %s would no longer be valid: %v", ErrPrecondition, r, err)
 		}
 	}
 	rev := s.head + 1
 	if s.wal != nil {
-		if err := s.wal.append(walRecord{Rev: rev, Type: recSchema, Schema: canonical}); err != nil {
+		if err := s.wal.append(walRecord{Rev: rev, Time: s.logTimeLocked(t, nil), Type: recSchema, Schema: canonical}); err != nil {
 			return 0, err
 		}
 	}
-	s.applySchema(rev, sc, canonical)
+	s.applySchema(rev, t, sc, canonical)
 	s.commitLocked(rev)
 	return rev, nil
 }
@@ -255,7 +376,7 @@ type SchemaDryRun struct {
 	Schema   *schema.Schema // the parsed new schema
 	Source   string         // its canonical form
 	Previous *schema.Schema // the schema in force, nil before one is written
-	Revision Revision       // the snapshot the relationships were checked at
+	Revision Revision       // the snapshot the relationships were checked at, less those expired by now
 	// Broken holds the first limit broken relationships in text order and
 	// BrokenCount how many there are in all. WriteSchema refuses the schema
 	// exactly when BrokenCount is not zero.
@@ -281,7 +402,7 @@ func (s *Store) DryRunSchema(src string, limit int) (SchemaDryRun, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out.Previous, out.Revision = s.schema, s.head
-	for _, r := range s.aliveLocked() {
+	for _, r := range s.aliveLocked(s.nextTimeLocked()) {
 		err := checkAgainst(sc, r)
 		if err == nil {
 			continue
@@ -294,8 +415,9 @@ func (s *Store) DryRunSchema(src string, limit int) (SchemaDryRun, error) {
 	return out, nil
 }
 
-func (s *Store) applySchema(rev Revision, sc *schema.Schema, src string) {
+func (s *Store) applySchema(rev Revision, t int64, sc *schema.Schema, src string) {
 	s.schema, s.schemaSrc = sc, src
+	s.setTimeLocked(rev, t)
 	s.head = rev
 }
 
@@ -361,6 +483,9 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 		if err := u.Relationship.Validate(); err != nil {
 			return 0, fmt.Errorf("update %d: %w", i, err)
 		}
+		if err := validExpiry(u.ExpiresAt); err != nil {
+			return 0, fmt.Errorf("update %d: %w", i, err)
+		}
 		k := u.Relationship.String()
 		if seen[k] {
 			return 0, invalid("update %d: %s appears more than once in the same write", i, k)
@@ -378,6 +503,9 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 	if s.schema == nil {
 		return 0, ErrNoSchema
 	}
+	// Preconditions and existence are judged at the commit time the write
+	// will get, so a relationship that has expired by then counts as gone.
+	t := s.nextTimeLocked()
 	for i, u := range updates {
 		if u.Op == OpDelete {
 			continue // deleting something the schema no longer allows is always fine
@@ -386,23 +514,24 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 			return 0, fmt.Errorf("update %d: %w", i, err)
 		}
 	}
-	if err := s.preconditionsLocked(preconds); err != nil {
+	if err := s.preconditionsLocked(preconds, t); err != nil {
 		return 0, err
 	}
 
 	var changes []Change
 	for _, u := range updates {
-		e := s.lookup(u.Relationship)
-		alive := e != nil && e.alive()
+		cur, alive := s.lookup(u.Relationship).liveAt(t)
+		exp := expiryNano(u.ExpiresAt)
 		switch u.Op {
 		case OpCreate:
 			if alive {
 				return 0, fmt.Errorf("%w: %s already exists", ErrConflict, u.Relationship)
 			}
-			changes = append(changes, Change{Op: OpTouch, Relationship: u.Relationship})
+			changes = append(changes, Change{Op: OpTouch, Relationship: u.Relationship, ExpiresAt: expiryTime(exp)})
 		case OpTouch:
-			if !alive {
-				changes = append(changes, Change{Op: OpTouch, Relationship: u.Relationship})
+			// Touching with another expiry, or none, replaces the expiry.
+			if !alive || cur.expires != exp {
+				changes = append(changes, Change{Op: OpTouch, Relationship: u.Relationship, ExpiresAt: expiryTime(exp)})
 			}
 		case OpDelete:
 			if alive {
@@ -418,11 +547,11 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 		changes[i].Revision = rev
 	}
 	if s.wal != nil {
-		if err := s.wal.append(walRecord{Rev: rev, Type: recWrite, Changes: changes}); err != nil {
+		if err := s.wal.append(walRecord{Rev: rev, Time: s.logTimeLocked(t, changes), Type: recWrite, Changes: changes}); err != nil {
 			return 0, err
 		}
 	}
-	s.applyChanges(rev, changes)
+	s.applyChanges(rev, t, changes)
 	s.commitLocked(rev)
 	return rev, nil
 }
@@ -489,14 +618,16 @@ func (s *Store) DeleteByFilter(req DeleteRequest) (DeleteResult, error) {
 	if s.schema == nil {
 		return DeleteResult{}, ErrNoSchema
 	}
-	if err := s.preconditionsLocked(req.Preconditions); err != nil {
+	t := s.nextTimeLocked()
+	if err := s.preconditionsLocked(req.Preconditions, t); err != nil {
 		return DeleteResult{}, err
 	}
 	// Keep the limit+1 smallest matches in text order: enough to delete the
 	// first limit and to know whether more remain, in memory bounded by the
 	// limit however many relationships match.
 	h := &relHeap{}
-	s.scanLocked(s.head, req.Filter, func(r Relationship) bool {
+	s.scanLocked(s.head, t, req.Filter, func(st Stored) bool {
+		r := st.Relationship
 		if h.Len() <= limit {
 			heap.Push(h, r)
 		} else if compareText(r, (*h)[0]) < 0 {
@@ -523,11 +654,11 @@ func (s *Store) DeleteByFilter(req DeleteRequest) (DeleteResult, error) {
 		changes[i] = Change{Revision: rev, Op: OpDelete, Relationship: r}
 	}
 	if s.wal != nil {
-		if err := s.wal.append(walRecord{Rev: rev, Type: recWrite, Changes: changes}); err != nil {
+		if err := s.wal.append(walRecord{Rev: rev, Time: s.logTimeLocked(t, changes), Type: recWrite, Changes: changes}); err != nil {
 			return DeleteResult{}, err
 		}
 	}
-	s.applyChanges(rev, changes)
+	s.applyChanges(rev, t, changes)
 	s.commitLocked(rev)
 	return DeleteResult{Revision: rev, Deleted: len(changes), Partial: partial}, nil
 }
@@ -651,10 +782,11 @@ func compareBytes(a, b Relationship, i int) int {
 	}
 }
 
-// preconditionsLocked checks preconditions at the head.
-func (s *Store) preconditionsLocked(preconds []Precondition) error {
+// preconditionsLocked checks preconditions at the head, less what has
+// expired by commit time t.
+func (s *Store) preconditionsLocked(preconds []Precondition, t int64) error {
 	for i, p := range preconds {
-		found := s.anyLocked(s.head, p.Filter)
+		found := s.anyLocked(s.head, t, p.Filter)
 		if found != p.MustExist {
 			want := "exist"
 			if !p.MustExist {
@@ -666,7 +798,10 @@ func (s *Store) preconditionsLocked(preconds []Precondition) error {
 	return nil
 }
 
-func (s *Store) applyChanges(rev Revision, changes []Change) {
+// applyChanges applies the changes of revision rev, committed at t. A
+// touch closes the open version, if any, and opens one with the change's
+// expiry; a delete closes the open version.
+func (s *Store) applyChanges(rev Revision, t int64, changes []Change) {
 	for _, c := range changes {
 		r := c.Relationship
 		objs := s.byType[r.ResourceType]
@@ -682,16 +817,25 @@ func (s *Store) applyChanges(rev Revision, changes []Change) {
 		}
 		sk := subjectKey(r)
 		e := subs[sk]
+		if v, ok := e.open(); ok {
+			v.deleted = rev
+			if v.expires != 0 {
+				s.expiring--
+			}
+		}
 		if c.Op == OpTouch {
 			if e == nil {
 				e = &entry{rel: r}
 				subs[sk] = e
 			}
-			e.versions = append(e.versions, version{created: rev})
-		} else if e != nil && e.alive() {
-			e.versions[len(e.versions)-1].deleted = rev
+			exp := expiryNano(c.ExpiresAt)
+			e.versions = append(e.versions, version{created: rev, expires: exp})
+			if exp != 0 {
+				s.expiring++
+			}
 		}
 	}
+	s.setTimeLocked(rev, t)
 	s.head = rev
 	s.changes = append(s.changes, changes...)
 }
@@ -706,18 +850,40 @@ func (s *Store) commitLocked(rev Revision) {
 	}
 }
 
+// gcLocked drops the history before newMin: versions deleted at or before
+// it, and versions whose expiry is at or before newMin's commit time, which
+// no kept revision can see because commit times never go backwards.
 func (s *Store) gcLocked(newMin Revision) {
 	if newMin <= s.minRev {
 		return
 	}
+	s.times = append([]int64(nil), s.times[newMin-s.minRev:]...)
 	s.minRev = newMin
+	s.collectLocked(newMin)
+	i := sort.Search(len(s.changes), func(i int) bool { return s.changes[i].Revision > newMin })
+	s.changes = append([]Change(nil), s.changes[i:]...)
+}
+
+// gcExpiredLocked drops versions that expired by minRev's commit time,
+// without moving minRev.
+func (s *Store) gcExpiredLocked() { s.collectLocked(s.minRev) }
+
+// collectLocked removes every version no revision from minRev on can see:
+// deleted at or before minRev, or expired by minRev's commit time. It
+// removes entries and objects left with nothing.
+func (s *Store) collectLocked(minRev Revision) {
+	tmin := s.times[0]
 	for t, objs := range s.byType {
 		for ok, subs := range objs {
 			for sk, e := range subs {
 				kept := e.versions[:0]
 				for _, v := range e.versions {
-					if v.deleted == 0 || v.deleted > newMin {
+					gone := v.deleted != 0 && v.deleted <= minRev
+					expired := v.expires != 0 && v.expires <= tmin
+					if !gone && !expired {
 						kept = append(kept, v)
+					} else if v.deleted == 0 && v.expires != 0 {
+						s.expiring--
 					}
 				}
 				e.versions = kept
@@ -733,18 +899,17 @@ func (s *Store) gcLocked(newMin Revision) {
 			delete(s.byType, t)
 		}
 	}
-	i := sort.Search(len(s.changes), func(i int) bool { return s.changes[i].Revision > newMin })
-	s.changes = append([]Change(nil), s.changes[i:]...)
 }
 
-func (s *Store) checkRev(rev Revision) error {
+// snapshotLocked checks that rev can be read and returns its commit time.
+func (s *Store) snapshotLocked(rev Revision) (int64, error) {
 	if rev < s.minRev {
-		return fmt.Errorf("%w: revision %d is older than the oldest kept revision %d", ErrSnapshotExpired, rev, s.minRev)
+		return 0, fmt.Errorf("%w: revision %d is older than the oldest kept revision %d", ErrSnapshotExpired, rev, s.minRev)
 	}
 	if rev > s.head {
-		return ErrFutureRevision
+		return 0, ErrFutureRevision
 	}
-	return nil
+	return s.times[rev-s.minRev], nil
 }
 
 // ReadDirect returns the relationships stored on one object relation at a
@@ -752,13 +917,14 @@ func (s *Store) checkRev(rev Revision) error {
 func (s *Store) ReadDirect(rev Revision, resourceType, resourceID, relation string) ([]Relationship, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if err := s.checkRev(rev); err != nil {
+	t, err := s.snapshotLocked(rev)
+	if err != nil {
 		return nil, err
 	}
 	subs := s.byType[resourceType][objectKey(resourceID, relation)]
 	out := make([]Relationship, 0, len(subs))
 	for _, e := range subs {
-		if e.visibleAt(rev) {
+		if _, ok := e.visibleAt(rev, t); ok {
 			out = append(out, e.rel)
 		}
 	}
@@ -770,6 +936,22 @@ func (s *Store) ReadDirect(rev Revision, resourceType, resourceID, relation stri
 // form, starting after cursor (exclusive). It returns the cursor for the next
 // page, or "" when there are no more.
 func (s *Store) Read(rev Revision, f Filter, after string, limit int) ([]Relationship, string, error) {
+	st, next, err := s.ReadStored(rev, f, after, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	var out []Relationship
+	if st != nil {
+		out = make([]Relationship, len(st))
+		for i, r := range st {
+			out[i] = r.Relationship
+		}
+	}
+	return out, next, nil
+}
+
+// ReadStored is Read with each relationship's expiry.
+func (s *Store) ReadStored(rev Revision, f Filter, after string, limit int) ([]Stored, string, error) {
 	if err := f.Validate(); err != nil {
 		return nil, "", err
 	}
@@ -781,11 +963,12 @@ func (s *Store) Read(rev Revision, f Filter, after string, limit int) ([]Relatio
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if err := s.checkRev(rev); err != nil {
+	t, err := s.snapshotLocked(rev)
+	if err != nil {
 		return nil, "", err
 	}
-	var all []Relationship
-	s.scanLocked(rev, f, func(r Relationship) bool {
+	var all []Stored
+	s.scanLocked(rev, t, f, func(r Stored) bool {
 		if k := r.String(); k > after {
 			all = append(all, r)
 		}
@@ -798,11 +981,16 @@ func (s *Store) Read(rev Revision, f Filter, after string, limit int) ([]Relatio
 	return all, "", nil
 }
 
-func (s *Store) scanLocked(rev Revision, f Filter, fn func(Relationship) bool) {
+// scanLocked calls fn with each relationship matching f in the snapshot at
+// rev, committed at t, until fn returns false.
+func (s *Store) scanLocked(rev Revision, t int64, f Filter, fn func(Stored) bool) {
 	objs := s.byType[f.ResourceType]
 	visit := func(subs map[string]*entry) bool {
 		for _, e := range subs {
-			if f.matches(e.rel) && e.visibleAt(rev) && !fn(e.rel) {
+			if !f.matches(e.rel) {
+				continue
+			}
+			if v, ok := e.visibleAt(rev, t); ok && !fn(e.stored(v)) {
 				return false
 			}
 		}
@@ -819,9 +1007,9 @@ func (s *Store) scanLocked(rev Revision, f Filter, fn func(Relationship) bool) {
 	}
 }
 
-func (s *Store) anyLocked(rev Revision, f Filter) bool {
+func (s *Store) anyLocked(rev Revision, t int64, f Filter) bool {
 	found := false
-	s.scanLocked(rev, f, func(Relationship) bool { found = true; return false })
+	s.scanLocked(rev, t, f, func(Stored) bool { found = true; return false })
 	return found
 }
 
@@ -831,7 +1019,8 @@ func (s *Store) anyLocked(rev Revision, f Filter) bool {
 func (s *Store) ObjectIDs(rev Revision, resourceType string) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if err := s.checkRev(rev); err != nil {
+	t, err := s.snapshotLocked(rev)
+	if err != nil {
 		return nil, err
 	}
 	seen := map[string]bool{}
@@ -841,7 +1030,7 @@ func (s *Store) ObjectIDs(rev Revision, resourceType string) ([]string, error) {
 			continue
 		}
 		for _, e := range subs {
-			if e.visibleAt(rev) {
+			if _, ok := e.visibleAt(rev, t); ok {
 				seen[id] = true
 				break
 			}
@@ -897,13 +1086,24 @@ func (s *Store) WaitForRevision(ctx context.Context, after Revision) error {
 	}
 }
 
-func (s *Store) aliveLocked() []Relationship {
+// aliveLocked returns, in text order, the relationships open at the head
+// that have not expired by commit time t.
+func (s *Store) aliveLocked(t int64) []Relationship {
 	var out []Relationship
+	for _, st := range s.liveLocked(t) {
+		out = append(out, st.Relationship)
+	}
+	return out
+}
+
+// liveLocked is aliveLocked with each relationship's expiry.
+func (s *Store) liveLocked(t int64) []Stored {
+	var out []Stored
 	for _, objs := range s.byType {
 		for _, subs := range objs {
 			for _, e := range subs {
-				if e.alive() {
-					out = append(out, e.rel)
+				if v, ok := e.liveAt(t); ok {
+					out = append(out, e.stored(v))
 				}
 			}
 		}
@@ -921,6 +1121,7 @@ func (s *Store) replay(rec walRecord) error {
 	switch rec.Type {
 	case recCheckpoint:
 		s.byType = map[string]map[string]map[string]*entry{}
+		s.minRev, s.times, s.expiring = rec.Rev, []int64{rec.Time}, 0
 		s.schema, s.schemaSrc = nil, ""
 		if rec.Schema != "" {
 			sc, err := schema.Parse(rec.Schema)
@@ -929,20 +1130,34 @@ func (s *Store) replay(rec walRecord) error {
 			}
 			s.schema, s.schemaSrc = sc, rec.Schema
 		}
-		changes := make([]Change, len(rec.Rels))
-		for i, r := range rec.Rels {
-			changes[i] = Change{Revision: rec.Rev, Op: OpTouch, Relationship: r}
+		changes := make([]Change, 0, len(rec.Rels)+len(rec.Expiring))
+		for _, r := range rec.Rels {
+			changes = append(changes, Change{Revision: rec.Rev, Op: OpTouch, Relationship: r})
 		}
-		s.applyChanges(rec.Rev, changes)
+		for _, x := range rec.Expiring {
+			if err := x.Relationship.Validate(); err != nil {
+				return fmt.Errorf("checkpoint: %v", err)
+			}
+			if x.ExpiresAt <= 0 {
+				return fmt.Errorf("checkpoint: %s has expiry %d", x.Relationship, x.ExpiresAt)
+			}
+			changes = append(changes, Change{Revision: rec.Rev, Op: OpTouch, Relationship: x.Relationship, ExpiresAt: expiryTime(x.ExpiresAt)})
+		}
+		s.applyChanges(rec.Rev, rec.Time, changes)
 		s.changes = nil
 	case recSchema:
 		sc, err := schema.Parse(rec.Schema)
 		if err != nil {
 			return fmt.Errorf("schema record: %v", err)
 		}
-		s.applySchema(rec.Rev, sc, rec.Schema)
+		s.applySchema(rec.Rev, rec.Time, sc, rec.Schema)
 	case recWrite:
-		s.applyChanges(rec.Rev, rec.Changes)
+		for _, c := range rec.Changes {
+			if err := c.Relationship.Validate(); err != nil {
+				return fmt.Errorf("write record: %v", err)
+			}
+		}
+		s.applyChanges(rec.Rev, rec.Time, rec.Changes)
 	default:
 		return fmt.Errorf("unknown log record type %q", rec.Type)
 	}

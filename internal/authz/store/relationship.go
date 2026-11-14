@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Relationship says that Subject has Relation on Resource, for example
@@ -148,4 +149,36 @@ func ParseSubject(s string, allowWildcard bool) (Subject, error) {
 		return subj, nil
 	}
 	return subj, subj.Validate()
+}
+
+// Expiry bounds: the store keeps an expiry as Unix nanoseconds.
+var (
+	minExpiry = time.Unix(0, 1)
+	maxExpiry = time.Unix(0, 1<<63-1)
+)
+
+// validExpiry checks that t is zero (no expiry) or fits the store's range.
+func validExpiry(t time.Time) error {
+	if !t.IsZero() && (t.Before(minExpiry) || t.After(maxExpiry)) {
+		return invalid("expires_at %s is outside %s to %s", t.Format(time.RFC3339Nano),
+			minExpiry.UTC().Format(time.RFC3339Nano), maxExpiry.UTC().Format(time.RFC3339Nano))
+	}
+	return nil
+}
+
+// expiryNano is t as Unix nanoseconds, or 0 for the zero time (no expiry).
+func expiryNano(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
+}
+
+// expiryTime is the inverse of expiryNano, in UTC so equal expiries
+// compare equal.
+func expiryTime(n int64) time.Time {
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n).UTC()
 }

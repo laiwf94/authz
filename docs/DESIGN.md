@@ -47,6 +47,32 @@ Older versions are collected every 128 writes. Reading or watching from before
 the window returns `snapshot_expired` (HTTP 410), the same contract Zanzibar
 uses: clients retry with a fresh read.
 
+### Commit times and expiring relationships
+
+Every revision has a **commit time**: the store's clock when it committed,
+raised to its predecessor's when the clock is behind, so commit times never go
+backwards (`Store.RevisionTime`). A relationship can carry `expires_at`, kept
+on its version as `(created, deleted, expires)`. A snapshot at `r` sees the
+version only when, in addition, `r`'s commit time is before `expires`. So a
+relationship stops granting at the first revision committed at or after its
+expiry, every reader of that revision agrees, and a snapshot never changes
+with the clock. Writes judge existence at the commit time they will get: an
+expired relationship can be created again, deleting it is a no-op, and
+preconditions do not see it. Touching a live relationship with another expiry,
+or none, opens a new version, so older snapshots keep the old expiry. Expiry
+is not a change of its own in watch; the touch that set it carries
+`expires_at`.
+
+Garbage collection drops a version once its expiry is at or before the commit
+time of the oldest kept revision: no kept revision can see it. The checkpoint
+written on start leaves out relationships already expired at the head.
+
+The log records a revision's commit time only while some open version has an
+expiry or the revision sets one; that is the only time a commit time decides
+what a snapshot sees. A store that never held an expiry writes exactly the log
+it wrote before commit times existed, which the golden test pins byte for
+byte. Recovery gives a record without a time its predecessor's.
+
 ### Write-ahead log
 
 Each committed write is appended as one line, then fsynced before the write is
