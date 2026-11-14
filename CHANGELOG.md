@@ -252,6 +252,13 @@ link the roadmap issue they come from.
   moving from configured keys to a keys file, one file per process,
   what to alert on, retiring a compromised key, and how configuration and
   secret files reload.
+- **SAML metadata keeps the sign-in URL it checked** ([#230](https://github.com/laiwf94/authz/issues/230)).
+  An IdP whose metadata writes the HTTP-Redirect `SingleSignOnService`
+  location with a mixed-case scheme (`httPs://`) passed the https check,
+  which compares the lower-cased scheme, but logins were sent to the URL as
+  written. The gateway now keeps the parsed form (`https://`). Found once the
+  SAML fuzz targets, which had spent their CI time minimizing inputs, fuzzed
+  for their whole time.
 - **Sessions revalidate with the identity provider** ([#79](https://github.com/laiwf94/authz/issues/79)).
   `"revalidate": {"interval": "5m"}` on an OpenID provider makes the gateway
   redeem each session's refresh token every interval (RFC 6749 section 6;

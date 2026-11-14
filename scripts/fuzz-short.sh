@@ -4,6 +4,14 @@
 # them over parallel jobs; with no argument every target runs, one after
 # another, as a local gate run does. The list and the times are the gate:
 # change them here, not in ci.yml.
+#
+# Minimization is capped at 1s per input (-fuzzminimizetime; Go's default is
+# 60s). Go shrinks every new interesting input before it fuzzes on, and for
+# inputs of a kilobyte or two whose every run parses XML and a certificate
+# (the saml targets) that took the whole fuzz time: FuzzParseMetadata ran
+# about 700 inputs in 20s, and a bug sat unfound behind it (#230). With the
+# cap it runs about 30,000 a second throughout. A failing input is still
+# reported and written to testdata, only less shrunk.
 set -euo pipefail
 
 TARGETS=(
@@ -45,5 +53,5 @@ for i in "${!TARGETS[@]}"; do
   ((i % count == shard - 1)) || continue
   read -r pkg fuzz time <<<"${TARGETS[$i]}"
   echo "== $pkg $fuzz $time"
-  go test "$pkg" -run='^$' -fuzz="$fuzz" -fuzztime="$time"
+  go test "$pkg" -run='^$' -fuzz="$fuzz" -fuzztime="$time" -fuzzminimizetime=1s
 done

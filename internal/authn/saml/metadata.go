@@ -80,6 +80,10 @@ func ParseIdPMetadata(b []byte) (*IdPMetadata, error) {
 	if m.SSOURL == "" || err != nil || u.Scheme != "https" || u.Host == "" {
 		return nil, errors.New("saml metadata: need an https SingleSignOnService with the HTTP-Redirect binding")
 	}
+	// url.Parse lower-cases the scheme it checked; keep that form, so the
+	// URL logins are sent to is the one that passed ("httPs://" was kept
+	// as written, #230).
+	m.SSOURL = u.String()
 	return m, nil
 }
 
