@@ -65,6 +65,11 @@ const (
 	// records were added, a duration of at least audit.MinCheckpointEvery
 	// (default audit.DefaultCheckpointEvery).
 	AuditCheckpointIntervalEnv = "AUTHZ_AUDIT_CHECKPOINT_INTERVAL"
+	// AuditRetainBytesEnv and AuditRetainAgeEnv are audit.Retention's
+	// limits: rotated-out segments past them are removed once an
+	// exported checkpoint covers them. They need the signing key.
+	AuditRetainBytesEnv = "AUTHZ_AUDIT_RETAIN_BYTES"
+	AuditRetainAgeEnv   = "AUTHZ_AUDIT_RETAIN_AGE"
 )
 
 // AuditSigning is the checkpoint configuration the environment gives.
@@ -72,13 +77,15 @@ const (
 type AuditSigning struct {
 	Signer *audit.Signer
 	Every  time.Duration
+	Retain audit.Retention
 }
 
 // AuditSigningFromEnv reads AUTHZ_AUDIT_SIGNING_KEY (or its _FILE
-// spelling) and AUTHZ_AUDIT_CHECKPOINT_INTERVAL. A malformed key or
-// interval, both spellings of the key, a key file that cannot be read, or
-// an interval without a key is an error that starts with the variable's
-// name and a colon; no error repeats the key.
+// spelling), AUTHZ_AUDIT_CHECKPOINT_INTERVAL and the retention limits
+// AUTHZ_AUDIT_RETAIN_BYTES and AUTHZ_AUDIT_RETAIN_AGE. A malformed key,
+// interval or limit, both spellings of the key, a key file that cannot be
+// read, or an interval or a limit without a key is an error that starts
+// with the variable's name and a colon; no error repeats the key.
 func AuditSigningFromEnv(getenv func(string) string) (AuditSigning, error) {
 	var out AuditSigning
 	fileVar := AuditSigningKeyEnv + pcfg.SecretFileSuffix
@@ -96,12 +103,24 @@ func AuditSigningFromEnv(getenv func(string) string) (AuditSigning, error) {
 		}
 	}
 	every := getenv(AuditCheckpointIntervalEnv)
+	retainBytes, retainAge := getenv(AuditRetainBytesEnv), getenv(AuditRetainAgeEnv)
+	if _, err := audit.ParseRetention(retainBytes, ""); err != nil {
+		return out, fmt.Errorf("%s: %v", AuditRetainBytesEnv, err)
+	}
+	if _, err := audit.ParseRetention("", retainAge); err != nil {
+		return out, fmt.Errorf("%s: %v", AuditRetainAgeEnv, err)
+	}
 	if key == "" {
-		if every != "" {
-			return out, fmt.Errorf("%s: needs %s", AuditCheckpointIntervalEnv, AuditSigningKeyEnv)
+		for _, v := range []struct{ name, val string }{
+			{AuditCheckpointIntervalEnv, every}, {AuditRetainBytesEnv, retainBytes}, {AuditRetainAgeEnv, retainAge},
+		} {
+			if v.val != "" {
+				return out, fmt.Errorf("%s: needs %s", v.name, AuditSigningKeyEnv)
+			}
 		}
 		return out, nil
 	}
+	out.Retain, _ = audit.ParseRetention(retainBytes, retainAge)
 	name := AuditSigningKeyEnv
 	if file != "" {
 		name = fileVar
@@ -124,9 +143,12 @@ func (s AuditSigning) Options(o audit.Options, log *slog.Logger) audit.Options {
 	if s.Signer == nil {
 		return o
 	}
-	o.Signer, o.CheckpointEvery = s.Signer, s.Every
+	o.Signer, o.CheckpointEvery, o.Retention = s.Signer, s.Every, s.Retain
 	o.OnCheckpointError = func(err error) {
 		log.Warn("audit checkpoint not written; the next one tries again", "err", err.Error())
+	}
+	o.OnRetainError = func(err error) {
+		log.Warn("audit segments not removed; the next rotation tries again", "err", err.Error())
 	}
 	return o
 }

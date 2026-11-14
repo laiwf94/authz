@@ -132,7 +132,7 @@ func proveFrom(path string, mk func() (*merkle.Prover, error), each func(uint64,
 		if err != nil {
 			return nil, err
 		}
-		err = readRecords(path, p.Size(), func(seq uint64, line []byte) {
+		err = readRecords(path, p.Size(), p.Skip, func(seq uint64, line []byte) {
 			p.AddData(line)
 			if each != nil {
 				each(seq, line)
@@ -149,17 +149,28 @@ func proveFrom(path string, mk func() (*merkle.Prover, error), each func(uint64,
 }
 
 // readRecords calls each with records 1 to size of the log at path, in
-// order, from the segments and then the active file. Each file's first
-// record must be the one after the last file's, so a rotation between
-// listing the segments and opening the active file is seen (errChanged).
-// The chain is not checked: a proof that was computed over records changed
-// on disk does not lead to the signed tree head.
-func readRecords(path string, size uint64, each func(uint64, []byte)) error {
-	segs, err := Segments(path)
+// order, from the segments and then the active file. When retention removed
+// the oldest records, skip is given their compact range and the records
+// start after them. Each file's first record must be the one after the
+// last file's, so a rotation between listing the segments and opening the
+// active file is seen (errChanged). The chain is not checked: a proof that
+// was computed over records changed on disk does not lead to the signed
+// tree head.
+func readRecords(path string, size uint64, skip func(*merkle.Range) error, each func(uint64, []byte)) error {
+	segs, base, err := liveSegments(path)
 	if err != nil {
 		return err
 	}
 	var n uint64
+	if base != nil {
+		if err := skip(base.r); err != nil {
+			if errors.Is(err, merkle.ErrPruned) {
+				return fmt.Errorf("%w: records 1 to %d were removed by retention", ErrProofRange, base.size)
+			}
+			return fmt.Errorf("%w: %v", ErrProofRange, err)
+		}
+		n = base.size
+	}
 	for i, p := range append(segs, path) {
 		if n == size {
 			return nil

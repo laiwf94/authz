@@ -18,7 +18,7 @@ import (
 // log at path, by the recursion of the RFC, and the number of records.
 func refRoot(t *testing.T, path string) (string, uint64) {
 	t.Helper()
-	segs, err := Segments(path)
+	segs, base, err := liveSegments(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,6 +27,15 @@ func refRoot(t *testing.T, path string) (string, uint64) {
 		for _, line := range fileLines(t, p) {
 			leaves = append(leaves, merkle.LeafHash(line))
 		}
+	}
+	if base != nil {
+		// Retention removed the oldest records: their range is the
+		// base's.
+		r := base.r.Clone()
+		for _, l := range leaves {
+			r.Append(l)
+		}
+		return hexHash(r.Root()), r.Size()
 	}
 	return hexHash(merkle.RootOf(leaves)), uint64(len(leaves))
 }

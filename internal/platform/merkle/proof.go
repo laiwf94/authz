@@ -328,3 +328,89 @@ func consistencyLen(from, size uint64) int {
 	s, _ := ConsistencySpans(from, size)
 	return len(s)
 }
+
+// ErrPruned means a proof needs the hash of a subtree of leaves that were
+// skipped (Prover.Skip) and that the skipped range does not hold.
+var ErrPruned = errors.New("merkle: the proof needs leaves that were removed")
+
+// Skip starts the prover after the first base.Size() leaves, which are not
+// added: base is their compact range. It is for a log whose oldest leaves
+// were removed, keeping their range. Each proof hash over removed leaves
+// must be one of base's subtrees, or a subtree that starts with one of them
+// and ends in the leaves still to be added; any other is ErrPruned, as is a
+// leaf to prove or a tree to prove consistency from that was removed. Skip
+// must come before the first Add.
+func (p *Prover) Skip(base *Range) error {
+	if p.all.Size() != 0 {
+		return errors.New("merkle: Skip after leaves were added")
+	}
+	n := base.Size()
+	switch {
+	case n > p.size:
+		return fmt.Errorf("merkle: %d leaves cannot be skipped in a tree of %d", n, p.size)
+	case p.at < n:
+		return fmt.Errorf("%w: leaf %d is one of the first %d", ErrPruned, p.at, n)
+	case p.prefix != 0 && p.prefix < n:
+		return fmt.Errorf("%w: the tree of %d leaves is inside the first %d", ErrPruned, p.prefix, n)
+	}
+	// base's subtrees, left to right: one for each set bit of n, largest
+	// first.
+	type node struct {
+		span Span
+		hash Hash
+	}
+	nodes := make([]node, 0, len(base.hashes))
+	var start uint64
+	for i, b := 0, 63; b >= 0; b-- {
+		if n&(1<<b) != 0 {
+			nodes = append(nodes, node{Span{start, start + 1<<b}, base.hashes[i]})
+			start += 1 << b
+			i++
+		}
+	}
+	type fill struct {
+		i int
+		h Hash
+	}
+	var fills []fill // applied once every span checked out
+	next := p.next
+	var sub Range
+	for ; next < len(p.order); next++ {
+		s := p.spans[p.order[next]]
+		if s.Start >= n {
+			break
+		}
+		at := slices.IndexFunc(nodes, func(nd node) bool { return nd.span.Start == s.Start })
+		if at < 0 {
+			return fmt.Errorf("%w: leaves %d to %d are inside one of the removed subtrees", ErrPruned, s.Start, s.End-1)
+		}
+		if s.End <= n {
+			if nodes[at].span.End != s.End {
+				return fmt.Errorf("%w: leaves %d to %d are inside one of the removed subtrees", ErrPruned, s.Start, s.End-1)
+			}
+			fills = append(fills, fill{p.order[next], nodes[at].hash})
+			continue
+		}
+		// The span runs on past the removed leaves: its first part is
+		// the subtrees from its start, which tile it exactly because
+		// the span is aligned to a larger power of two.
+		hs := make([]Hash, 0, len(nodes)-at)
+		for _, nd := range nodes[at:] {
+			hs = append(hs, nd.hash)
+		}
+		r, err := NewRange(n-s.Start, hs)
+		if err != nil {
+			return fmt.Errorf("%w: leaves %d to %d do not start on a removed subtree", ErrPruned, s.Start, s.End-1)
+		}
+		sub = *r
+		break
+	}
+	for _, f := range fills {
+		p.out[f.i] = f.h
+	}
+	p.next, p.sub, p.all = next, sub, *base.Clone()
+	if p.prefix == n && n > 0 {
+		p.prefixAt = base.Root()
+	}
+	return nil
+}

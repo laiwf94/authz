@@ -179,8 +179,22 @@ func (l *Log) saveTree() error {
 // prefix computes the tree head of the first size records of the log res
 // verified, and the hash of record size, reading the segments up to it.
 func (res ChainResult) prefix(size uint64) (root, head string, err error) {
-	var r merkle.Range
+	r := &merkle.Range{}
 	head = Genesis
+	b := res.base
+	if b == nil && len(res.Segments) > 0 && res.Segments[0].First > 1 {
+		// Put together by hand for a log retention cut: its base is
+		// beside the active file, the last segment.
+		if b, err = readBase(res.Segments[len(res.Segments)-1].Path); err != nil {
+			return "", "", err
+		}
+	}
+	if b != nil {
+		if size < b.size {
+			return "", "", fmt.Errorf("records 1 to %d were removed by retention, so the tree of the first %d cannot be computed", b.size, size)
+		}
+		r, head = b.r.Clone(), b.head
+	}
 	for _, s := range res.Segments {
 		if r.Size() == size {
 			break
@@ -188,7 +202,7 @@ func (res ChainResult) prefix(size uint64) (root, head string, err error) {
 		if s.Records == 0 {
 			continue
 		}
-		if err := prefixOf(s, &r, size, &head); err != nil {
+		if err := prefixOf(s, r, size, &head); err != nil {
 			return "", "", err
 		}
 	}

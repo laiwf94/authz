@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -192,5 +193,44 @@ func TestAdminAuditProof(t *testing.T) {
 	req, _ := http.NewRequest("GET", e.adminURL+"/admin/audit/proof?record=1", nil)
 	if r := e.do(req); r.status != 401 {
 		t.Fatalf("without the admin token: %d", r.status)
+	}
+}
+
+// POST /admin/audit/export serves the checkpoint and records it as
+// exported beside the log, for audit retention.
+func TestAdminAuditExport(t *testing.T) {
+	e := newEnv(t)
+	if r := e.admin("POST", "/admin/audit/export", ""); r.status != 404 || !strings.Contains(r.raw, "AUTHZ_AUDIT_SIGNING_KEY") {
+		t.Fatalf("without a key: %d %s", r.status, r.raw)
+	}
+	if r := e.admin("GET", "/admin/audit/export", ""); r.status == 200 {
+		t.Fatal("GET exported a checkpoint; only POST may")
+	}
+	al, path, verifier := e.signedLog()
+	if r := e.call(aliceKey, "fake.echo", map[string]any{"text": "hi"}); r.status != 200 {
+		t.Fatalf("call: %d %s", r.status, r.raw)
+	}
+	r := e.admin("POST", "/admin/audit/export", "")
+	if r.status != 200 || r.header.Get("Content-Type") != "text/plain; charset=utf-8" || r.header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("export: %d %v %s", r.status, r.header, r.raw)
+	}
+	c, err := audit.OpenCheckpoint([]byte(r.raw), verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := al.Head(); c.Size != n {
+		t.Fatalf("exported %d records of %d", c.Size, n)
+	}
+	saved, err := os.ReadFile(audit.ExportedPath(path))
+	if err != nil || string(saved) != r.raw {
+		t.Fatalf("the exported checkpoint was not recorded: %v\n%s", err, saved)
+	}
+	req, _ := http.NewRequest("POST", e.adminURL+"/admin/audit/export", nil)
+	if r := e.do(req); r.status != 401 {
+		t.Fatalf("without the admin token: %d", r.status)
+	}
+	al.Close()
+	if r := e.admin("POST", "/admin/audit/export", ""); r.status != 500 {
+		t.Fatalf("closed log: %d %s", r.status, r.raw)
 	}
 }

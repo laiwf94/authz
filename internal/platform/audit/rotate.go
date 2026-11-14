@@ -448,6 +448,7 @@ func (l *Log) rotated() error {
 		}
 		l.checkpointFailed(err)
 	}
+	l.retainNow()
 	return nil
 }
 
@@ -640,8 +641,12 @@ type ChainResult struct {
 	Records  uint64
 	Head     string
 	Root     string // hex Merkle tree head of every record (tree.go); EmptyRoot for none
+	// Removed is the number of records retention removed, 1 to Removed
+	// (retain.go); the oldest segment continues them.
+	Removed uint64
 
 	tree *merkle.Range
+	base *removedBase
 }
 
 // SegmentError locates a failure in one segment, or between two.
@@ -655,31 +660,56 @@ func (e *SegmentError) Unwrap() error { return e.Err }
 
 // VerifyChain checks the log at path across all its segments: each file's
 // chain, as Verify does (VerifyWith when s is set), and the links between
-// them. The first segment must start the chain; each later one must be named
-// for its first record, name the segment before it and continue that
-// segment's chain, so a segment that was removed, reordered, renamed or
-// replaced is named in the error. A log that was never rotated is the one
-// file. As with Verify, the newest record's integrity needs a head stored
-// elsewhere.
+// them. The first segment must start the chain, or continue the records
+// retention removed as FILE.base describes them (retain.go); each later one
+// must be named for its first record, name the segment before it and
+// continue that segment's chain, so a segment that was removed, reordered,
+// renamed or replaced is named in the error. A log that was never rotated is
+// the one file. As with Verify, the newest record's integrity needs a head
+// stored elsewhere.
 func VerifyChain(path string, s *Schemas) (ChainResult, error) {
-	segs, err := Segments(path)
+	for try := 0; ; try++ {
+		res, err := verifyChain(path, s)
+		if errors.Is(err, errRetained) && try < 3 {
+			continue // retention removed a segment while it was read
+		}
+		return res, err
+	}
+}
+
+// errRetained means a segment was removed by retention while it was read.
+var errRetained = errors.New("audit: a segment was removed by retention while the log was read")
+
+func verifyChain(path string, s *Schemas) (ChainResult, error) {
+	segs, base, err := liveSegments(path)
 	if err != nil {
 		return ChainResult{}, err
 	}
 	if _, err := os.Stat(path); err != nil {
-		if len(segs) > 0 && errors.Is(err, os.ErrNotExist) {
+		if (len(segs) > 0 || base != nil) && errors.Is(err, os.ErrNotExist) {
 			return ChainResult{}, &SegmentError{path, errors.New("the active segment is missing; the newest records were removed")}
 		}
 		return ChainResult{}, fmt.Errorf("audit: %w", err)
 	}
 	files := append(segs, path)
 	out := ChainResult{Head: Genesis, Root: EmptyRoot, tree: &merkle.Range{}}
+	// What the next file must continue: the base, or the genesis record.
+	prevRecords, prevHead, prevName := uint64(0), Genesis, ""
+	if base != nil {
+		out.Records, out.Head, out.Removed, out.tree, out.base = base.size, base.head, base.size, base.r.Clone(), base
+		prevRecords, prevHead, prevName = base.size, base.head, base.last
+	}
 	// Leaves are only right once every link below checked out, which is
 	// all a caller sees.
 	leaf := func(_ uint64, line []byte, _ [sha256.Size]byte) { out.tree.AppendData(line) }
 	for i, p := range files {
 		res, err := verifyPath(p, s, leaf)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) && i < len(segs) {
+				if nb, berr := readBase(path); berr == nil && nb != nil && (base == nil || nb.size > base.size) {
+					return out, errRetained
+				}
+			}
 			return out, &SegmentError{p, err}
 		}
 		active := i == len(files)-1
@@ -688,6 +718,8 @@ func VerifyChain(path string, s *Schemas) (ChainResult, error) {
 			return out, &SegmentError{p, errors.New("segment is empty")}
 		case res.Records == 0 && i > 0:
 			return out, &SegmentError{p, fmt.Errorf("the active segment is empty, but %s comes before it; its records were removed", filepath.Base(files[i-1]))}
+		case res.Records == 0 && base != nil:
+			return out, &SegmentError{p, fmt.Errorf("the active segment is empty, but %s says records 1 to %d were removed before it; its records were removed", filepath.Base(BasePath(path)), base.size)}
 		}
 		if !active {
 			n, _ := segmentFirst(filepath.Base(path), filepath.Base(p))
@@ -696,26 +728,30 @@ func VerifyChain(path string, s *Schemas) (ChainResult, error) {
 			}
 		}
 		if res.Records > 0 {
-			if i == 0 {
+			switch {
+			case i == 0 && base == nil:
 				if res.Start != Genesis {
 					return out, &SegmentError{p, fmt.Errorf("the oldest segment starts at record %d, not 1; the segments before it (%s) were removed", res.First, res.Previous)}
 				}
-			} else {
-				prev := out.Segments[i-1]
-				pn := filepath.Base(prev.Path)
-				switch {
-				case res.First > prev.Records+1:
-					return out, &SegmentError{p, fmt.Errorf("records %d to %d are missing between %s and this segment; a segment (%s) was removed", prev.Records+1, res.First-1, pn, res.Previous)}
-				case res.First <= prev.Records:
-					return out, &SegmentError{p, fmt.Errorf("segment starts at record %d, which %s already holds; segments were reordered or copied", res.First, pn)}
-				case res.Previous != pn:
-					return out, &SegmentError{p, fmt.Errorf("segment names %s as the one before it, not %s; segments were renamed or reordered", res.Previous, pn)}
-				case res.Start != prev.Head:
-					return out, &SegmentError{p, fmt.Errorf("first record does not match the hash of the last record of %s; that record was modified or the segment was replaced", pn)}
-				}
+			case i == 0 && res.First <= base.size:
+				return out, &SegmentError{p, fmt.Errorf("segment starts at record %d, but %s says records 1 to %d were removed; one of them was put back or the base file was changed", res.First, filepath.Base(BasePath(path)), base.size)}
+			case res.First > prevRecords+1 && i == 0:
+				return out, &SegmentError{p, fmt.Errorf("records %d to %d are missing between the records retention removed and this segment; a segment (%s) was removed", prevRecords+1, res.First-1, res.Previous)}
+			case res.First > prevRecords+1:
+				return out, &SegmentError{p, fmt.Errorf("records %d to %d are missing between %s and this segment; a segment (%s) was removed", prevRecords+1, res.First-1, prevName, res.Previous)}
+			case res.First <= prevRecords:
+				return out, &SegmentError{p, fmt.Errorf("segment starts at record %d, which %s already holds; segments were reordered or copied", res.First, prevName)}
+			case res.Previous != prevName:
+				return out, &SegmentError{p, fmt.Errorf("segment names %s as the one before it, not %s; segments were renamed or reordered", res.Previous, prevName)}
+			case res.Start != prevHead && i == 0:
+				return out, &SegmentError{p, fmt.Errorf("first record does not match the hash of record %d that %s gives; that record was modified or the base file was changed", base.size, filepath.Base(BasePath(path)))}
+			case res.Start != prevHead:
+				return out, &SegmentError{p, fmt.Errorf("first record does not match the hash of the last record of %s; that record was modified or the segment was replaced", prevName)}
 			}
 			out.Records, out.Head = res.Records, res.Head
+			prevRecords, prevHead = res.Records, res.Head
 		}
+		prevName = filepath.Base(p)
 		out.Segments = append(out.Segments, SegmentResult{p, res})
 	}
 	out.Root = hexHash(out.tree.Root())

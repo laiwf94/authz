@@ -104,9 +104,11 @@ jobs:
       # internal/agents/testdata/toolgate-suite.txt. The audit package became
       # internal/platform/audit in week 2 (#78) and metrics the shared
       # internal/platform/metrics (#77). Then the SIGKILL crash
-      # harnesses against authz mcp serve, the audit chain under load and
-      # approvals killed between asking, deciding and using (#77), three
-      # times over for more kill points (they also run once in the Test step).
+      # harnesses against authz mcp serve, the audit chain under load,
+      # approvals killed between asking, deciding and using (#77), and a
+      # rotating log whose retention removes segments as checkpoints are
+      # exported (#81), three times over for more kill points (they also
+      # run once in the Test step).
       - name: Suite counts (agents)
         shell: bash
         run: |
@@ -115,7 +117,7 @@ jobs:
                 -map github.com/laiwf94/authz/internal/agents/audit=github.com/laiwf94/authz/internal/platform/audit \
                 -map github.com/laiwf94/authz/internal/agents/metrics=github.com/laiwf94/authz/internal/platform/metrics \
                 internal/agents/testdata/toolgate-suite.txt
-          go test -race -count=3 -run '^TestMCP(Approval)?SurvivesSIGKILL$' ./cmd/authz
+          go test -race -count=3 -run '^TestMCP(Approval|Retention)?SurvivesSIGKILL$' ./cmd/authz
       # Every _test.go file of the three pre-merge trees must have moved with
       # only its import block and package clause changed, apart from the
       # lines listed in scripts/testbody-allow.txt, and every package must

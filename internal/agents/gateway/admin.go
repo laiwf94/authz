@@ -46,6 +46,7 @@ func (g *Gateway) AdminHandler(adminToken string) http.Handler {
 	route("POST /admin/policy/reload", g.reloadPolicy)
 	route("GET /admin/audit/head", g.auditHead)
 	route("GET /admin/audit/checkpoint", g.auditCheckpoint)
+	route("POST /admin/audit/export", g.auditExport)
 	route("GET /admin/audit/proof", g.auditProof)
 	mux.Handle("/", hs.Wrap("other", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "no such endpoint")
@@ -195,6 +196,25 @@ func (g *Gateway) auditHead(w http.ResponseWriter, r *http.Request) error {
 // against with only the public key: "authz audit verify -key".
 func (g *Gateway) auditCheckpoint(w http.ResponseWriter, r *http.Request) error {
 	msg, _, err := g.opt.Audit.Checkpoint()
+	if errors.Is(err, audit.ErrNoSigner) {
+		return &httpx.Error{Status: http.StatusNotFound, Code: "not_found",
+			Msg: "the audit log signs no checkpoints; set AUTHZ_AUDIT_SIGNING_KEY"}
+	}
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, err = w.Write(msg)
+	return err
+}
+
+// auditExport serves the newest checkpoint as auditCheckpoint does and
+// records it as exported: the caller keeps it outside the log's hands, so
+// audit retention may then remove the segments it covers (see
+// internal/platform/audit/retain.go).
+func (g *Gateway) auditExport(w http.ResponseWriter, r *http.Request) error {
+	msg, _, err := g.opt.Audit.Export()
 	if errors.Is(err, audit.ErrNoSigner) {
 		return &httpx.Error{Status: http.StatusNotFound, Code: "not_found",
 			Msg: "the audit log signs no checkpoints; set AUTHZ_AUDIT_SIGNING_KEY"}

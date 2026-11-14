@@ -343,7 +343,7 @@ func Query(path string, o QueryOptions, emit func(rec *Record, line []byte) erro
 	defer active.Close()
 	// The active file is opened first: a rotation after that gives it a
 	// segment's name, and the listing then stops before it.
-	segs, err := Segments(path)
+	segs, removed, err := liveSegments(path)
 	if err != nil {
 		return out, err
 	}
@@ -357,6 +357,11 @@ func Query(path string, o QueryOptions, emit func(rec *Record, line []byte) erro
 	}
 	out.Head = Genesis
 	prevName := ""
+	if removed != nil {
+		// Retention removed records 1 to removed.size: the oldest
+		// segment continues them.
+		out.Records, out.Head, prevName = removed.size, removed.head, removed.last
+	}
 	f := o.Filter
 	visit := func(rec *Record, line []byte, _ [sha256.Size]byte) error {
 		out.Read++
@@ -375,7 +380,7 @@ func Query(path string, o QueryOptions, emit func(rec *Record, line []byte) erro
 	// link checks that a segment of first record first, starting from
 	// start and naming previous, continues the files before it.
 	link := func(p string, i int, first uint64, start, previous string) error {
-		if i == 0 {
+		if i == 0 && removed == nil {
 			if start != Genesis {
 				return &SegmentError{p, fmt.Errorf("the oldest segment starts at record %d, not 1; the segments before it (%s) were removed", first, previous)}
 			}
@@ -402,6 +407,11 @@ func Query(path string, o QueryOptions, emit func(rec *Record, line []byte) erro
 			fh = active
 		} else {
 			if fh, err = os.Open(p); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					if nb, _ := readBase(path); nb != nil && (removed == nil || nb.size > removed.size) {
+						err = errors.New("retention removed this segment while it was queried; run the query again")
+					}
+				}
 				return out, &SegmentError{p, err}
 			}
 		}

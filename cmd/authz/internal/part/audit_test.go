@@ -62,6 +62,20 @@ func TestAuditSigningFromEnv(t *testing.T) {
 		t.Fatalf("reported %q", reported)
 	}
 
+	s, err = AuditSigningFromEnv(getenv("AUTHZ_AUDIT_SIGNING_KEY", skey, "AUTHZ_AUDIT_RETAIN_BYTES", "1048576", "AUTHZ_AUDIT_RETAIN_AGE", "720h"))
+	if err != nil || s.Retain != (audit.Retention{MaxBytes: 1 << 20, MaxAge: 720 * time.Hour}) {
+		t.Fatalf("retention: %+v %v", s, err)
+	}
+	reported = nil
+	o = s.Options(audit.Options{}, log)
+	if o.Retention != s.Retain || o.OnRetainError == nil {
+		t.Fatalf("Options: %+v", o)
+	}
+	o.OnRetainError(errors.New("segment busy"))
+	if len(reported) != 1 || !strings.Contains(reported[0], "level=WARN") || !strings.Contains(reported[0], "segment busy") {
+		t.Fatalf("reported %q", reported)
+	}
+
 	bad := strings.Replace(skey, "audit.example", "audit.other", 1)
 	for _, tc := range []struct {
 		env  func(string) string
@@ -77,6 +91,12 @@ func TestAuditSigningFromEnv(t *testing.T) {
 		{getenv("AUTHZ_AUDIT_CHECKPOINT_INTERVAL", "1m"), "AUTHZ_AUDIT_CHECKPOINT_INTERVAL: needs AUTHZ_AUDIT_SIGNING_KEY"},
 		{getenv("AUTHZ_AUDIT_SIGNING_KEY", skey, "AUTHZ_AUDIT_CHECKPOINT_INTERVAL", "100ms"), "AUTHZ_AUDIT_CHECKPOINT_INTERVAL: 100ms is shorter than the minimum of 1s"},
 		{getenv("AUTHZ_AUDIT_SIGNING_KEY", skey, "AUTHZ_AUDIT_CHECKPOINT_INTERVAL", "often"), `AUTHZ_AUDIT_CHECKPOINT_INTERVAL: "often" is not a duration`},
+		{getenv("AUTHZ_AUDIT_RETAIN_BYTES", "1048576"), "AUTHZ_AUDIT_RETAIN_BYTES: needs AUTHZ_AUDIT_SIGNING_KEY"},
+		{getenv("AUTHZ_AUDIT_RETAIN_AGE", "720h"), "AUTHZ_AUDIT_RETAIN_AGE: needs AUTHZ_AUDIT_SIGNING_KEY"},
+		{getenv("AUTHZ_AUDIT_SIGNING_KEY", skey, "AUTHZ_AUDIT_RETAIN_BYTES", "100"), "AUTHZ_AUDIT_RETAIN_BYTES: size limit 100 is under the minimum"},
+		{getenv("AUTHZ_AUDIT_SIGNING_KEY", skey, "AUTHZ_AUDIT_RETAIN_BYTES", "1MB"), `AUTHZ_AUDIT_RETAIN_BYTES: size limit "1MB" is not a whole number`},
+		{getenv("AUTHZ_AUDIT_SIGNING_KEY", skey, "AUTHZ_AUDIT_RETAIN_AGE", "10m"), "AUTHZ_AUDIT_RETAIN_AGE: age limit 10m0s is under the minimum"},
+		{getenv("AUTHZ_AUDIT_SIGNING_KEY", skey, "AUTHZ_AUDIT_RETAIN_AGE", "-1h"), "AUTHZ_AUDIT_RETAIN_AGE: must not be negative"},
 	} {
 		s, err := AuditSigningFromEnv(tc.env)
 		if err == nil || !strings.HasPrefix(err.Error(), tc.want) || s.Signer != nil {

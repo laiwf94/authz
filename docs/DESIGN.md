@@ -1028,6 +1028,69 @@ each, mostly decoding JSON), a query for the last tenth of the time range
 reads it in 16 ms with the indexes against 176 ms without, about 3 million
 records a second of log covered.
 
+### Retention
+
+A log with `audit.Options.Retention` (`AUTHZ_AUDIT_RETAIN_BYTES`,
+`AUTHZ_AUDIT_RETAIN_AGE`) removes its oldest rotated-out segments once the
+rotated-out segments together hold more than the size limit, or once a
+segment was rotated out longer ago than the age limit (the time of the next
+segment's start record). Two rules bound it. The active segment is never
+removed. And no segment is removed unless the last exported checkpoint
+covers every record in it: `FILE.exported`, a checkpoint signed by the
+log's key that `Log.Export` (`POST /admin/audit/export`) or `authz audit
+export` handed out. Before relying on it, the log checks the signature and
+that record N of the log has the hash the checkpoint signed, so a
+checkpoint of another log under the same key removes nothing. Retention
+needs the signing key: without checkpoints nothing could be exported.
+
+Removed records leave `FILE.base` behind:
+
+```
+authz audit base
+<K: records 1 to K were removed>
+<hex SHA-256 of record K>
+<base64 compact range of records 1 to K>
+<file name of the segment that held record K>
+
+<the exported checkpoint that allowed the removal>
+```
+
+The oldest segment left must continue it, as any segment continues the one
+before it: start at record K+1, link to record K's hash and name that
+segment as the one before it. `VerifyChain`, `Query` and the proofs start
+from the base, and the Merkle tree from its range, so the tree head of the
+whole log is unchanged by a removal. A base cannot be forged quietly: the
+range is folded into every later tree head, which only the key signs, so
+`verify -key` fails on a changed range, and a changed hash or count breaks
+the link to the oldest segment.
+
+Proofs stay possible because RFC 6962's proofs only need the subtrees of
+the removed prefix that the compact range holds. `merkle.Prover.Skip`
+starts a prover after the removed leaves: each proof hash that lies inside
+them must be one of the range's subtrees, and one that starts on such a
+subtree and runs into the leaves still to come starts from the range's
+hashes. An exhaustive test over every tree of up to 40 leaves, every skip
+point and every leaf or earlier tree shows that this always holds when the
+leaf proved, or the tree consistency is proved from, was not removed. So
+inclusion proofs of every record left, and consistency proofs from the
+exported checkpoint or any later one, work as before; older ones are
+refused as out of range.
+
+Removal runs under the active file's lock after each rotation, on open and
+on export, in this order: read the segments to remove, checking their chain
+from the old base and that the next segment links to their last record;
+write the new base atomically (a temporary file, fsync, rename, directory
+fsync); remove the segments and their time indexes, oldest first; fsync
+the directory. A kill before the rename changes nothing. A kill after it
+leaves segments the base already covers: readers list segments past the
+base only, and the next open removes them. `TestMCPRetentionSurvivesSIGKILL`
+kills `authz mcp serve` ten times while it rotates a 4 KiB-segment log,
+exports checkpoints and prunes to 8 KiB. After each restart it checks that
+the log verifies, nothing past the exported checkpoint was removed, every
+checkpoint the auditor received over records still present verifies, and
+no covered segment was left. At the end it proves that the log extends the
+auditor's last checkpoint, using only the public key.
+
 ## One configuration file (internal/platform/config)
 
 Every subcommand reads its part of one versioned JSON document. A section

@@ -139,6 +139,10 @@ type Log struct {
 	// tree is the Merkle tree of every record (tree.go), kept with a
 	// signer only; guarded by mu.
 	tree *merkle.Range
+
+	// Retention (retain.go).
+	ret           Retention
+	onRetainError func(error)
 }
 
 // Options configures OpenWith.
@@ -165,6 +169,13 @@ type Options struct {
 	// be written on the timer or after a rotation; neither fails an
 	// append.
 	OnCheckpointError func(error)
+	// Retention, if set, removes the oldest rotated-out segments once
+	// they are past its limits and covered by the last exported
+	// checkpoint (see retain.go). It needs Signer.
+	Retention Retention
+	// OnRetainError, if set, is told about segments that could not be
+	// removed; that fails no append, and the next rotation tries again.
+	OnRetainError func(error)
 }
 
 // Open opens or creates the log at path. An existing log is verified first; a
@@ -182,6 +193,12 @@ func OpenWith(path string, o Options) (*Log, error) {
 	}
 	if err := o.Rotation.check(); err != nil {
 		return nil, err
+	}
+	if o.Retention.MaxBytes < 0 || o.Retention.MaxAge < 0 {
+		return nil, errors.New("audit: retention limits must not be negative")
+	}
+	if o.Retention.Enabled() && o.Signer == nil {
+		return nil, errors.New("audit: retention needs a signing key: only segments an exported checkpoint covers are removed")
 	}
 	f, err := openActive(path)
 	if err != nil {
@@ -259,6 +276,10 @@ func OpenWith(path string, o Options) (*Log, error) {
 			f.Close()
 			return nil, err
 		}
+		// Finish a removal that crashed, and remove what the limits
+		// allow now.
+		l.ret, l.onRetainError = o.Retention, o.OnRetainError
+		l.retainNow()
 		every := o.CheckpointEvery
 		if every == 0 {
 			every = DefaultCheckpointEvery

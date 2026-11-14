@@ -308,6 +308,20 @@ A query bounded in time skips the segments, and the parts of segments, that
 hold nothing in its window, using a sparse time index the first query
 writes beside each rotated-out segment (`audit.jsonl.<first record>.idx`).
 
+With `AUTHZ_AUDIT_RETAIN_BYTES` or `AUTHZ_AUDIT_RETAIN_AGE` (and the
+signing key) the oldest rotated-out segments are removed once they are past
+the limit, but only those an exported checkpoint covers: one handed out by
+`POST /admin/audit/export` or `authz audit export`, which records it as
+`audit.jsonl.exported`. `audit.jsonl.base` keeps the removed records' count,
+last hash and Merkle range, so the auditor's checkpoint still verifies and
+proofs of the records left are unchanged.
+
+```
+$ export AUTHZ_AUDIT_RETAIN_BYTES=1073741824                                     # keep about 1 GiB of old segments
+$ ./authz audit export -key audit.example.com+1d9f0a3c+AaW... -out saved.checkpoint /var/lib/authz/audit.jsonl
+OK /var/lib/authz/audit.jsonl: checkpoint of 977 records signed by audit.example.com at 2026-11-20T10:05:00Z recorded as exported in /var/lib/authz/audit.jsonl.exported
+```
+
 A sign-in, the check it leads to and the tool call that check allows then
 follow one another in one verified chain under one correlation ID; CI runs
 exactly that across the three processes. The format, the event types and
@@ -401,7 +415,7 @@ cmd/authz/internal/fakeidp  authz fakeidp: test OIDC and SAML identity provider
 internal/authn/...          sign-on: forward-auth server, OIDC, SAML, sessions, policy
 internal/authn/golden/e2e   the gateway's end-to-end golden transcripts
 cmd/authz/internal/mcp      authz mcp (formerly toolgate): config, serve, audit verify, policy test, tokens
-cmd/authz/internal/auditcmd authz audit verify and keygen: the platform's audit log across its segments, with schemas and signed checkpoints
+cmd/authz/internal/auditcmd authz audit verify, prove, query, export and keygen: the platform's audit log across its segments, with schemas and signed checkpoints
 cmd/authz/internal/mcpfake  authz mcpfake: a small MCP server with a file sandbox, to try the gateway
 internal/agents/...         agent traffic: MCP and JSON-RPC, policy, approvals, pins, limits, audit chain
 internal/platform/keys      key rings with rotation, JWKS and the old key files

@@ -11,6 +11,8 @@
 //	                                        check one with only the public key
 //	authz audit query [-full] [-limit N] [-count] [-read-only] FILE [TERM...]
 //	                                        print the records every TERM matches
+//	authz audit export -key KEY [-checkpoint NOTE] [-out FILE] FILE
+//	                                        hand out a checkpoint, letting retention remove what it covers
 //	authz audit keygen -out FILE NAME      make a checkpoint signing key
 package auditcmd
 
@@ -30,7 +32,7 @@ import (
 )
 
 // Summary is the one-line description shown in "authz help".
-const Summary = "verify the platform's audit log across its segments and against signed checkpoints, prove records are in it, and query it"
+const Summary = "verify the platform's audit log across its segments and against signed checkpoints, prove records are in it, query it, and export checkpoints for retention"
 
 // Exit codes of "authz audit".
 const (
@@ -43,6 +45,7 @@ const usage = `usage: authz audit verify [-head HASH] [-key KEY [-checkpoint NOT
        authz audit prove -record N|-from M [-size S] FILE
        authz audit prove -check PROOF -key KEY [-checkpoint NOTE] [-old NOTE]
        authz audit query [-full] [-limit N] [-count] [-read-only] FILE [TERM...]
+       authz audit export -key KEY [-checkpoint NOTE] [-out FILE] FILE
        authz audit keygen -out FILE NAME
 
 verify checks the hash chain of the audit log that authz serve
@@ -126,6 +129,16 @@ A summary goes to standard error. A broken chain prints "FAIL FILE:
 reason" there, after the records read before it, with the exit codes of
 verify.
 
+export hands out the checkpoint FILE.checkpoint (or -checkpoint NOTE)
+once verify -key passes: to -out FILE, created and not replaced, or to
+standard output. It then records it as FILE.exported, unless a checkpoint
+of as many records was exported before. The writers of FILE remove
+rotated-out segments past AUTHZ_AUDIT_RETAIN_BYTES or AUTHZ_AUDIT_RETAIN_AGE
+only when this checkpoint covers them, so every removed record is covered
+by a signed checkpoint someone keeps. POST /admin/audit/export does the
+same from a running authz mcp. verify then prints "(records 1 to K removed
+by retention)", and FILE.base describes them.
+
 keygen makes an Ed25519 key named NAME for signing checkpoints. The
 signing key goes to FILE, created with mode 0600 (an existing file is not
 replaced): point AUTHZ_AUDIT_SIGNING_KEY_FILE at it, or put its contents in
@@ -151,6 +164,8 @@ func Run(_ context.Context, args []string, _ func(string) string, stdin io.Reade
 		return proveCmd(fs.Args()[1:], stdin, stdout, stderr)
 	case "query":
 		return queryCmd(fs.Args()[1:], time.Now, stdout, stderr)
+	case "export":
+		return exportCmd(fs.Args()[1:], stdout, stderr)
 	case "keygen":
 		return keygenCmd(fs.Args()[1:], stdout, stderr)
 	case "":
@@ -287,9 +302,10 @@ func Verify(prog, path, head string, s *audit.Schemas, stdout, stderr io.Writer)
 // check is Verify, also returning the verified log.
 func check(prog, path, head string, s *audit.Schemas, stdout, stderr io.Writer) (audit.ChainResult, int) {
 	segs, _ := audit.Segments(path)
+	_, baseErr := os.Stat(audit.BasePath(path))
 	var cr audit.ChainResult
 	var in string
-	if len(segs) == 0 {
+	if len(segs) == 0 && errors.Is(baseErr, os.ErrNotExist) {
 		// A log that was never rotated is the one file, checked and
 		// printed as toolgate did.
 		f, err := os.Open(path)
@@ -325,6 +341,9 @@ func check(prog, path, head string, s *audit.Schemas, stdout, stderr io.Writer) 
 			return cr, Failed
 		}
 		in = fmt.Sprintf(" in %d segments", len(cr.Segments))
+		if cr.Removed > 0 {
+			in += fmt.Sprintf(" (records 1 to %d removed by retention)", cr.Removed)
+		}
 	}
 	if head != "" && head != cr.Head {
 		fmt.Fprintf(stdout, "FAIL %s: chain is intact but ends at %s, not the expected head %s (records were removed from the end or the last one was changed)\n",

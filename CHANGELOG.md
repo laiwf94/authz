@@ -255,6 +255,24 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **Audit retention** ([#81](https://github.com/laiwf94/authz/issues/81)).
+  `AUTHZ_AUDIT_RETAIN_BYTES` (at least 4096) and `AUTHZ_AUDIT_RETAIN_AGE`
+  (at least 1h) remove the oldest rotated-out segments of a signed audit
+  log once they are past either limit, in authz serve, gateway and mcp
+  alike. Both need `AUTHZ_AUDIT_SIGNING_KEY`. A segment is only removed
+  when the last exported checkpoint covers every record in it, and the
+  active segment never is. `POST /admin/audit/export` (mcp admin API) and
+  `authz audit export -key KEY [-out FILE] FILE` hand out the newest
+  checkpoint and record it as `FILE.exported`. What was removed is
+  described by `FILE.base`: the record count, the last removed record's
+  hash, the Merkle compact range and the checkpoint that allowed it.
+  Verify, query and proofs start from it, so tree heads, inclusion proofs
+  of the records left and consistency proofs from the exported checkpoint
+  are unchanged. `authz audit verify` prints `(records 1 to K removed by
+  retention)`. A removal that crashes leaves either nothing changed or
+  segments the base already covers, which readers skip and the next open
+  deletes. A SIGKILL harness rotates and prunes `authz mcp serve`'s log
+  under load and kills it ten rounds over; CI runs it three more times.
 - **Audit query** ([#81](https://github.com/laiwf94/authz/issues/81)).
   `authz audit query [-full] [-limit N] [-count] [-read-only] FILE TERM...`
   prints the records of every segment that all terms match, as their JSON
