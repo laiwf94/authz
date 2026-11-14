@@ -12,14 +12,16 @@ on:
 permissions:
   contents: read
 
+# The gate runs as parallel jobs of one run, so a run takes about as long
+# as its slowest job (the race-detector tests, about five minutes) instead
+# of the sum of every step (about eighteen). Every command is the one the
+# single job ran, with the same limits; the fuzz targets are spread over
+# three jobs by scripts/fuzz-short.sh. A run passes only when every job does.
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # The test body check compares with the pre-merge commit.
-          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -47,6 +49,14 @@ jobs:
             -group authn=$m/internal/authn,$m/internal/platform/jose,$m/internal/platform/seal,$m/internal/platform/config,$m/cmd/authz/internal/gateway,$m/cmd/authz/internal/fakeidp,$m/examples/whoami \
             -group agents=$m/internal/agents,$m/cmd/authz/internal/mcp,$m/cmd/authz/internal/mcpfake \
             coverage.out
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       # Every suite again, built with -tags secretscan: each log line and
       # audit record written through internal/platform/logging and
       # internal/platform/audit is scanned in the test process, and so is
@@ -58,31 +68,33 @@ jobs:
           set -o pipefail
           go vet -tags secretscan ./internal/platform/logging/...
           go test -tags secretscan -count=1 -json ./... | go run scripts/secret-scan.go -allow scripts/secretscan-allow.txt
+
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Each fuzz target for its time budget, a third of them per job:
+      # scripts/fuzz-short.sh holds the list and the times.
       - name: Fuzz (short)
-        run: |
-          go test ./internal/authz/schema -run=^$ -fuzz=FuzzParse -fuzztime=30s
-          go test ./internal/authz/store -run=^$ -fuzz=FuzzParseRelationship -fuzztime=30s
-          go test ./internal/platform/storage/wal -run=^$ -fuzz=FuzzScan -fuzztime=20s
-          go test ./internal/platform/jose -run=^$ -fuzz=FuzzParse$ -fuzztime=20s
-          go test ./internal/platform/jose -run=^$ -fuzz=FuzzParseKeySet -fuzztime=20s
-          go test ./internal/platform/jose -run=^$ -fuzz=FuzzVerifyHMAC -fuzztime=20s
-          go test ./internal/platform/seal -run=^$ -fuzz=FuzzOpen -fuzztime=20s
-          go test ./internal/authn/redirect -run=^$ -fuzz=FuzzValidate -fuzztime=20s
-          go test ./internal/authn/saml -run=^$ -fuzz=FuzzParseResponse -fuzztime=30s
-          go test ./internal/authn/saml -run=^$ -fuzz=FuzzParseMetadata -fuzztime=20s
-          go test ./internal/authn/config -run=^$ -fuzz=FuzzCheck -fuzztime=20s
-          go test ./internal/platform/config -run=^$ -fuzz=FuzzCheck -fuzztime=20s
-          go test ./internal/agents/jsonrpc -run=^$ -fuzz=FuzzDecode -fuzztime=20s
-          go test ./internal/agents/schema -run=^$ -fuzz=FuzzCompileValidate -fuzztime=20s
-          go test ./internal/agents/policy -run=^$ -fuzz=FuzzParse -fuzztime=20s
-          go test ./internal/agents/policy -run=^$ -fuzz=FuzzCases -fuzztime=20s
-          go test ./internal/agents/identity -run=^$ -fuzz=FuzzAuthenticate -fuzztime=20s
-          go test ./internal/platform/audit -run=^$ -fuzz=FuzzVerify -fuzztime=20s
-          go test ./internal/platform/audit -run=^$ -fuzz=FuzzParseFilter -fuzztime=20s
-          go test ./internal/platform/audit -run=^$ -fuzz=FuzzParseIndex -fuzztime=20s
-          go test ./internal/platform/logging -run=^$ -fuzz=FuzzParseTraceparent -fuzztime=20s
-          go test ./internal/platform/logging -run=^$ -fuzz=FuzzScan -fuzztime=20s
-          go test ./internal/platform/merkle -run=^$ -fuzz=FuzzUnmarshal -fuzztime=20s
+        run: ./scripts/fuzz-short.sh ${{ matrix.shard }}/3
+
+  suites:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The test body check compares with the pre-merge commit.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       # Every test, subtest and fuzz seed the wicket suite ran before the
       # move must still pass: internal/authn/testdata/wicket-suite.txt.
       # cmd/wicket and cmd/fakeidp are now authz gateway and authz fakeidp,
@@ -124,6 +136,14 @@ jobs:
       # keep its test functions.
       - name: Test bodies
         run: ./scripts/testbody-diff.sh
+
+  end-to-end:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       # The authorization API's end-to-end transcript and the README demo
       # (examples/demo.sh), recorded from the grantd binary at 41d9bf0, played
       # through a built `authz serve` across a restart on its data directory:
@@ -156,6 +176,14 @@ jobs:
       # false claim about it, and a removed middle segment named.
       - name: Demo (audit)
         run: ./examples/audit/demo.sh
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       # Both images carry /wicket -> /authz, and a config served through
       # /wicket, the gateway image and authz gateway answers byte for byte
       # the same: docs/proxies.md, "Moving from wicket".
@@ -176,5 +204,13 @@ jobs:
       # toolgate binary".
       - name: Image (agents)
         run: ./toolgate/examples/image.sh
+
+  vulnerabilities:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: Vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
