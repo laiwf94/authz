@@ -273,6 +273,14 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **A policy reload is audited before it takes effect** ([#242](https://github.com/laiwf94/authz/issues/242)).
+  `policy_applied` is now written just before the new policy goes into
+  force, not just after, so no decision made under a policy can precede its
+  record in the audit chain, and `GET /admin/policy` never shows a policy
+  whose record is not yet written. This also fixes a flaky
+  `TestRunRestartAndReload`, which read the audit head as soon as the new
+  hash showed.
+
 - **One audit chain, end to end** ([#81](https://github.com/laiwf94/authz/issues/81)).
   Week 3 is complete: the platform's audit log rotates into segments that
   verify as one chain, signs Ed25519 checkpoints in the signed note format,

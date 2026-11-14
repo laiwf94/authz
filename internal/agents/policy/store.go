@@ -34,8 +34,11 @@ type Store struct {
 // missing file is reported once rather than on every poll.
 var missing = sha256.Sum256([]byte("\x00missing"))
 
-// OpenStore loads the policy at path. onReload, if set, is called after every
-// reload that changed the policy or failed.
+// OpenStore loads the policy at path. onReload, if set, is called on every
+// reload that changes the policy, just before the new policy goes into force,
+// and after every reload that fails. So what onReload records (the gateway's
+// policy_applied audit record) comes before any decision the new policy
+// makes, and is there by the time Current returns it (#242).
 func OpenStore(path string, onReload func(ReloadResult)) (*Store, error) {
 	s := &Store{path: path, onReload: onReload}
 	src, err := s.read()
@@ -115,8 +118,12 @@ func (s *Store) reloadLocked(force bool) ReloadResult {
 	case err != nil:
 		res.Err = err
 	case p.Hash != prev.Hash:
-		s.cur.Store(p)
 		res.Changed, res.Hash = true, p.Hash
+		if s.onReload != nil {
+			s.onReload(res)
+		}
+		s.cur.Store(p)
+		return res
 	default:
 		return res
 	}
