@@ -163,6 +163,9 @@ func TestServeFromFile(t *testing.T) {
 	t.Logf("key file change applied after %v", took)
 	replace(t, f.keys, fileKeyB)
 	f.waitFor("key A removed", func() bool { return f.status(fileKeyA) == http.StatusUnauthorized })
+	// The reload is logged just after the keys are swapped, so the line
+	// can trail the key change the test saw (#250).
+	f.waitFor("second reload logged", func() bool { return len(f.log.logged("configuration reloaded")) >= 2 })
 	recs := f.log.logged("configuration reloaded")
 	if len(recs) != 2 || !reflect.DeepEqual(recs[0]["applied"], []any{"api_keys"}) || recs[0]["on_restart"] != nil {
 		t.Fatalf("reload log: %v", recs)
