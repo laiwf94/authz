@@ -1600,6 +1600,48 @@ allocations on a 4-core 2.1 GHz Xeon (190 ns across 4 goroutines on one
 mutex), and inserting new keys into a full table, sweeps and evictions
 included, about 470 ns.
 
+## One expression language (internal/platform/cel)
+
+Relationship caveats (authz week 4, #83) and tool policy conditions
+(agents week 5, #87) are written in one subset of CEL, parsed and checked by
+internal/platform/cel, so there is one grammar, one type checker, one set of
+limits and one set of fuzz targets. The package doc lists the subset:
+int, uint, double, string, bool and null literals; the CEL operators with
+CEL's precedence; lists, maps, `has` and the comprehension macros; string
+functions with RE2 patterns; conversions; timestamps and durations with time
+zones; and IP addresses and ranges, with SpiceDB's `in_cidr`. Bytes,
+messages and namespaces are left out.
+
+A `cel.Env` declares variables by name and type (`cel.ParseType` reads
+`list<string>`, `map<int>` and the rest as schemas write them). Compiling
+an expression gives a `Checked`: the AST, the type of every node, the
+overload IDs every call can resolve to (one, unless an argument is `dyn`),
+the declared variables it uses (what a conditional result reports as
+missing), and string-literal arguments already parsed, so a bad pattern,
+time, duration, zone or address is an error when the schema or policy is
+loaded rather than when a check runs. Equality and ordering work across
+int, uint and double by value, as in current CEL; list and map literals of
+mixed types are `list<dyn>` and `map<dyn, ...>`. Time zones are IANA names
+or fixed offsets; the machine's local zone is refused, so an expression
+means the same on every node.
+
+The lexer streams tokens to a recursive-descent parser with two tokens of
+lookahead. Every node counts against `Limits` (by default 16 KiB of source,
+depth 100 and 4096 nodes), and parser recursion against the depth limit, so
+an expression from a file cannot exhaust the stack or memory. Chains of
+`&&` and `||` are built balanced: both are commutative in CEL, and a
+thousand-term chain is eleven deep instead of a thousand. A minus before a
+number literal folds into it, so `-9223372036854775808` is the smallest int.
+Errors carry line and column; the checker reports up to ten at once.
+
+`AST.String` renders an expression with every operator in parentheses, as
+source that parses back to the same tree. The fuzz targets `FuzzParse`,
+`FuzzCheck` and `FuzzParseType` check that round trip and that a rendering
+checks to the same type. Parsing the caveat in `bench_test.go` (five
+conditions, an address range and a zone) takes about 10 µs and compiling it
+about 17 µs on a 4-core 2.3 GHz Xeon; both happen once per schema write or
+policy load, not per check.
+
 ## One clock (internal/platform/clock)
 
 Code that reads the time or waits on it takes a `clock.Clock` (week 2,

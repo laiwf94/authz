@@ -38,6 +38,9 @@ TARGETS=(
   "./internal/platform/logging FuzzParseTraceparent 20s"
   "./internal/platform/logging FuzzScan 20s"
   "./internal/platform/merkle FuzzUnmarshal 20s"
+  "./internal/platform/cel FuzzParse$ 20s"
+  "./internal/platform/cel FuzzCheck 20s"
+  "./internal/platform/cel FuzzParseType 10s"
 )
 
 shard=1 count=1
