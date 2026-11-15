@@ -286,7 +286,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		s.loginFailed(w, r, rt, pid, st.App, reasonOf(err), err)
 		return
 	}
-	s.finishLogin(w, r, rt, st, res.Identity, time.Time{}, res.RefreshToken, http.StatusFound)
+	s.finishLogin(w, r, rt, st, res.Identity, session.Extra{Refresh: res.RefreshToken, SID: res.SessionID}, http.StatusFound)
 }
 
 // handleACS finishes a SAML login: POST /saml/{provider}/acs.
@@ -318,13 +318,15 @@ func (s *Server) handleACS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 303 turns the IdP's POST into a GET of the return URL.
-	s.finishLogin(w, r, rt, st, res.Identity, res.SessionNotOnOrAfter, "", http.StatusSeeOther)
+	s.finishLogin(w, r, rt, st, res.Identity, session.Extra{NotAfter: res.SessionNotOnOrAfter}, http.StatusSeeOther)
 }
 
 // finishLogin replaces any existing session with a new one (a fresh id at
 // every login prevents session fixation) and returns the user to the app.
-// A refresh token is kept, sealed, only for a provider that revalidates.
-func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime, st *loginState, id policy.Identity, notAfter time.Time, refresh string, status int) {
+// A refresh token (extra.Refresh, in the clear) is kept, sealed, only for a
+// provider that revalidates.
+func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime, st *loginState, id policy.Identity, extra session.Extra, status int) {
+	refresh := extra.Refresh
 	if old, _ := s.currentSession(r, rt); old != nil {
 		if _, err := s.sessions.Revoke(old.ID); err != nil {
 			s.log.ErrorContext(r.Context(), "revoking the previous session", "request_id", requestIDFrom(r.Context()), "error", err.Error())
@@ -339,7 +341,8 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime
 				"request_id", requestIDFrom(r.Context()), "provider", id.Provider)
 		}
 	}
-	secret, sess, err := s.sessions.CreateWithRefresh(id, notAfter, sealed)
+	extra.Refresh = sealed
+	secret, sess, err := s.sessions.CreateWith(id, extra)
 	if err != nil {
 		s.loginFailed(w, r, rt, st.Provider, st.App, reasonOf(err), err)
 		return

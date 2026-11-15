@@ -68,6 +68,9 @@ wicket_audit_records_total{event="login"} 4
 wicket_auth_decisions_total{decision="allow"} 1
 wicket_auth_decisions_total{decision="deny"} 1
 wicket_auth_decisions_total{decision="login"} 1
+# HELP wicket_backchannel_logouts_total Back-channel logout requests by provider and result: accepted or rejected.
+# TYPE wicket_backchannel_logouts_total counter
+wicket_backchannel_logouts_total{provider="corp",result="accepted"} 1
 # HELP wicket_http_requests_total HTTP requests.
 # TYPE wicket_http_requests_total counter
 wicket_http_requests_total{route="/auth",code="302"} 1

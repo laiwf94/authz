@@ -141,6 +141,7 @@ Public listener (`WICKET_ADDR`, default `:4180`):
 | `GET /login?app=&rd=[&provider=]` | Start a login; shows a provider chooser when the app accepts several. |
 | `GET /callback/{provider}` | OpenID Connect redirect URI. |
 | `POST /saml/{provider}/acs` | SAML assertion consumer service (HTTP-POST). |
+| `POST /backchannel-logout/{provider}` | OpenID Connect Back-Channel Logout 1.0: register it as the client's `backchannel_logout_uri`. A valid logout token ends the sessions it names. |
 | `GET /saml/{provider}/metadata` | SP metadata to give the identity provider. |
 | `GET /logout`, `POST /logout` | Confirmation page; the POST (with its CSRF token) ends the session. |
 | `GET /.well-known/jwks.json` | Keys that verify `X-Auth-Token`. |

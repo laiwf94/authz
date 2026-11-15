@@ -12,10 +12,10 @@ import (
 // theft do. EndSessions and SetTokenEndpointDown let tests and the demo make
 // the provider refuse a user or fail altogether.
 
-func (i *IdP) issueRefresh(client string, u *User) string {
+func (i *IdP) issueRefresh(client string, u *User, sid string) string {
 	t := randomString()
 	i.mu.Lock()
-	i.refreshes[t] = &grant{client: client, user: u}
+	i.refreshes[t] = &grant{client: client, user: u, sid: sid}
 	i.mu.Unlock()
 	return t
 }
@@ -38,7 +38,7 @@ func (i *IdP) refreshGrant(w http.ResponseWriter, clientID, token string) {
 	// Core 12.2: same iss and sub, no nonce (this answers no login request).
 	idToken, err := i.SignJWT(map[string]any{
 		"iss": i.cfg.Issuer, "sub": g.user.Username, "aud": clientID, "exp": now.Add(tokenTTL).Unix(),
-		"iat": now.Unix(), "email": g.user.Email, "email_verified": true, "name": g.user.Name, "groups": g.user.Groups,
+		"iat": now.Unix(), "sid": g.sid, "email": g.user.Email, "email_verified": true, "name": g.user.Name, "groups": g.user.Groups,
 		"at_hash": base64.RawURLEncoding.EncodeToString(atHash[:16]),
 	})
 	if err != nil {
@@ -46,7 +46,7 @@ func (i *IdP) refreshGrant(w http.ResponseWriter, clientID, token string) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": access, "token_type": "Bearer",
-		"expires_in": int(tokenTTL.Seconds()), "id_token": idToken, "refresh_token": i.issueRefresh(clientID, g.user)})
+		"expires_in": int(tokenTTL.Seconds()), "id_token": idToken, "refresh_token": i.issueRefresh(clientID, g.user, g.sid)})
 }
 
 // EndSessions revokes every refresh token of a user, as disabling the user

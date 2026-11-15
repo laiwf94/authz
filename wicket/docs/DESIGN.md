@@ -265,6 +265,68 @@ a session follows `on_failure` at its first revalidation, and the login
 logs a warning. Some providers issue refresh tokens only for the
 `offline_access` scope; add it to `scopes` for them.
 
+### Back-channel logout
+
+`POST /backchannel-logout/{provider}` is the relying party side of OpenID
+Connect Back-Channel Logout 1.0. Register
+`<public_url>/backchannel-logout/<provider id>` as the client's
+`backchannel_logout_uri` at the provider (with
+`backchannel_logout_session_required` if it offers it) and the provider
+posts a logout token there when a user's session ends on its side: they
+signed out, an administrator ended the session, or the user was disabled.
+
+- At login the ID token's `sid` claim, when present, is kept with the
+  session: in memory, and on the create record in the session log
+  (`"sid":...`), so it survives restarts and compaction. A `sid` that is
+  not a string of 1-255 printable ASCII characters fails the login
+  (`claims_invalid`) rather than giving a session no logout could name. It
+  is not in `GET /admin/sessions`.
+- The store keeps two indexes per provider: by subject (as before) and by
+  `sid`. A token naming a `sid` ends the sessions with that handle, only
+  those of its `sub` when it names one too; a token naming only `sub` ends
+  every session of the user at that provider. Each is a map lookup, about
+  230 ns among 100,000 sessions, and the revocations are fsynced together.
+- The token is checked as section 2.6 lists: a form POST with exactly one
+  `logout_token` in the body (not the query); a JWS under the provider's
+  allowed algorithms, verified with its JWKS (an unknown `kid` re-fetches
+  under the same once-a-minute limit as ID tokens); `typ` absent, `JWT` or
+  `logout+jwt`; `iss` the provider, `aud` the client (other audiences only
+  if trusted, `azp` checked as for ID tokens); `exp` and `iat` present and
+  current, `iat` at most 10 minutes old; `events` an object whose
+  `http://schemas.openid.net/event/backchannel-logout` member is an object;
+  a `jti`; a `sub`, a `sid` or both; and no `nonce`, so an ID token can't be
+  posted as a logout token.
+- Each `jti` is used once per provider. It is remembered until the token
+  stops being accepted (the earlier of `exp` and `iat` + 10 minutes, plus
+  the skew), so a captured token that names only a user can't end the
+  sessions they start afterwards. The cache holds 100,000 IDs and refuses
+  new ones when full of live ones. It is in memory: after a restart a token
+  from the last 10 minutes could be replayed once, and could only end
+  sessions of the user it already named.
+- A valid token answers 200 with no body, whether or not any session
+  matched (the provider can't know which sessions this relying party still
+  holds). Anything else answers 400 with
+  `{"error":"invalid_request","error_description":"<reason>"}` (section
+  2.8) and is audited as `authn.logout_rejected` with the provider and the
+  reason: `logout_request_invalid`, `logout_provider_unknown`,
+  `logout_token_invalid`, `logout_token_wrong_audience` (and the other
+  claim reasons), `logout_token_no_event`, `logout_token_nonce`,
+  `logout_token_no_target`, `logout_token_no_jti`, `logout_token_replayed`,
+  `logout_token_replay_cache_full`. Responses carry `Cache-Control:
+  no-store`.
+- Every ended session is audited as `authn.session_ended` with reason
+  `backchannel_logout` and counted in `wicket_sessions_ended_total`;
+  requests are counted in
+  `wicket_backchannel_logouts_total{provider,result}` (`accepted`,
+  `rejected`; an unknown provider id is counted as `unknown`). If the
+  session log can't be written the sessions still end at once, the error
+  is logged, and the provider gets 200: a retry would be refused as a
+  replay anyway.
+
+`authz fakeidp` puts a `sid` in its ID tokens (one per login, kept across
+refreshes), advertises `backchannel_logout_supported`, and its `Logout`
+sends a logout token to every client with a back-channel logout URI.
+
 ### JWKS cache
 
 Keys are fetched from the discovered `jwks_uri` on first use and cached for
@@ -476,8 +538,10 @@ The audit log is one JSON line per event with `"audit":true`:
 `login_succeeded`, `login_failed` (with a reason code such as
 `state_cookie_missing`, `nonce_mismatch`, `signature_wrapping`,
 `assertion_replayed`), `login_rejected`, `access_denied`, `logout`,
-`logout_rejected`, `session_revoked`, `session_ended` (a session the
-provider refused or could not vouch for at revalidation, with its reason),
+`logout_rejected` (a bad CSRF token, or a refused back-channel logout
+token, with its reason), `session_revoked`, `session_ended` (a session the
+provider refused or could not vouch for at revalidation, or ended with a
+back-channel logout, with its reason),
 `config_loaded`, `config_load_failed`.
 Entries carry the request id, provider, subject, email, public session id and
 client address. They contain personal data; the session log does too, and is

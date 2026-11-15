@@ -60,6 +60,34 @@ type Session struct {
 	refresh       string
 	revalidated   time.Time
 	persistedSeen time.Time
+	// sid is the identity provider's handle for its own session behind
+	// this one (OpenID Connect sid), so a logout at the provider can name
+	// it. Like refresh it stays out of List and the admin API.
+	sid string
+}
+
+// SID returns the identity provider's session handle, or "" when it gave
+// none.
+func (s *Session) SID() string { return s.sid }
+
+// MaxSIDBytes bounds a provider session handle the store keeps.
+const MaxSIDBytes = 255
+
+// ErrBadSID is a provider session handle that is too long or not printable
+// ASCII.
+var ErrBadSID = errors.New("session: provider session id must be 1-255 printable ASCII characters")
+
+// ValidSID reports whether sid can be kept as a provider session handle.
+func ValidSID(sid string) bool {
+	if sid == "" || len(sid) > MaxSIDBytes {
+		return false
+	}
+	for i := 0; i < len(sid); i++ {
+		if sid[i] < 0x21 || sid[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // Revalidated returns when the identity provider last confirmed the
@@ -91,7 +119,10 @@ type Store struct {
 	mu        sync.Mutex
 	byID      map[string]*Session
 	bySubject map[string]map[string]bool
-	log       *logFile // nil when in memory only
+	// bySID indexes sessions by provider and provider session handle, for
+	// back-channel logout.
+	bySID map[string]map[string]bool
+	log   *logFile // nil when in memory only
 }
 
 // Open loads the log at opts.Path (if any), drops expired sessions and
@@ -112,7 +143,8 @@ func Open(opts Options) (*Store, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	s := &Store{opts: opts, byID: map[string]*Session{}, bySubject: map[string]map[string]bool{}}
+	s := &Store{opts: opts, byID: map[string]*Session{}, bySubject: map[string]map[string]bool{},
+		bySID: map[string]map[string]bool{}}
 	if opts.Path == "" {
 		return s, nil
 	}
@@ -177,6 +209,13 @@ func (s *Store) index(sess *Session) {
 		s.bySubject[k] = map[string]bool{}
 	}
 	s.bySubject[k][sess.ID] = true
+	if sess.sid != "" {
+		k := subjectKey(sess.Identity.Provider, sess.sid)
+		if s.bySID[k] == nil {
+			s.bySID[k] = map[string]bool{}
+		}
+		s.bySID[k][sess.ID] = true
+	}
 }
 
 func (s *Store) unindex(sess *Session) {
@@ -185,6 +224,13 @@ func (s *Store) unindex(sess *Session) {
 	delete(s.bySubject[k], sess.ID)
 	if len(s.bySubject[k]) == 0 {
 		delete(s.bySubject, k)
+	}
+	if sess.sid != "" {
+		k := subjectKey(sess.Identity.Provider, sess.sid)
+		delete(s.bySID[k], sess.ID)
+		if len(s.bySID[k]) == 0 {
+			delete(s.bySID, k)
+		}
 	}
 }
 
@@ -208,8 +254,29 @@ func (s *Store) Create(id policy.Identity, notAfter time.Time) (string, *Session
 // asked about again: sealedRefresh is its refresh token, already sealed by
 // the caller, kept until the session ends and handed back by Due.
 func (s *Store) CreateWithRefresh(id policy.Identity, notAfter time.Time, sealedRefresh string) (string, *Session, error) {
+	return s.CreateWith(id, Extra{NotAfter: notAfter, Refresh: sealedRefresh})
+}
+
+// Extra is what a login may add to a session beyond the identity.
+type Extra struct {
+	// NotAfter caps the absolute expiry (zero: the configured timeout).
+	NotAfter time.Time
+	// Refresh is the provider's refresh token, already sealed by the
+	// caller.
+	Refresh string
+	// SID is the provider's handle for its session (OpenID Connect sid),
+	// indexed so EndProviderSessions can find the session by it.
+	SID string
+}
+
+// CreateWith is Create with everything a login can bring.
+func (s *Store) CreateWith(id policy.Identity, e Extra) (string, *Session, error) {
+	notAfter, sealedRefresh := e.NotAfter, e.Refresh
 	if len(sealedRefresh) > MaxSealedRefreshBytes {
 		return "", nil, ErrTooLarge
+	}
+	if e.SID != "" && !ValidSID(e.SID) {
+		return "", nil, ErrBadSID
 	}
 	var raw [secretBytes]byte
 	_, _ = rand.Read(raw[:])
@@ -225,7 +292,7 @@ func (s *Store) CreateWithRefresh(id policy.Identity, notAfter time.Time, sealed
 		return "", nil, ErrExpired
 	}
 	sess := &Session{ID: IDFromSecret(secret), Identity: id, CreatedAt: now, LastSeen: now, ExpiresAt: exp,
-		refresh: sealedRefresh, revalidated: now, persistedSeen: now}
+		refresh: sealedRefresh, revalidated: now, persistedSeen: now, sid: e.SID}
 
 	if len(s.byID) >= s.opts.MaxSessions {
 		s.sweepLocked(now)
@@ -398,6 +465,51 @@ func (s *Store) RevokeSubject(provider, subject string) (int, error) {
 		return 0, nil
 	}
 	return len(recs), s.append(true, recs...)
+}
+
+// Ended is a session EndProviderSessions ended.
+type Ended struct {
+	ID      string
+	Subject string
+}
+
+// EndProviderSessions ends the sessions of provider that a logout at the
+// provider names, as OpenID Connect Back-Channel Logout 1.0 section 2.7
+// asks: with sid, the sessions carrying that provider session handle (and,
+// with subject too, only those of that subject); with subject alone, every
+// session of the subject at the provider. At least one must be non-empty.
+// The sessions stop working at once; the error says the revocations may not
+// survive a restart. The ended sessions are returned in id order.
+func (s *Store) EndProviderSessions(provider, subject, sid string) ([]Ended, error) {
+	if provider == "" || (subject == "" && sid == "") {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var set map[string]bool
+	if sid != "" {
+		set = s.bySID[subjectKey(provider, sid)]
+	} else {
+		set = s.bySubject[subjectKey(provider, subject)]
+	}
+	var out []Ended
+	for id := range set {
+		sess := s.byID[id]
+		if subject != "" && sess.Identity.Subject != subject {
+			continue
+		}
+		out = append(out, Ended{ID: id, Subject: sess.Identity.Subject})
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	recs := make([]record, len(out))
+	for i, e := range out {
+		recs[i] = record{Op: opRevoke, ID: e.ID}
+		s.unindex(s.byID[e.ID])
+	}
+	return out, s.append(true, recs...)
 }
 
 // List returns live sessions, oldest first. A non-empty subject filters to

@@ -91,6 +91,7 @@ type Server struct {
 	now      func() time.Time
 	replay   *saml.ReplayCache // assertion IDs, shared across reloads
 	used     *saml.ReplayCache // consumed login states
+	jtis     *saml.ReplayCache // back-channel logout token IDs, per provider
 	limiter  *rateLimiter
 	admin    [sha256.Size]byte
 	reloadMu sync.Mutex
@@ -136,6 +137,7 @@ func New(opts Options) (*Server, error) {
 	}
 	s := &Server{opts: opts, sessions: opts.Sessions, keys: opts.Keys, log: opts.Logger,
 		m: opts.Metrics, now: opts.Now, replay: saml.NewReplayCache(0, opts.Now), used: saml.NewReplayCache(0, opts.Now),
+		jtis:    saml.NewReplayCache(0, opts.Now),
 		limiter: newRateLimiter(opts.LoginRate, opts.Now), tokens: map[string]cachedToken{}}
 	s.auditLog.Store(opts.Audit)
 	if opts.AdminToken != "" {
@@ -192,6 +194,7 @@ func (s *Server) routes() {
 	s.route(s.public, "GET /callback/{provider}", s.limited(s.handleCallback))
 	s.route(s.public, "POST /saml/{provider}/acs", s.limited(s.handleACS))
 	s.route(s.public, "GET /saml/{provider}/metadata", s.handleSAMLMetadata)
+	s.route(s.public, "POST /backchannel-logout/{provider}", s.handleBackchannelLogout)
 	s.route(s.public, "GET /logout", s.handleLogoutPage)
 	s.route(s.public, "POST /logout", s.limited(s.handleLogout))
 	s.route(s.public, "GET /logged-out", s.handleLoggedOut)

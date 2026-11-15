@@ -60,3 +60,6 @@ func (c *ReplayCache) Len() int {
 	defer c.mu.Unlock()
 	return len(c.seen)
 }
+
+// Cap returns how many IDs the cache holds at most.
+func (c *ReplayCache) Cap() int { return c.capacity }

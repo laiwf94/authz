@@ -259,6 +259,22 @@ link the roadmap issue they come from.
   written. The gateway now keeps the parsed form (`https://`). Found once the
   SAML fuzz targets, which had spent their CI time minimizing inputs, fuzzed
   for their whole time.
+- **OpenID Connect back-channel logout** ([#79](https://github.com/laiwf94/authz/issues/79)).
+  `POST /backchannel-logout/{provider}` takes logout tokens (OpenID Connect
+  Back-Channel Logout 1.0): register `<public_url>/backchannel-logout/<id>`
+  as the client's `backchannel_logout_uri`. A valid token ends the sessions
+  with its `sid`, only those of its `sub` if it names one too, or every
+  session of its `sub` at that provider, and answers 200; each is audited as
+  `authn.session_ended` with reason `backchannel_logout`. The token must be
+  signed by the provider, for this client, current (`iat` at most 10
+  minutes old), carry the back-channel logout event, a `jti` and a `sub` or
+  `sid`, and no `nonce`; each `jti` is used once. Anything else answers 400
+  `invalid_request` and is audited as `authn.logout_rejected` with its
+  reason. The ID token's `sid` is now kept with the session (in the session
+  log, not in the admin API), and a malformed `sid` fails the login with
+  `claims_invalid`. New metric:
+  `wicket_backchannel_logouts_total{provider,result}`. `authz fakeidp` puts
+  a `sid` in its ID tokens and can send back-channel logouts.
 - **Sessions revalidate with the identity provider** ([#79](https://github.com/laiwf94/authz/issues/79)).
   `"revalidate": {"interval": "5m"}` on an OpenID provider makes the gateway
   redeem each session's refresh token every interval (RFC 6749 section 6;

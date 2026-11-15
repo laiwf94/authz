@@ -1,6 +1,6 @@
 // Package fakeidp is a small identity provider for tests and the demo. It
 // speaks OpenID Connect (discovery, authorize with PKCE, token, JWKS,
-// userinfo, end-session) and SAML 2.0 (metadata, HTTP-Redirect SSO, signed
+// userinfo, end-session, back-channel logout) and SAML 2.0 (metadata, HTTP-Redirect SSO, signed
 // and optionally encrypted HTTP-POST responses) for a fixed list of users.
 //
 // It is strict where a real provider is strict (exact redirect URIs,
@@ -46,6 +46,9 @@ type Client struct {
 	Secret                 string
 	RedirectURIs           []string
 	PostLogoutRedirectURIs []string
+	// BackchannelLogoutURI, when set, is where Logout posts logout tokens
+	// for this client's sessions (OpenID Connect Back-Channel Logout 1.0).
+	BackchannelLogoutURI string
 }
 
 // ServiceProvider is a registered SAML service provider.
@@ -70,6 +73,9 @@ type Config struct {
 	Clients          []Client
 	ServiceProviders []ServiceProvider
 	Now              func() time.Time
+	// BackchannelClient sends back-channel logout requests; nil uses
+	// http.DefaultClient.
+	BackchannelClient *http.Client
 }
 
 // IdP is the identity provider. It is safe for concurrent use.
@@ -83,6 +89,7 @@ type IdP struct {
 	codes     map[string]*grant
 	tokens    map[string]*grant
 	refreshes map[string]*grant // live refresh tokens
+	sessions  map[string]*grant // provider sessions by sid, one per login
 	down      bool              // the token endpoint answers 503
 }
 
@@ -108,7 +115,7 @@ func New(cfg Config) (*IdP, error) {
 		return nil, err
 	}
 	i := &IdP{cfg: cfg, rsaKey: rk, cert: cert, codes: map[string]*grant{}, tokens: map[string]*grant{},
-		refreshes: map[string]*grant{}}
+		refreshes: map[string]*grant{}, sessions: map[string]*grant{}}
 	i.mux = http.NewServeMux()
 	i.mux.HandleFunc("GET /.well-known/openid-configuration", i.discovery)
 	i.mux.HandleFunc("GET /jwks", i.jwks)
@@ -204,3 +211,6 @@ func httpError(w http.ResponseWriter, status int, msg string) {
 	w.WriteHeader(status)
 	w.Write([]byte(msg + "\n"))
 }
+
+// Issuer returns the IdP's issuer URL.
+func (i *IdP) Issuer() string { return i.cfg.Issuer }

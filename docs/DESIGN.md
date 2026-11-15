@@ -498,6 +498,13 @@ The tokens are sealed with the session ring and bound to their provider and
 subject; see
 [wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md#revalidation).
 
+**Back-channel logout** (#79). `POST /backchannel-logout/{provider}`
+accepts OpenID Connect Back-Channel Logout 1.0 logout tokens. The session
+store indexes sessions by subject and by the provider's `sid` from the ID
+token, so a token ends exactly the sessions it names; each `jti` is used
+once. See
+[wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md#back-channel-logout).
+
 ### Key rings in the gateway
 
 Without a keys file the gateway keeps wicket's two key lists.

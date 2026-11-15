@@ -27,6 +27,7 @@ type grant struct {
 	nonce       string
 	user        *User
 	expires     time.Time
+	sid         string // the provider session the grant belongs to
 }
 
 func randomString() string {
@@ -56,6 +57,8 @@ func (i *IdP) discovery(w http.ResponseWriter, _ *http.Request) {
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"scopes_supported":                      []string{"openid", "email", "profile", "groups"},
+		"backchannel_logout_supported":          true,
+		"backchannel_logout_session_supported":  true,
 	})
 }
 
@@ -154,7 +157,7 @@ func (i *IdP) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	code := randomString()
 	i.mu.Lock()
 	i.codes[code] = &grant{client: q.Get("client_id"), redirectURI: q.Get("redirect_uri"), challenge: q.Get("code_challenge"),
-		nonce: q.Get("nonce"), user: u, expires: i.cfg.Now().Add(codeTTL)}
+		nonce: q.Get("nonce"), user: u, expires: i.cfg.Now().Add(codeTTL), sid: randomString()}
 	i.mu.Unlock()
 	target, _ := url.Parse(q.Get("redirect_uri"))
 	tq := target.Query()
@@ -217,11 +220,12 @@ func (i *IdP) token(w http.ResponseWriter, r *http.Request) {
 	now := i.cfg.Now()
 	i.mu.Lock()
 	i.tokens[access] = &grant{client: clientID, user: g.user, expires: now.Add(tokenTTL)}
+	i.sessions[g.sid] = &grant{client: clientID, user: g.user, sid: g.sid}
 	i.mu.Unlock()
 	atHash := sha256.Sum256([]byte(access))
 	idToken, err := i.SignJWT(map[string]any{
 		"iss": i.cfg.Issuer, "sub": g.user.Username, "aud": clientID, "exp": now.Add(tokenTTL).Unix(),
-		"iat": now.Unix(), "nonce": g.nonce, "email": g.user.Email, "email_verified": true,
+		"iat": now.Unix(), "nonce": g.nonce, "sid": g.sid, "email": g.user.Email, "email_verified": true,
 		"name": g.user.Name, "groups": g.user.Groups,
 		"at_hash": base64.RawURLEncoding.EncodeToString(atHash[:16]),
 	})
@@ -230,12 +234,21 @@ func (i *IdP) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": access, "token_type": "Bearer",
-		"expires_in": int(tokenTTL.Seconds()), "id_token": idToken, "refresh_token": i.issueRefresh(clientID, g.user)})
+		"expires_in": int(tokenTTL.Seconds()), "id_token": idToken, "refresh_token": i.issueRefresh(clientID, g.user, g.sid)})
 }
 
 // SignJWT signs claims with the IdP's RSA key (RS256).
 func (i *IdP) SignJWT(claims map[string]any) (string, error) {
-	hb, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": KeyID, "typ": "JWT"})
+	return i.SignJWTType("JWT", claims)
+}
+
+// SignJWTType is SignJWT with another typ header ("" leaves it out).
+func (i *IdP) SignJWTType(typ string, claims map[string]any) (string, error) {
+	h := map[string]string{"alg": "RS256", "kid": KeyID}
+	if typ != "" {
+		h["typ"] = typ
+	}
+	hb, _ := json.Marshal(h)
 	pb, err := json.Marshal(claims)
 	if err != nil {
 		return "", err

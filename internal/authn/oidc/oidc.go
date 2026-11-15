@@ -294,6 +294,10 @@ type Result struct {
 	// none. It is a credential: callers seal it before storing it and never
 	// log it.
 	RefreshToken string
+	// SessionID is the provider's sid claim (OpenID Connect Front- and
+	// Back-Channel Logout), or "" when the ID token has none. A back-channel
+	// logout token names the session by it.
+	SessionID string
 }
 
 type tokenResponse struct {
@@ -380,7 +384,11 @@ func (p *Provider) Exchange(ctx context.Context, code, verifier, nonce string) (
 	if err != nil {
 		return nil, err
 	}
-	res := &Result{Identity: id}
+	sid, err := sessionID(claims)
+	if err != nil {
+		return nil, err
+	}
+	res := &Result{Identity: id, SessionID: sid}
 	// A refresh token this relying party can't keep doesn't spoil a good
 	// login: the session just has none (and revalidation treats it so).
 	if usableRefreshToken(tr.RefreshToken) {

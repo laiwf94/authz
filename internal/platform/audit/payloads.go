@@ -76,11 +76,15 @@ type Logout struct {
 	Session  string `json:"session"`
 }
 
-// LogoutRejected is a logout that failed its CSRF check. Envelope: action
-// "logout", decision deny.
+// LogoutRejected is a logout that failed its CSRF check, or a back-channel
+// logout token that failed validation. Envelope: action "logout", decision
+// deny.
 type LogoutRejected struct {
 	Reason  string `json:"reason"`
 	Session string `json:"session,omitempty"`
+	// Provider is set for a back-channel logout token the provider (or
+	// someone posing as it) sent.
+	Provider string `json:"provider,omitempty"`
 }
 
 // SessionRevoked is an administrator ending sessions. Envelope: actor (the
@@ -93,12 +97,12 @@ type SessionRevoked struct {
 }
 
 // SessionEnded is a session the identity provider ended: a refused or
-// failed revalidation. Envelope: actor (the user's subject), subject (the
+// failed revalidation, or a back-channel logout. Envelope: actor (the user's subject), subject (the
 // session), action "session.end".
 type SessionEnded struct {
 	Provider string `json:"provider"`
 	Session  string `json:"session"`
-	Reason   string `json:"reason"` // refresh_refused, refresh_failed, ...
+	Reason   string `json:"reason"` // refresh_refused, refresh_failed, backchannel_logout, ...
 }
 
 // AccessDenied is a forward-auth request refused by an application's

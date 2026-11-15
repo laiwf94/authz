@@ -38,11 +38,13 @@ type record struct {
 	// Revalidated is, on a create record, when the identity provider last
 	// confirmed the session, if after its creation (compaction keeps it).
 	Revalidated time.Time `json:"revalidated,omitzero"`
+	// SID is, on a create record, the provider's session handle.
+	SID string `json:"sid,omitempty"`
 }
 
 // createRecord is the record that recreates sess on replay.
 func createRecord(sess *Session) record {
-	r := record{Op: opCreate, Session: sess, Refresh: sess.refresh}
+	r := record{Op: opCreate, Session: sess, Refresh: sess.refresh, SID: sess.sid}
 	if sess.revalidated.After(sess.CreatedAt) {
 		r.Revalidated = sess.revalidated
 	}
@@ -178,6 +180,7 @@ func (r *replayer) apply(rec record) error {
 		}
 		rec.Session.persistedSeen = rec.Session.LastSeen
 		rec.Session.refresh = rec.Refresh
+		rec.Session.sid = rec.SID
 		rec.Session.revalidated = rec.Session.CreatedAt
 		if rec.Revalidated.After(rec.Session.CreatedAt) {
 			rec.Session.revalidated = rec.Revalidated
@@ -242,6 +245,9 @@ func validate(rec record) error {
 	case opCreate:
 		if rec.Session == nil || len(rec.Session.ID) != 32 {
 			return errors.New("create without a session")
+		}
+		if rec.SID != "" && !ValidSID(rec.SID) {
+			return errors.New("create with a malformed sid")
 		}
 	case opTouch, opRevoke:
 		if len(rec.ID) != 32 {

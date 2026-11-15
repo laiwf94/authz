@@ -123,7 +123,7 @@ func newHarness(t testing.TB, o harnessOpts) *harness {
 	}
 	h.idp, err = fakeidp.New(fakeidp.Config{Issuer: issuer, Now: h.clk.Now,
 		Clients: []fakeidp.Client{{ID: "wicket", Secret: clientSecret, RedirectURIs: []string{h.public + "/callback/corp"},
-			PostLogoutRedirectURIs: []string{h.public + "/logged-out"}}},
+			PostLogoutRedirectURIs: []string{h.public + "/logged-out"}, BackchannelLogoutURI: h.public + "/backchannel-logout/corp"}},
 		ServiceProviders: []fakeidp.ServiceProvider{sp}})
 	if err != nil {
 		t.Fatal(err)
@@ -202,6 +202,7 @@ func newHarness(t testing.TB, o harnessOpts) *harness {
 	h.pub.Config.Handler = h.srv.Handler()
 	h.pub.StartTLS()
 	t.Cleanup(h.pub.Close)
+	h.idp.SetBackchannelClient(h.pub.Client())
 	h.admin.Config.Handler = h.srv.AdminHandler()
 	h.admin.Start()
 	t.Cleanup(h.admin.Close)
