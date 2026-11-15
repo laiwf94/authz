@@ -458,6 +458,8 @@ func TestEvalInputs(t *testing.T) {
 		want string
 	}{
 		{"i", "1", "variable i is a string, want int"}, {"i", 1.5, "the number 1.5, want int"},
+		{"s", 1e6, "is the number 1000000, want string"}, {"s", 1e21, "is the number 1e+21, want string"},
+		{"s", float32(0.5), "is the number 0.5, want string"}, {"s", math.Copysign(0, -1), "is the number 0, want string"},
 		{"i", uint64(1 << 63), "want int"}, {"i", 1e19, "want int"}, {"i", json.Number("1.5"), "want int"},
 		{"i", nil, "variable i is null, want int"}, {"u", -1, "want uint"}, {"u", -1.0, "want uint"},
 		{"u", 0.5, "want uint"}, {"u", json.Number("-1"), "want uint"}, {"d", "1", "want double"},

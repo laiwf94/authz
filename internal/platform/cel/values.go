@@ -556,7 +556,25 @@ func describeGo(v any) string {
 		return "a string"
 	case bool:
 		return "a bool"
-	case float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, json.Number:
+	case float32:
+		return describeGo(float64(v))
+	case float64:
+		// Whole numbers are written out, as JSON writes them: 1000000,
+		// not 1e+06.
+		if v == 0 {
+			v = 0 // -0 too
+		}
+		f := byte('g')
+		if math.Abs(v) < 1e21 && v == math.Trunc(v) {
+			f = 'f'
+		}
+		return "the number " + strconv.FormatFloat(v, f, -1, 64)
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return describeGo(i)
+		}
+		return "the number " + string(v)
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 		return fmt.Sprintf("the number %v", v)
 	}
 	return fmt.Sprintf("%T", v)
