@@ -29,7 +29,9 @@ func (s *Server) handleLogoutPage(w http.ResponseWriter, r *http.Request) {
 // handleLogout ends the session: POST /logout with form fields csrf and,
 // optionally, rd. For OpenID Connect providers that publish an
 // end_session_endpoint, the browser continues there (RP-initiated logout);
-// SAML sessions end locally.
+// for SAML providers with single logout, it carries a LogoutRequest to the
+// identity provider and comes back through /saml/{provider}/slo
+// (samllogout.go). Other SAML sessions end locally.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	rt := s.rt.Load()
 	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/x-www-form-urlencoded" {
@@ -80,6 +82,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		if u := p.oidc.EndSessionURL(r.Context(), p.postLogout); u != "" {
 			done = u
 		}
+	} else if p != nil && p.kind == config.ProviderSAML && s.startSAMLLogout(w, r, p, sess, done) {
+		return
 	}
 	http.Redirect(w, r, done, http.StatusSeeOther)
 }

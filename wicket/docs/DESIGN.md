@@ -327,6 +327,90 @@ signed out, an administrator ended the session, or the user was disabled.
 refreshes), advertises `backchannel_logout_supported`, and its `Logout`
 sends a logout token to every client with a back-channel logout URI.
 
+### SAML single logout
+
+`/saml/{provider}/slo` is the service provider's SingleLogoutService (SAML
+2.0 Profiles section 4.4), for the HTTP-Redirect binding (GET) and the
+HTTP-POST binding (POST), in both directions. It is on for a SAML provider
+when it has an SP key (`sp_key_file`, `sp_cert_file`) and the IdP metadata
+lists a SingleLogoutService for either binding; the SP metadata then lists
+`/saml/<id>/slo` for both. Without either, sign-out stays local and the
+endpoint answers 400.
+
+- **Every message is signed, both ways.** Messages travel through the
+  browser, so only a signature tells the gateway the IdP sent them (Profiles
+  4.4.3.1, 4.4.4.1). The gateway signs its own with the SP key: the
+  HTTP-Redirect query signature (RSA-SHA256 over `SAMLRequest`,
+  `RelayState`, `SigAlg` as sent, Bindings 3.4.4.1), or an enveloped XML
+  signature with exclusive canonicalization for HTTP-POST. It requires the
+  same of the IdP: a query signature checked against the IdP's
+  certificates over the parameters exactly as they arrived (RSA or ECDSA
+  with SHA-256/384/512, the key type matching `SigAlg`; SHA-1 is refused),
+  or an enveloped signature held to the same shape rules as assertions
+  (one Reference to the root's ID, that ID unique, SHA-2), after which only
+  the signed bytes are read. An unsigned message, a repeated query
+  parameter, or an HTTP-Redirect message that also carries an XML
+  signature is refused.
+- **Checks on the signed content.** Version 2.0 and a valid ID;
+  `IssueInstant` present, not ahead of the clock by more than the skew and
+  at most 10 minutes old; `Destination` present and equal to this
+  SingleLogoutService; one `Issuer`, the IdP's entity id (an entity
+  format, if any); `RelayState` at most 80 bytes of plain text. A
+  LogoutRequest's `NotOnOrAfter` must not have passed; it needs exactly one
+  plain `NameID` (an `EncryptedID` or `BaseID` is refused) and at most 16
+  `SessionIndex` elements of 1-255 visible ASCII characters. A
+  LogoutResponse needs an `InResponseTo` and a `Status`. Each message ID is
+  accepted once, remembered for 10 minutes plus skew in the same 100,000-ID
+  cache as assertion IDs, which fails closed when full.
+- **Session index lookup.** At login the assertion's `AuthnStatement
+  SessionIndex` is kept with the session, exactly as an OpenID Connect
+  `sid` (same session-log field, same per-provider index, not in the admin
+  API). A SessionIndex the gateway could not match exactly (longer than 255
+  bytes or not visible ASCII) fails the login with `malformed_response`
+  rather than leave a session that no logout can name.
+- **IdP-initiated.** A LogoutRequest with SessionIndexes ends the sessions
+  of its NameID at that provider carrying any of them; without one it ends
+  every session of the NameID at that provider (Core 3.7.3.2). The
+  revocations are fsynced, each ended session is audited as
+  `authn.session_ended` with reason `saml_logout` and counted in
+  `wicket_sessions_ended_total`, and the browser's own cookie is cleared if
+  its session was among them. The gateway answers with a signed
+  LogoutResponse, status Success whether or not a session matched, on the
+  binding the request came on (or the IdP's other one), to the endpoint's
+  `ResponseLocation` if it has one, echoing `RelayState`.
+- **SP-initiated.** `POST /logout` ends the session here first, as before,
+  then sends the browser to the IdP with a signed LogoutRequest naming the
+  session's NameID and SessionIndex (HTTP-Redirect if the IdP offers it,
+  else HTTP-POST). The request ID, the return URL and a random RelayState
+  travel in a sealed, single-use `__Host-wicket-login-*` cookie, like a
+  pending login's (SameSite=None, since the answer may be a cross-site
+  POST; 10 minutes). The IdP's LogoutResponse must carry that RelayState,
+  come with that cookie and answer that request ID; the browser then goes
+  to the return URL. A status other than plain Success (such as
+  `PartialLogout`) is logged as a warning and counted as `partial`: the
+  session here has already ended.
+- **HTTP-POST pages.** The self-submitting form for the HTTP-POST binding
+  is the one page with a script: its Content-Security-Policy allows exactly
+  that script (`document.forms[0].submit()`) and the page stylesheet by
+  hash, and form posts to https only. Without scripts the page shows a
+  Continue button.
+- Refused messages answer 400 with an error page and are audited as
+  `authn.logout_rejected` with the provider and the reason:
+  `logout_provider_unknown`, `malformed_response`, `signature_missing`,
+  `signature_invalid`, `signature_wrapping`, `wrong_destination`,
+  `wrong_issuer`, `assertion_expired`, `assertion_not_yet_valid`,
+  `no_valid_subject`, `logout_replayed`, `wrong_in_response_to`, and the
+  pending-logout cookie reasons (`state_cookie_missing`, `state_mismatch`,
+  `state_replayed`, `login_expired`). Messages are counted in
+  `wicket_saml_logouts_total{provider,initiator,result}`: `initiator` is
+  `idp` or `sp` (empty for a message refused before it was read), `result`
+  is `accepted`, `sent`, `partial`, `rejected` or `error`.
+
+The test identity provider (`internal/authn/fakeidp`) can list a
+SingleLogoutService for either binding, records
+a SessionIndex per SAML login, ends the sessions a service provider's
+LogoutRequest names and answers it, and builds IdP-initiated requests.
+
 ### JWKS cache
 
 Keys are fetched from the discovered `jwks_uri` on first use and cached for
@@ -404,8 +488,10 @@ gateway's origin. Nothing is cleared until the token checks out, so a forged
 POST can't even sign the browser out. The session is revoked server-side;
 for OpenID Connect providers with an `end_session_endpoint` the browser then
 continues there (RP-Initiated Logout 1.0, with `client_id` and an optional
-registered `post_logout_redirect_uri`). SAML sessions end locally: SAML
-Single Logout is out of scope.
+registered `post_logout_redirect_uri`). For SAML providers with single
+logout the browser carries a LogoutRequest to the IdP and comes back
+through the SingleLogoutService (see [SAML single logout](#saml-single-logout));
+other SAML sessions end locally.
 
 ### Configuration and reload
 
@@ -499,7 +585,8 @@ expensive work.
 | SAML response | 256 KiB XML, 48 levels, 50,000 tokens; ACS form 512 KiB | Bounds parse cost. |
 | SAML values | NameID and attribute values 512 bytes; 256 values per attribute | |
 | SAML confirmation | NotOnOrAfter at most 24 hours ahead | Bounds replay-cache retention. |
-| Replay cache | 100,000 assertion IDs | Fails closed when full. |
+| Replay cache | 100,000 assertion and logout message IDs | Fails closed when full. |
+| SAML logout messages | IssueInstant at most 10 minutes old; 16 SessionIndexes of 255 visible ASCII bytes; RelayState 80 bytes | Bounds replay-cache retention and the session index. |
 | Back-channel calls | 10 s each, 1 MiB responses, 25 s per callback | |
 | Revalidation | interval 30 s - 24 h, grace at most 24 h; 2,000 sessions per provider per pass, 8 requests in flight, 2 min per pass; refresh tokens 3,000 bytes | Bounds the load on the provider and the session record. |
 | Upstream token | 10 s - 15 min (default 2 min); 100,000 cached | |
@@ -530,7 +617,9 @@ session counts are operational data.
 
 wicket's few HTML pages use `html/template` and a Content-Security-Policy of
 `default-src 'none'` with the one stylesheet allowed by hash,
-`frame-ancestors 'none'`, and no scripts. Every response has
+`frame-ancestors 'none'`, and no scripts (the one exception is the
+HTTP-POST binding's self-submitting form for SAML single logout, which
+allows its one script by hash). Every response has
 `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer` and HSTS.
 
@@ -538,10 +627,10 @@ The audit log is one JSON line per event with `"audit":true`:
 `login_succeeded`, `login_failed` (with a reason code such as
 `state_cookie_missing`, `nonce_mismatch`, `signature_wrapping`,
 `assertion_replayed`), `login_rejected`, `access_denied`, `logout`,
-`logout_rejected` (a bad CSRF token, or a refused back-channel logout
-token, with its reason), `session_revoked`, `session_ended` (a session the
+`logout_rejected` (a bad CSRF token, a refused back-channel logout
+token or SAML logout message, with its reason), `session_revoked`, `session_ended` (a session the
 provider refused or could not vouch for at revalidation, or ended with a
-back-channel logout, with its reason),
+back-channel logout or a SAML LogoutRequest, with its reason),
 `config_loaded`, `config_load_failed`.
 Entries carry the request id, provider, subject, email, public session id and
 client address. They contain personal data; the session log does too, and is
@@ -588,9 +677,9 @@ without coordination.
 Per-replica rate-limit buckets multiply the limit by the replica count, so a
 shared limiter or the proxy's own limiter at the edge would take over.
 
-With a shared store, accepting OIDC back-channel logout tokens and SAML
-LogoutRequests becomes a lookup by provider session id, which would then need
-storing. That would make SAML Single Logout and back-channel logout possible.
+Back-channel logout and SAML single logout already find sessions by the
+provider's session id (`sid`, SessionIndex); with a shared store that index
+and the logout-message replay cache would live there too.
 
 [xsw]: https://www.usenix.org/conference/usenixsecurity12/technical-sessions/presentation/somorovsky
 [mcintosh]: https://doi.org/10.1145/1103022.1103026

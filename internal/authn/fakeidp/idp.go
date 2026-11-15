@@ -1,7 +1,8 @@
 // Package fakeidp is a small identity provider for tests and the demo. It
 // speaks OpenID Connect (discovery, authorize with PKCE, token, JWKS,
 // userinfo, end-session, back-channel logout) and SAML 2.0 (metadata, HTTP-Redirect SSO, signed
-// and optionally encrypted HTTP-POST responses) for a fixed list of users.
+// and optionally encrypted HTTP-POST responses, single logout over
+// HTTP-Redirect and HTTP-POST) for a fixed list of users.
 //
 // It is strict where a real provider is strict (exact redirect URIs,
 // single-use codes, PKCE, registered ACS URLs) so tests can't pass only
@@ -63,6 +64,12 @@ type ServiceProvider struct {
 	// RequestCert, when set, requires AuthnRequests signed with this
 	// certificate's key.
 	RequestCert *x509.Certificate
+	// SingleLogoutURL is the service provider's SingleLogoutService, where
+	// the IdP sends LogoutRequests and LogoutResponses; LogoutCert must
+	// have signed every logout message the service provider sends. See
+	// EnableSingleLogout.
+	SingleLogoutURL string
+	LogoutCert      *x509.Certificate
 }
 
 // Config configures the identity provider.
@@ -91,6 +98,14 @@ type IdP struct {
 	refreshes map[string]*grant // live refresh tokens
 	sessions  map[string]*grant // provider sessions by sid, one per login
 	down      bool              // the token endpoint answers 503
+
+	// SAML single logout (slo.go).
+	slo           []string                // bindings in the metadata
+	samlSessions  map[string]*samlSession // by SessionIndex
+	sloSeq        int
+	pendingLogout map[string]string // IdP-initiated request ID -> SP entity id
+	logoutResults map[string]string // request ID -> the SP's status
+	received      []ReceivedLogout
 }
 
 // New generates fresh signing keys and builds the IdP.
@@ -115,7 +130,8 @@ func New(cfg Config) (*IdP, error) {
 		return nil, err
 	}
 	i := &IdP{cfg: cfg, rsaKey: rk, cert: cert, codes: map[string]*grant{}, tokens: map[string]*grant{},
-		refreshes: map[string]*grant{}, sessions: map[string]*grant{}}
+		refreshes: map[string]*grant{}, sessions: map[string]*grant{}, samlSessions: map[string]*samlSession{},
+		pendingLogout: map[string]string{}, logoutResults: map[string]string{}}
 	i.mux = http.NewServeMux()
 	i.mux.HandleFunc("GET /.well-known/openid-configuration", i.discovery)
 	i.mux.HandleFunc("GET /jwks", i.jwks)
@@ -127,6 +143,8 @@ func New(cfg Config) (*IdP, error) {
 	i.mux.HandleFunc("GET /saml/metadata", i.samlMetadata)
 	i.mux.HandleFunc("GET /saml/sso", i.samlForm)
 	i.mux.HandleFunc("POST /saml/sso", i.samlSubmit)
+	i.mux.HandleFunc("GET /saml/slo", i.samlSLO)
+	i.mux.HandleFunc("POST /saml/slo", i.samlSLO)
 	i.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	return i, nil
 }

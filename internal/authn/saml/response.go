@@ -57,6 +57,9 @@ type Result struct {
 	Identity policy.Identity
 	// SessionNotOnOrAfter is the IdP's cap on the session, if it set one.
 	SessionNotOnOrAfter time.Time
+	// SessionIndex is the IdP's handle for its session, if it gave one; a
+	// LogoutRequest names it to end this session alone.
+	SessionIndex string
 }
 
 // ParseResponse validates a base64 SAMLResponse from the HTTP-POST binding
@@ -252,6 +255,12 @@ func (sp *SP) checkAssertion(a *etree.Element, requestID string, now time.Time) 
 	if err != nil {
 		return nil, err
 	}
+	// The session index is kept to match a later LogoutRequest, so one that
+	// could not be matched exactly is refused rather than dropped.
+	sessionIndex := attr(authn[0], "SessionIndex")
+	if sessionIndex != "" && !ValidSessionIndex(sessionIndex) {
+		return nil, fail(ReasonMalformed, "SessionIndex must be 1-%d visible ASCII characters", MaxSessionIndexBytes)
+	}
 
 	// The ID is remembered until the assertion can no longer be accepted.
 	expires := confirmExpiry
@@ -278,7 +287,7 @@ func (sp *SP) checkAssertion(a *etree.Element, requestID string, now time.Time) 
 			return nil, fail(ReasonAttributes, "%v", err)
 		}
 	}
-	return &Result{Identity: id, SessionNotOnOrAfter: sessionEnd}, nil
+	return &Result{Identity: id, SessionNotOnOrAfter: sessionEnd, SessionIndex: sessionIndex}, nil
 }
 
 // subject finds a bearer SubjectConfirmation that answers our request at our

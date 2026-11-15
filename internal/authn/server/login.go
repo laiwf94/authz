@@ -318,7 +318,9 @@ func (s *Server) handleACS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 303 turns the IdP's POST into a GET of the return URL.
-	s.finishLogin(w, r, rt, st, res.Identity, session.Extra{NotAfter: res.SessionNotOnOrAfter}, http.StatusSeeOther)
+	// The SessionIndex is kept and indexed like an OpenID Connect sid, so a
+	// LogoutRequest naming it ends this session.
+	s.finishLogin(w, r, rt, st, res.Identity, session.Extra{NotAfter: res.SessionNotOnOrAfter, SID: res.SessionIndex}, http.StatusSeeOther)
 }
 
 // finishLogin replaces any existing session with a new one (a fresh id at

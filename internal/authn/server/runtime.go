@@ -162,7 +162,8 @@ func buildSAML(ctx context.Context, cfg *config.Config, pc *config.Provider, cli
 	}
 	return saml.New(saml.Config{
 		ProviderID: pc.ID, EntityID: entityID, ACSURL: cfg.PublicURL + "/saml/" + pc.ID + "/acs", IdP: md,
-		Key: key, Cert: cert, SignRequests: pc.SignRequests, NameIDFormat: pc.NameIDFormat,
+		SLOURL: cfg.PublicURL + "/saml/" + pc.ID + "/slo", Key: key, Cert: cert,
+		SignRequests: pc.SignRequests, NameIDFormat: pc.NameIDFormat,
 		EmailAttr: emailAttr, NameAttr: pc.NameAttribute, GroupsAttr: groupsAttr, Skew: skew, Now: o.now,
 		Replay: o.replay,
 	})

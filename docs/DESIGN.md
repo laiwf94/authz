@@ -505,6 +505,15 @@ token, so a token ends exactly the sessions it names; each `jti` is used
 once. See
 [wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md#back-channel-logout).
 
+**SAML single logout** (#79). `/saml/{provider}/slo` takes signed
+LogoutRequests and LogoutResponses on the HTTP-Redirect and HTTP-POST
+bindings. Each login's SessionIndex is kept and indexed like an OpenID
+Connect `sid`, so an IdP-initiated request ends exactly the sessions it
+names; `POST /logout` sends a signed LogoutRequest to the IdP and matches
+its answer through a sealed, single-use cookie. It is on when the provider
+has an SP key and the IdP metadata lists a SingleLogoutService. See
+[wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md#saml-single-logout).
+
 ### Key rings in the gateway
 
 Without a keys file the gateway keeps wicket's two key lists.

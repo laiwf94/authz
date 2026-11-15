@@ -56,7 +56,9 @@ minute.
 SAML identity providers get SP-initiated, optionally signed requests and
 answer with signed, optionally encrypted assertions. The verification order
 is built to defeat XML signature wrapping; assertions are single-use and must
-answer the request this browser made.
+answer the request this browser made. Single logout runs both ways over the
+HTTP-Redirect and HTTP-POST bindings, with signed messages and each login's
+SessionIndex.
 
 The browser only ever holds a sealed cookie with a random session id. Sessions
 live on the server, in memory with an optional append-only log, so they
@@ -143,6 +145,7 @@ Public listener (`WICKET_ADDR`, default `:4180`):
 | `POST /saml/{provider}/acs` | SAML assertion consumer service (HTTP-POST). |
 | `POST /backchannel-logout/{provider}` | OpenID Connect Back-Channel Logout 1.0: register it as the client's `backchannel_logout_uri`. A valid logout token ends the sessions it names. |
 | `GET /saml/{provider}/metadata` | SP metadata to give the identity provider. |
+| `GET`, `POST /saml/{provider}/slo` | SAML SingleLogoutService (HTTP-Redirect, HTTP-POST): signed LogoutRequests from the IdP end the sessions they name; LogoutResponses finish a sign-out started here. |
 | `GET /logout`, `POST /logout` | Confirmation page; the POST (with its CSRF token) ends the session. |
 | `GET /.well-known/jwks.json` | Keys that verify `X-Auth-Token`. |
 | `GET /healthz` | Liveness. |
@@ -174,7 +177,7 @@ details go only to the audit log.
 | Return URLs | Property test that every accepted URL, read the way a browser reads it, stays on an allowed host (checked by an independent matcher), and that validation is idempotent. |
 | JWT and cookies | Property tests: signed tokens round-trip; any single-character change to a token, or any bit flip in a sealed cookie, is rejected. |
 | Session log | Truncated at every byte offset: recovery yields exactly the complete records. Damage mid-file stops startup; write failures are injected and a failed repair blocks further writes. |
-| Parsers | Go fuzzing of the JWS parser, JWK sets, the cookie codec, the return-URL validator, SAML responses and metadata. |
+| Parsers | Go fuzzing of the JWS parser, JWK sets, the cookie codec, the return-URL validator, SAML responses, metadata and logout messages. |
 | Concurrency | The whole suite runs under the race detector. Coverage is 93% of statements. |
 
 Each attack in the suites must be rejected, with a specific reason.

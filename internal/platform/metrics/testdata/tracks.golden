@@ -87,6 +87,9 @@ wicket_rate_limited_total 2
 # TYPE wicket_revalidations_total counter
 wicket_revalidations_total{provider="corp",result="confirmed"} 1
 wicket_revalidations_total{provider="corp",result="refused"} 1
+# HELP wicket_saml_logouts_total SAML single logout messages by provider, initiator (idp or sp) and result.
+# TYPE wicket_saml_logouts_total counter
+wicket_saml_logouts_total{provider="partner",initiator="idp",result="accepted"} 1
 # HELP wicket_sessions_ended_total Sessions ended because the identity provider no longer vouched for them.
 # TYPE wicket_sessions_ended_total counter
 wicket_sessions_ended_total{reason="refresh_refused"} 1

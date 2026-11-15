@@ -19,6 +19,10 @@ type IdPMetadata struct {
 	SSOURL             string // HTTP-Redirect SingleSignOnService
 	Certs              []*x509.Certificate
 	WantRequestsSigned bool
+	// SingleLogout holds the SingleLogoutService endpoints by binding
+	// (HTTP-Redirect and HTTP-POST; others are ignored). Empty when the
+	// IdP offers no single logout.
+	SingleLogout map[string]Endpoint
 }
 
 // ParseIdPMetadata reads an EntityDescriptor with an IDPSSODescriptor. The
@@ -84,6 +88,35 @@ func ParseIdPMetadata(b []byte) (*IdPMetadata, error) {
 	// URL logins are sent to is the one that passed ("httPs://" was kept
 	// as written, #230).
 	m.SSOURL = u.String()
+	for _, slo := range children(idp, NSMetadata, "SingleLogoutService") {
+		b := attr(slo, "Binding")
+		if b != BindingRedirect && b != BindingPOST {
+			continue
+		}
+		if _, dup := m.SingleLogout[b]; dup {
+			continue // the first endpoint for a binding is the one used
+		}
+		var ep Endpoint
+		for _, f := range []struct {
+			dst      *string
+			name     string
+			optional bool
+		}{{&ep.Location, "Location", false}, {&ep.ResponseLocation, "ResponseLocation", true}} {
+			v := attr(slo, f.name)
+			if v == "" && f.optional {
+				continue
+			}
+			u, err := url.Parse(v)
+			if err != nil || u.Scheme != "https" || u.Host == "" {
+				return nil, fmt.Errorf("saml metadata: SingleLogoutService %s must be an https URL", f.name)
+			}
+			*f.dst = u.String()
+		}
+		if m.SingleLogout == nil {
+			m.SingleLogout = map[string]Endpoint{}
+		}
+		m.SingleLogout[b] = ep
+	}
 	return m, nil
 }
 

@@ -52,6 +52,8 @@ func registerTracks(r *Registry) {
 	r.Counter("wicket_sessions_ended_total", `reason="refresh_refused"`, "Sessions ended because the identity provider no longer vouched for them.").Inc()
 	r.Counter("wicket_backchannel_logouts_total", `provider="corp",result="accepted"`,
 		"Back-channel logout requests by provider and result: accepted or rejected.").Inc()
+	r.Counter("wicket_saml_logouts_total", `provider="partner",initiator="idp",result="accepted"`,
+		"SAML single logout messages by provider, initiator (idp or sp) and result.").Inc()
 
 	// toolgate: internal/agents/gateway and internal/agents/httpx, whose
 	// prefix is "toolgate" for the gateway and "mcpfake" for the fake server.

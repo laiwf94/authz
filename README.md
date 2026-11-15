@@ -194,7 +194,10 @@ provider refuses (a disabled user), or by `on_failure` (`end` or `grace`)
 when the provider can't be asked. Registering
 `<public_url>/backchannel-logout/<provider>` as the client's back-channel
 logout URI at an OpenID provider ends a user's sessions the moment the
-provider says their session there ended.
+provider says their session there ended. A SAML provider with an SP key whose
+IdP lists a SingleLogoutService gets SAML single logout at
+`<public_url>/saml/<provider>/slo`, started by either side, over the
+HTTP-Redirect and HTTP-POST bindings.
 
 The end-to-end responses are pinned byte for byte in golden transcripts
 recorded from wicket before the move, and CI replays them through

@@ -1,15 +1,14 @@
 // Package saml is a SAML 2.0 service provider for the Web Browser SSO
 // profile: SP-initiated AuthnRequest over HTTP-Redirect, Response over
-// HTTP-POST (OASIS SAML 2.0 Core, Bindings and Profiles).
+// HTTP-POST, and the Single Logout profile over HTTP-Redirect and HTTP-POST
+// (OASIS SAML 2.0 Core, Bindings and Profiles).
 package saml
 
 import (
 	"bytes"
 	"compress/flate"
-	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -20,7 +19,6 @@ import (
 	"time"
 
 	"github.com/beevik/etree"
-	dsig "github.com/russellhaering/goxmldsig"
 )
 
 // DefaultSkew is the default allowance for clock differences.
@@ -28,9 +26,12 @@ const DefaultSkew = 2 * time.Minute
 
 // Config describes the service provider and the identity provider it trusts.
 type Config struct {
-	ProviderID   string // wicket's id for this IdP, used in identities
-	EntityID     string // SP entity id
-	ACSURL       string // assertion consumer service URL
+	ProviderID string // wicket's id for this IdP, used in identities
+	EntityID   string // SP entity id
+	ACSURL     string // assertion consumer service URL
+	// SLOURL is the SP's SingleLogoutService, for both bindings. Single
+	// logout also needs Key and an IdP that lists a SingleLogoutService.
+	SLOURL       string
 	IdP          *IdPMetadata
 	Key          *rsa.PrivateKey   // SP key: decrypts assertions, signs requests
 	Cert         *x509.Certificate // SP certificate published in metadata
@@ -130,13 +131,9 @@ func (sp *SP) AuthnRequestURL(requestID, relayState string) (string, error) {
 		q += "&RelayState=" + url.QueryEscape(relayState)
 	}
 	if sp.cfg.SignRequests {
-		q += "&SigAlg=" + url.QueryEscape(dsig.RSASHA256SignatureMethod)
-		sum := sha256.Sum256([]byte(q))
-		sig, err := rsa.SignPKCS1v15(rand.Reader, sp.cfg.Key, crypto.SHA256, sum[:])
-		if err != nil {
+		if q, err = sp.signQuery(q); err != nil {
 			return "", err
 		}
-		q += "&Signature=" + url.QueryEscape(base64.StdEncoding.EncodeToString(sig))
 	}
 	sep := "?"
 	if strings.Contains(sp.cfg.IdP.SSOURL, "?") {
@@ -171,6 +168,14 @@ func (sp *SP) Metadata() ([]byte, error) {
 					kd.CreateElement("md:EncryptionMethod").CreateAttr("Algorithm", alg)
 				}
 			}
+		}
+	}
+	if sp.LogoutEnabled() {
+		// SingleLogoutService comes before NameIDFormat in SSODescriptorType.
+		for _, b := range []string{BindingRedirect, BindingPOST} {
+			slo := sd.CreateElement("md:SingleLogoutService")
+			slo.CreateAttr("Binding", b)
+			slo.CreateAttr("Location", sp.cfg.SLOURL)
 		}
 	}
 	sd.CreateElement("md:NameIDFormat").SetText(sp.cfg.NameIDFormat)

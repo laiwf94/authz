@@ -259,6 +259,27 @@ link the roadmap issue they come from.
   written. The gateway now keeps the parsed form (`https://`). Found once the
   SAML fuzz targets, which had spent their CI time minimizing inputs, fuzzed
   for their whole time.
+- **SAML single logout** ([#79](https://github.com/laiwf94/authz/issues/79)).
+  `/saml/{provider}/slo` is the SingleLogoutService for the HTTP-Redirect
+  (GET) and HTTP-POST (POST) bindings, on for a SAML provider with an SP key
+  whose IdP metadata lists a SingleLogoutService; the SP metadata then lists
+  it too. An IdP's LogoutRequest ends the sessions of its NameID carrying
+  its SessionIndexes (all of the NameID's sessions at that provider when it
+  names none), each audited as `authn.session_ended` with reason
+  `saml_logout`, and gets a signed LogoutResponse on the same binding.
+  `POST /logout` on a SAML session now ends it here and then sends a signed
+  LogoutRequest for its SessionIndex to the IdP; the answer must come back
+  with the sealed, single-use cookie that names that request, and the
+  browser goes on to the return URL. Messages must be signed both ways
+  (query signatures with RSA or ECDSA and SHA-2, or enveloped XML
+  signatures), addressed to the endpoint, from the IdP, at most 10 minutes
+  old, and are used once; anything else answers 400 and is audited as
+  `authn.logout_rejected`. Each login's SessionIndex is now kept with its
+  session (as an OpenID Connect `sid` is), and one that is not 1-255
+  visible ASCII characters fails the login with `malformed_response`. New
+  metric: `wicket_saml_logouts_total{provider,initiator,result}`. The test
+  identity provider (`internal/authn/fakeidp`) does single logout on either
+  binding.
 - **OpenID Connect back-channel logout** ([#79](https://github.com/laiwf94/authz/issues/79)).
   `POST /backchannel-logout/{provider}` takes logout tokens (OpenID Connect
   Back-Channel Logout 1.0): register `<public_url>/backchannel-logout/<id>`

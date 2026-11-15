@@ -55,6 +55,13 @@ func (i *IdP) samlMetadata(w http.ResponseWriter, _ *http.Request) {
 	sso := idp.CreateElement("md:SingleSignOnService")
 	sso.CreateAttr("Binding", "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect")
 	sso.CreateAttr("Location", i.cfg.Issuer+"/saml/sso")
+	for _, b := range i.sloBindings() {
+		slo := etree.NewElement("md:SingleLogoutService")
+		slo.CreateAttr("Binding", map[string]string{Redirect: bindingRedirect, POST: bindingPOST}[b])
+		slo.CreateAttr("Location", i.sloURL())
+		// SingleLogoutService comes before NameIDFormat in the schema.
+		idp.InsertChildAt(idp.SelectElement("NameIDFormat").Index(), slo)
+	}
 	doc.Indent(2)
 	w.Header().Set("Content-Type", "application/samlmetadata+xml")
 	doc.WriteTo(w)
@@ -212,7 +219,8 @@ func (i *IdP) samlSubmit(w http.ResponseWriter, r *http.Request) {
 			Error: "Wrong username or password.", Hidden: map[string]string{"query": f.Get("query")}})
 		return
 	}
-	resp, err := i.SAMLResponse(ResponseOptions{SP: *req.sp, InResponseTo: req.id, User: *u})
+	idx := i.addSAMLSession(u.Email, req.sp.EntityID)
+	resp, err := i.SAMLResponse(ResponseOptions{SP: *req.sp, InResponseTo: req.id, User: *u, SessionIndex: idx})
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "could not build the response")
 		return
@@ -232,6 +240,9 @@ type ResponseOptions struct {
 	EncryptCBC bool
 	// BeforeSign, when set, may change the assertion before it is signed.
 	BeforeSign func(assertion *etree.Element)
+	// SessionIndex names the IdP session in the AuthnStatement (default: a
+	// fresh one that no logout knows about).
+	SessionIndex string
 }
 
 // SAMLResponse builds a signed (and, if configured, encrypted) response and
@@ -302,7 +313,11 @@ func (i *IdP) SAMLResponseDoc(o ResponseOptions) (*etree.Document, error) {
 	cond.CreateElement("saml:AudienceRestriction").CreateElement("saml:Audience").SetText(o.SP.EntityID)
 	as := a.CreateElement("saml:AuthnStatement")
 	as.CreateAttr("AuthnInstant", now.Format(timeFormat))
-	as.CreateAttr("SessionIndex", newID())
+	idx := o.SessionIndex
+	if idx == "" {
+		idx = newID()
+	}
+	as.CreateAttr("SessionIndex", idx)
 	as.CreateAttr("SessionNotOnOrAfter", now.Add(8*time.Hour).Format(timeFormat))
 	as.CreateElement("saml:AuthnContext").CreateElement("saml:AuthnContextClassRef").
 		SetText("urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport")

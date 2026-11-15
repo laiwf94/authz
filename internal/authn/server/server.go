@@ -194,6 +194,8 @@ func (s *Server) routes() {
 	s.route(s.public, "GET /callback/{provider}", s.limited(s.handleCallback))
 	s.route(s.public, "POST /saml/{provider}/acs", s.limited(s.handleACS))
 	s.route(s.public, "GET /saml/{provider}/metadata", s.handleSAMLMetadata)
+	s.route(s.public, "GET /saml/{provider}/slo", s.limited(s.handleSAMLLogout))
+	s.route(s.public, "POST /saml/{provider}/slo", s.limited(s.handleSAMLLogout))
 	s.route(s.public, "POST /backchannel-logout/{provider}", s.handleBackchannelLogout)
 	s.route(s.public, "GET /logout", s.handleLogoutPage)
 	s.route(s.public, "POST /logout", s.limited(s.handleLogout))
