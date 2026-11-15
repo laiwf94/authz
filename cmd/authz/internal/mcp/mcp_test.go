@@ -209,7 +209,7 @@ func TestRunRestartAndReload(t *testing.T) {
 	s.fake.SetRugPull(true)
 	r = s.start(t)
 	head2 := adminGet(t, r.admin, "/admin/audit/head")
-	if head2["head"] != head1["head"] {
+	if !chainContinues(t, s, head1, head2) {
 		t.Fatalf("audit head changed across restart: %v vs %v", head1, head2)
 	}
 	deadline = time.Now().Add(5 * time.Second)

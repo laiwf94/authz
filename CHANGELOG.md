@@ -296,6 +296,12 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **TestRunRestartAndReload no longer flakes on a restart that quarantines** ([#247](https://github.com/laiwf94/authz/issues/247)).
+  The restarted gateway can write `tool_quarantined` for the tool the test
+  changed while it was down before the test reads the audit head. The test
+  now accepts a head that equals the old one or a longer chain whose next
+  record links to it, which is what continuing across a restart means.
+
 - **A policy reload is audited before it takes effect** ([#242](https://github.com/laiwf94/authz/issues/242)).
   `policy_applied` is now written just before the new policy goes into
   force, not just after, so no decision made under a policy can precede its

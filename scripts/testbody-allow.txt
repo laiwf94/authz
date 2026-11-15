@@ -35,3 +35,9 @@ wicket/internal/server/server_test.go - if _, ok := l.buckets[strconv.Itoa(maxBu
 internal/authn/server/server_test.go + if _, ok := l.lim.Tokens(strconv.Itoa(maxBuckets-1), l.limit); ok {
 wicket/internal/server/server_test.go - if b := l.buckets["new"]; b == nil || b.tokens != l.burst-1 {
 internal/authn/server/server_test.go + if b, ok := l.lim.Tokens("new", l.limit); !ok || b != l.burst-1 {
+
+# TestRunRestartAndReload's restarted gateway may quarantine the changed
+# tool before the test reads the audit head; the chain still continues
+# from the old head, which chainContinues checks (#247).
+toolgate/cmd/toolgate/main_test.go - if head2["head"] != head1["head"] {
+cmd/authz/internal/mcp/mcp_test.go + if !chainContinues(t, s, head1, head2) {
