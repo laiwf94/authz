@@ -24,6 +24,11 @@
 //     set); Config.Algorithms narrows the accepted algorithms. HS256 tokens
 //     are checked only against the shared secrets and asymmetric ones only
 //     against the public keys, so neither can stand in for the other.
+//     The KeySource is a fixed KeySet, or a JWKS client (NewJWKS) that
+//     fetches a pinned issuer's jwks_uri through the egress guard
+//     (internal/agents/egress), at most 64 KiB, without redirects, with
+//     ETag revalidation, a scheduled refresh and at most one fetch a
+//     minute for kids it doesn't hold.
 package identity
 
 import (
