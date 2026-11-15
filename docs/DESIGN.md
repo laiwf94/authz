@@ -1649,6 +1649,42 @@ conditions, an address range and a zone) takes about 10 µs and compiling it
 about 17 µs on a 4-core 2.3 GHz Xeon; both happen once per schema write or
 policy load, not per check.
 
+`Checked.Program` turns a checked expression into something to evaluate:
+identifiers are resolved to variable slots or comprehension locals and
+literal patterns, times, zones and addresses are taken already parsed, so
+`Program.Eval` walks the tree with no lookups by name. Values are plain Go
+values (int64, string, time.Time, netip.Addr, `[]any` and an ordered map),
+and Eval converts what a caller passes, including what encoding/json
+decodes a stored caveat context into: a whole float64 for an int, RFC 3339
+strings for timestamps, "90s" for durations, address strings. Calls whose
+operands were dyn when checked are resolved on the operands' types when
+they run, and anything the overload table does not define is a runtime
+error, never a coercion.
+
+Evaluation has three outcomes: a value, a runtime error with its position,
+or unknown with the names of the missing variables it depends on. That is
+what a conditional check result reports (SpiceDB's partial caveat
+evaluation, OpenFGA's missing context). `&&`, `||`, `all` and `exists`
+are decided by any decisive operand, even when others are unknown or
+failing, so the order operands are written in does not matter; elsewhere
+an unknown operand wins over an error, because the caller's next step is
+to supply the missing parameters, and the error, if it still matters,
+surfaces then. FuzzEval checks the property this gives: a value computed
+with some variables missing is the value with all of them present.
+
+Every Program has a cost limit, 100,000 units by default: one per node
+evaluated, plus one per element or 16 bytes an operation goes through
+(membership, equality, concatenation, string search, RE2 matching scaled
+by the pattern's length, conversions from strings). A comprehension pays
+for its body once per element, so nested comprehensions over large
+context lists are stopped rather than run for seconds; the limit error is
+never absorbed by `||`. Evaluating the benchmark caveat with its context
+in JSON types takes about 1.3 µs and 12 allocations on a 4-core 2.1 GHz
+Xeon (parsing it takes 6 µs and compiling it 11 µs there); with the
+request half of the context missing it costs about the same, and the
+result names the three missing parameters. FuzzEvalContext feeds arbitrary JSON
+contexts to Eval.
+
 ## One clock (internal/platform/clock)
 
 Code that reads the time or waits on it takes a `clock.Clock` (week 2,

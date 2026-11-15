@@ -1,8 +1,16 @@
 package cel
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
+	"net/netip"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 var fuzzSeeds = []string{
@@ -134,4 +142,260 @@ func FuzzParseType(f *testing.F) {
 			t.Fatalf("ParseType(%q) = %s, which reads back as %v, %v", s, typ, again, err)
 		}
 	})
+}
+
+// evalSeeds are expressions over testEnv that reach the evaluator's
+// three-valued logic, comprehensions, conversions and runtime errors.
+var evalSeeds = []string{
+	"i + 1 > 2 && s == 'a' || b", "i / 0 == 1 || b", "b && i * i > d", "!b ? i : -i",
+	"li.all(e, e < i)", "li.exists(e, e == i || b)", "ls.exists_one(e, e == s)",
+	"li.map(e, e > 1, e * i)", "ms.filter(k, ms[k] == s)", "ll.map(l, l.map(e, e + i))",
+	"md.n + d", "has(md.s) && md.s == s", "mm.a.x == i", "mi[i]", "li[i]",
+	"string(i) + s", "int(s) + i", "uint(d) > u", "double(s) < d", "bool(s)",
+	"timestamp(s) < t", "duration(s) > dur", "t + duration(s) > t", "t.getHours(s)",
+	"ip(s).in_cidr(net)", "cidr(s).containsIP(ip)", "s.matches(s)", "s.matches('^a+$')",
+	"size(s) == i", "x == i || x == s", "[i, s, d].size()", "{s: i}[s] == i",
+	"t - timestamp(i) > dur", "dyn(i) < dyn(d)", "x.map(e, e)", "x[i]", "x.all(k, x[k] == i)",
+}
+
+// fuzzVars builds a full activation for testEnv around the fuzzed scalars.
+func fuzzVars(i int64, s string, d float64) map[string]any {
+	return map[string]any{
+		"i": i, "u": uint64(i) >> 1, "d": d, "s": s, "b": i%2 == 0,
+		"t": time.Unix(1795422615, 0).UTC(), "dur": 90 * time.Minute,
+		"ip": netip.MustParseAddr("10.1.2.3"), "net": netip.MustParsePrefix("10.0.0.0/8"),
+		"x": []any{i, s, d}, "li": []any{i, int64(1), int64(2)}, "ls": []string{s, "a"},
+		"ll": [][]int64{{i}, {1, 2}}, "ms": map[string]string{s: "v", "a": s},
+		"md": map[string]any{"n": d, "s": s}, "mi": map[int64]bool{i: true, 1: false},
+		"mm": map[string]map[string]int64{"a": {"x": i}},
+	}
+}
+
+// FuzzEval checks that evaluation never panics and stays within its cost
+// limit, that runtime errors carry a position, that a known value has the
+// checked type, that a result is the same every time, and the three-valued
+// logic: an unknown names only absent variables the expression uses, and a
+// value known with some variables absent is the value with all of them.
+func FuzzEval(f *testing.F) {
+	for k, src := range append(evalSeeds, fuzzSeeds...) {
+		f.Add(src, int64(k), "a", 1.5, uint32(k*2654435761))
+	}
+	env := testEnv(f)
+	names := slices.Sorted(maps.Keys(fuzzVars(0, "", 0)))
+	f.Fuzz(func(t *testing.T, src string, i int64, s string, d float64, absent uint32) {
+		c, err := env.Compile(src)
+		if err != nil {
+			return
+		}
+		const limit = 20000
+		p := c.Program(limit)
+		full := fuzzVars(i, s, d)
+		partial := fuzzVars(i, s, d)
+		for k, name := range names {
+			if absent&(1<<k) != 0 {
+				delete(partial, name)
+			}
+		}
+		r, err := p.Eval(partial)
+		again, err2 := p.Eval(partial)
+		if fmt.Sprint(r, err) != fmt.Sprint(again, err2) {
+			t.Fatalf("%q: %v, %v then %v, %v", src, r, err, again, err2)
+		}
+		if errors.Is(err, ErrCostLimit) {
+			if r.Cost <= limit {
+				t.Fatalf("%q: cost limit error at cost %d", src, r.Cost)
+			}
+			return
+		}
+		if r.Cost > limit {
+			t.Fatalf("%q: cost %d over the limit without an error", src, r.Cost)
+		}
+		if err != nil {
+			var es Errors
+			if !errors.As(err, &es) || len(es) != 1 || es[0].Line < 1 {
+				t.Fatalf("%q: error %#v has no position", src, err)
+			}
+			return
+		}
+		if !r.Known() {
+			if !slices.IsSorted(r.Missing) {
+				t.Fatalf("%q: missing %v is not sorted", src, r.Missing)
+			}
+			for _, m := range r.Missing {
+				if _, ok := partial[m]; ok || !slices.Contains(c.Vars(), m) {
+					t.Fatalf("%q: missing %q, which is present or unused (uses %v)", src, m, c.Vars())
+				}
+			}
+			return
+		}
+		if !hasType(r.Value, c.Type()) {
+			t.Fatalf("%q = %#v, which is not a %s", src, r.Value, c.Type())
+		}
+		rf, err := p.Eval(full)
+		if errors.Is(err, ErrCostLimit) {
+			return
+		}
+		if err != nil || !rf.Known() || fmt.Sprint(rf.Value) != fmt.Sprint(r.Value) {
+			t.Fatalf("%q = %#v with %v absent, but %#v, %v with every variable", src, r.Value, absentNames(names, partial), rf, err)
+		}
+	})
+}
+
+func absentNames(names []string, vars map[string]any) []string {
+	var out []string
+	for _, n := range names {
+		if _, ok := vars[n]; !ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// hasType reports whether an evaluation result is a value of type t.
+func hasType(v any, t *Type) bool {
+	switch t.kind {
+	case KindDyn:
+		return true
+	case KindNull:
+		return v == nil
+	case KindList:
+		l, ok := v.([]any)
+		if !ok {
+			return false
+		}
+		for _, x := range l {
+			if !hasType(x, t.elem) {
+				return false
+			}
+		}
+		return true
+	case KindMap:
+		m, ok := v.(map[any]any)
+		if !ok {
+			return false
+		}
+		for k, x := range m {
+			if !hasType(k, t.key) || !hasType(x, t.elem) {
+				return false
+			}
+		}
+		return true
+	}
+	var ok bool
+	switch t.kind {
+	case KindBool:
+		_, ok = v.(bool)
+	case KindInt:
+		_, ok = v.(int64)
+	case KindUint:
+		_, ok = v.(uint64)
+	case KindDouble:
+		_, ok = v.(float64)
+	case KindString:
+		_, ok = v.(string)
+	case KindTimestamp:
+		_, ok = v.(time.Time)
+	case KindDuration:
+		_, ok = v.(time.Duration)
+	case KindIP:
+		_, ok = v.(netip.Addr)
+	case KindCIDR:
+		_, ok = v.(netip.Prefix)
+	}
+	return ok
+}
+
+// FuzzEvalContext feeds JSON objects, as a caveat's stored or request
+// context arrives, to Eval: conversion never panics, a value of the wrong
+// type is an error that names the variable, and decoding numbers as
+// json.Number gives the same outcome as decoding them as float64 when every
+// number is a whole one in the range where float64 is exact, for
+// expressions whose variables have no dyn in their types (a dyn variable
+// keeps the Go type it is given).
+func FuzzEvalContext(f *testing.F) {
+	for _, s := range []string{
+		`{}`, `{"i": 1, "s": "a", "li": [1, 2], "ms": {"a": "b"}}`, `{"i": 1.5}`, `{"i": "1"}`,
+		`{"t": "2026-11-23T09:00:00Z", "dur": "90s", "ip": "10.0.0.1", "net": "10.0.0.0/8"}`,
+		`{"x": {"a": [1, {"b": null}]}, "md": {"k": [true, 1e3]}}`, `{"u": -1}`, `{"mi": {"1": true}}`,
+		`{"ll": [[1], [], [2, 3]], "mm": {"a": {"x": 9007199254740993}}}`, `{"t": "0000-01-01T00:00:00Z"}`,
+	} {
+		f.Add([]byte(s))
+	}
+	env := testEnv(f)
+	var programs []*Program
+	var typed []bool
+	for _, src := range append(evalSeeds, "i == 1", "t < t + dur", "ip.in_cidr(net)", "x == md", "li == ll[0]") {
+		c, err := env.Compile(src)
+		if err != nil {
+			f.Fatal(err)
+		}
+		programs = append(programs, c.Program(20000))
+		noDyn := true
+		for _, v := range c.Vars() {
+			t, _ := env.Lookup(v)
+			noDyn = noDyn && !containsDyn(t)
+		}
+		typed = append(typed, noDyn)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var plain map[string]any
+		if json.Unmarshal(data, &plain) != nil {
+			return
+		}
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		var numbers map[string]any
+		if dec.Decode(&numbers) != nil {
+			return
+		}
+		exact := wholeNumbers(numbers)
+		for k, p := range programs {
+			r1, err1 := p.Eval(plain)
+			r2, err2 := p.Eval(numbers)
+			for _, err := range []error{err1, err2} {
+				var es Errors
+				if err != nil && !errors.As(err, &es) && !errors.Is(err, ErrCostLimit) && !strings.HasPrefix(err.Error(), "cel: variable ") {
+					t.Fatalf("%s: error %q names no variable", p.Checked().AST().Source, err)
+				}
+			}
+			if exact && typed[k] && fmt.Sprint(r1, err1) != fmt.Sprint(r2, err2) {
+				t.Fatalf("%s over %s: %v, %v with float64 but %v, %v with json.Number", p.Checked().AST().Source, data, r1, err1, r2, err2)
+			}
+		}
+	})
+}
+
+// wholeNumbers reports whether every number in v is a whole number that
+// float64 holds exactly, so float64 and json.Number decode it alike.
+func wholeNumbers(v any) bool {
+	switch v := v.(type) {
+	case json.Number:
+		i, err := v.Int64()
+		return err == nil && i > -1<<53 && i < 1<<53 && !strings.ContainsAny(string(v), ".eE")
+	case []any:
+		for _, x := range v {
+			if !wholeNumbers(x) {
+				return false
+			}
+		}
+	case map[string]any:
+		for _, x := range v {
+			if !wholeNumbers(x) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func containsDyn(t *Type) bool {
+	switch t.kind {
+	case KindDyn:
+		return true
+	case KindList:
+		return containsDyn(t.elem)
+	case KindMap:
+		return containsDyn(t.key) || containsDyn(t.elem)
+	}
+	return false
 }

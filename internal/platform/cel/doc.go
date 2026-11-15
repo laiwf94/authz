@@ -45,9 +45,46 @@
 // isLoopback, isPrivate, isUnspecified and in_cidr; on ranges containsIP,
 // containsCIDR, ip, prefixLength and masked.
 //
+// # Evaluation
+//
+// Checked.Program prepares an expression for evaluation, and Program.Eval
+// evaluates it against a map of variable values:
+//
+//	r, err := c.Program(0).Eval(map[string]any{
+//		"client_ip": "10.1.2.3", "now": time.Now(),
+//	})
+//
+// Values may be given in their native Go types (int64, uint64, float64,
+// string, bool, time.Time, time.Duration, netip.Addr, netip.Prefix, slices
+// and maps), in Go's other integer and float types or as json.Number, or as
+// encoding/json decodes them: whole numbers as float64 for int and uint
+// variables, and strings for timestamps (RFC 3339), durations ("90s"),
+// addresses and ranges. A dyn variable keeps the type it is given.
+//
+// The result has three values. A declared variable missing from the map is
+// unknown, and so is anything that depends on it: the Result then names
+// the missing variables instead of holding a value. && and || are decided
+// by either side, so false && x is false and true || x is true with x
+// missing, and all and exists likewise by any one element; an unknown
+// operand wins over an error in any other operation, as supplying the
+// variable may make the error irrelevant. A value known with some variables
+// missing is the value the expression has whatever they turn out to be.
+//
+// Runtime errors (overflow, division by zero, a missing key, an index out
+// of range, a malformed string given to a conversion, or a dyn value no
+// overload takes) are returned with their position, except where && or ||
+// made them irrelevant, as in CEL.
+//
 // # Limits
 //
 // Limits bound the source length, the tree depth and the node count, so
 // neither parsing nor checking an expression read from a schema or a policy
 // file can exhaust the process. Errors carry line and column.
+//
+// Each Program has a cost limit (DefaultMaxCost unless given): every node
+// evaluated costs one unit, and operations over strings, lists and maps
+// cost one more per element or per 16 bytes they go through, so a
+// comprehension costs its body once per element and nested ones multiply.
+// An evaluation that goes over stops with ErrCostLimit, which && and || do
+// not absorb.
 package cel

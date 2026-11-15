@@ -41,6 +41,8 @@ TARGETS=(
   "./internal/platform/cel FuzzParse$ 20s"
   "./internal/platform/cel FuzzCheck 20s"
   "./internal/platform/cel FuzzParseType 10s"
+  "./internal/platform/cel FuzzEval$ 20s"
+  "./internal/platform/cel FuzzEvalContext 20s"
 )
 
 shard=1 count=1

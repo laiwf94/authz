@@ -115,6 +115,7 @@ func (e *Env) CompileAs(src string, want *Type) (*Checked, error) {
 // the overloads each call can resolve to, and its string-literal arguments
 // already parsed.
 type Checked struct {
+	env       *Env
 	ast       *AST
 	types     []*Type
 	overloads [][]string
@@ -153,6 +154,7 @@ func (e *Env) Check(a *AST) (*Checked, error) {
 	k := &checker{
 		env: e,
 		c: &Checked{
+			env:       e,
 			ast:       a,
 			types:     make([]*Type, a.nodes),
 			overloads: make([][]string, a.nodes),
