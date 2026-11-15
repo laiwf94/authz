@@ -30,7 +30,7 @@ func TestEndProviderSessions(t *testing.T) {
 	_, a2, _ := s.CreateWith(alice(), Extra{SID: "sid-a"}) // a second app tab of the same provider session
 	_, a3, _ := s.CreateWith(alice(), Extra{SID: "sid-a2"})
 	_, a4, _ := s.CreateWith(alice(), Extra{}) // no sid
-	c.add(time.Second) // List is oldest first
+	c.add(time.Second)                         // List is oldest first
 	_, b1, _ := s.CreateWith(bob, Extra{SID: "sid-b"})
 	c.add(time.Second)
 	_, p1, _ := s.CreateWith(partner, Extra{SID: "sid-a"}) // same handle at another provider

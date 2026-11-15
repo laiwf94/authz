@@ -29,6 +29,17 @@ func newSID(t *testing.T, before, after []string) string {
 	return ""
 }
 
+// backchannelHarness is a harness whose fake provider sends back-channel
+// logouts for the corp client to the gateway.
+func backchannelHarness(t *testing.T, o harnessOpts) *harness {
+	h := newHarness(t, o)
+	if !h.idp.SetBackchannelLogoutURI("wicket", h.public+"/backchannel-logout/corp") {
+		t.Fatal("no wicket client at the provider")
+	}
+	h.idp.SetBackchannelClient(h.pub.Client())
+	return h
+}
+
 // postLogout sends a back-channel logout request as the provider would.
 func (h *harness) postLogout(path, contentType, body string) (int, map[string]any, http.Header) {
 	h.t.Helper()
@@ -54,7 +65,7 @@ func form(tok string) string { return url.Values{"logout_token": {tok}}.Encode()
 const formType = "application/x-www-form-urlencoded"
 
 func TestBackchannelLogoutBySID(t *testing.T) {
-	h := newHarness(t, harnessOpts{sessionFile: true})
+	h := backchannelHarness(t, harnessOpts{sessionFile: true})
 	laptop, phone, bob := h.browser(), h.browser(), h.browser()
 	laptop.loginOIDC("alice", "alice-pass", "")
 	s1 := h.idp.Sessions("alice")

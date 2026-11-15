@@ -47,6 +47,20 @@ func (i *IdP) SetBackchannelClient(c *http.Client) {
 	i.mu.Unlock()
 }
 
+// SetBackchannelLogoutURI sets a registered client's BackchannelLogoutURI
+// ("" stops Logout notifying it). It reports whether the client exists.
+func (i *IdP) SetBackchannelLogoutURI(clientID, uri string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for n := range i.cfg.Clients {
+		if i.cfg.Clients[n].ID == clientID {
+			i.cfg.Clients[n].BackchannelLogoutURI = uri
+			return true
+		}
+	}
+	return false
+}
+
 // Sessions returns the sids of a user's live provider sessions, sorted.
 func (i *IdP) Sessions(username string) []string {
 	i.mu.Lock()
@@ -86,11 +100,16 @@ func (i *IdP) Logout(ctx context.Context, username string) (int, error) {
 	sent := 0
 	var first error
 	for _, g := range ended {
-		c := i.client(g.client)
-		if c == nil || c.BackchannelLogoutURI == "" {
+		i.mu.Lock() // SetBackchannelLogoutURI may change it
+		uri := ""
+		if c := i.client(g.client); c != nil {
+			uri = c.BackchannelLogoutURI
+		}
+		i.mu.Unlock()
+		if uri == "" {
 			continue
 		}
-		err := i.postLogout(ctx, hc, c, g.user.Username, g.sid)
+		err := i.postLogout(ctx, hc, g.client, uri, g.user.Username, g.sid)
 		if err == nil {
 			sent++
 		} else if first == nil {
@@ -100,12 +119,12 @@ func (i *IdP) Logout(ctx context.Context, username string) (int, error) {
 	return sent, first
 }
 
-func (i *IdP) postLogout(ctx context.Context, hc *http.Client, c *Client, sub, sid string) error {
-	tok, err := i.LogoutToken(c.ID, sub, sid)
+func (i *IdP) postLogout(ctx context.Context, hc *http.Client, client, uri, sub, sid string) error {
+	tok, err := i.LogoutToken(client, sub, sid)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BackchannelLogoutURI,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uri,
 		strings.NewReader(url.Values{"logout_token": {tok}}.Encode()))
 	if err != nil {
 		return err
@@ -113,12 +132,12 @@ func (i *IdP) postLogout(ctx context.Context, hc *http.Client, c *Client, sub, s
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("fakeidp: back-channel logout to %s: %w", c.ID, err)
+		return fmt.Errorf("fakeidp: back-channel logout to %s: %w", client, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("fakeidp: back-channel logout to %s: status %d: %s", c.ID, resp.StatusCode, body)
+		return fmt.Errorf("fakeidp: back-channel logout to %s: status %d: %s", client, resp.StatusCode, body)
 	}
 	return nil
 }

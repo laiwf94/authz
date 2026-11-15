@@ -57,7 +57,9 @@ func TestBackchannelLogout(t *testing.T) {
 		w.WriteHeader(status)
 	}))
 	defer rp.Close()
-	f.idp.cfg.Clients[0].BackchannelLogoutURI = rp.URL + "/bcl"
+	if !f.idp.SetBackchannelLogoutURI("app", rp.URL+"/bcl") || f.idp.SetBackchannelLogoutURI("nobody", "x") {
+		t.Fatal("SetBackchannelLogoutURI")
+	}
 	f.idp.SetBackchannelClient(rp.Client())
 	f.codeTokens(t)
 	f.codeTokens(t)
@@ -94,12 +96,12 @@ func TestBackchannelLogout(t *testing.T) {
 		t.Fatalf("refused: %d %v, %d sent", n, err, len(got))
 	}
 	f.codeTokens(t)
-	f.idp.cfg.Clients[0].BackchannelLogoutURI = "http://127.0.0.1:1/bcl"
+	f.idp.SetBackchannelLogoutURI("app", "http://127.0.0.1:1/bcl")
 	if n, err := f.idp.Logout(context.Background(), "alice"); n != 0 || err == nil {
 		t.Fatalf("unreachable: %d %v", n, err)
 	}
 	f.codeTokens(t)
-	f.idp.cfg.Clients[0].BackchannelLogoutURI = "http://bad host/"
+	f.idp.SetBackchannelLogoutURI("app", "http://bad host/")
 	if _, err := f.idp.Logout(context.Background(), "alice"); err == nil {
 		t.Fatal("bad URI accepted")
 	}
