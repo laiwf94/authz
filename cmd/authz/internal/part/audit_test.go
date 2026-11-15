@@ -103,7 +103,8 @@ func TestAuditSigningFromEnv(t *testing.T) {
 			t.Errorf("%v, want %q", err, tc.want)
 			continue
 		}
-		secret := skey[strings.LastIndexByte(skey, '+')+1:]
+		// The key is the fifth field; base64 may itself contain '+'.
+		secret := strings.SplitN(skey, "+", 5)[4]
 		if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "hunter2") {
 			t.Errorf("error repeats the key: %v", err)
 		}
