@@ -16,6 +16,14 @@
 //     until the overlap ends.
 //     Tokens are parsed, signed and verified by the platform JOSE library
 //     (internal/platform/jose), which the sign-on gateway uses too.
+//   - Asymmetrically signed tokens: the same claims in a compact JWS signed
+//     with EdDSA (Ed25519), ES256 (P-256) or RS256 (RSA, 2048 bits or more)
+//     by an issuer holding the private key. The public keys come from a
+//     KeySource (Config.PublicKeys), never from the token, and each key
+//     verifies only the algorithm of its key type (and its JWK "alg", when
+//     set); Config.Algorithms narrows the accepted algorithms. HS256 tokens
+//     are checked only against the shared secrets and asymmetric ones only
+//     against the public keys, so neither can stand in for the other.
 package identity
 
 import (
@@ -77,12 +85,16 @@ type Config struct {
 	ActiveKey string
 	// Ring, instead of Keys and ActiveKey, is an HS256 key ring: its
 	// current key signs, and every key it accepts at Now verifies.
-	Ring     *keys.Ring
-	Issuer   string
-	Audience string
-	MaxTTL   time.Duration // longest accepted exp - iat; default DefaultMaxTTL
-	Leeway   time.Duration // clock skew allowed; default DefaultLeeway
-	Now      func() time.Time
+	Ring *keys.Ring
+	// PublicKeys verifies tokens signed with an algorithm of Algorithms
+	// (default AsymmetricAlgorithms).
+	PublicKeys KeySource
+	Algorithms []string
+	Issuer     string
+	Audience   string
+	MaxTTL     time.Duration // longest accepted exp - iat; default DefaultMaxTTL
+	Leeway     time.Duration // clock skew allowed; default DefaultLeeway
+	Now        func() time.Time
 }
 
 // Authenticator verifies credentials. It is safe for concurrent use.
@@ -148,7 +160,15 @@ func New(cfg Config) (*Authenticator, error) {
 			return nil, errors.New("identity: the active key id is not among the keys")
 		}
 	}
-	if len(cfg.Keys) > 0 || cfg.Ring != nil {
+	if cfg.PublicKeys == nil && len(cfg.Algorithms) > 0 {
+		return nil, errors.New("identity: algorithms are set but there are no public keys")
+	}
+	algs, err := checkAlgorithms(cfg.Algorithms)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Algorithms = algs
+	if len(cfg.Keys) > 0 || cfg.Ring != nil || cfg.PublicKeys != nil {
 		if cfg.Issuer == "" || cfg.Audience == "" {
 			return nil, errors.New("identity: signed tokens need an issuer and an audience")
 		}
@@ -238,19 +258,14 @@ func (a *Authenticator) verifySigned(token string) (Identity, error) {
 	if err != nil {
 		return Identity{}, unauthenticated("%v", err)
 	}
-	if err := t.StrictHeader(); err != nil {
-		return Identity{}, unauthenticated("bad header: %v", err)
-	}
 	h := t.Header
-	if h.Alg != jose.HS256 || h.Typ != "" && h.Typ != "JWT" {
-		return Identity{}, unauthenticated("unsupported algorithm %q", h.Alg)
-	}
-	key, ok := a.verifyKey(h.Kid)
-	if !ok {
-		return Identity{}, unauthenticated("unknown key id")
-	}
-	if err := t.VerifyHMAC(key); err != nil {
-		return Identity{}, unauthenticated("bad signature")
+	kid := h.Kid
+	if h.Alg == jose.HS256 {
+		if err := a.verifyHMAC(t); err != nil {
+			return Identity{}, err
+		}
+	} else if kid, err = a.verifyAsymmetric(t); err != nil {
+		return Identity{}, err
 	}
 	var c Claims
 	if err := strictJSON(t.Payload, &c); err != nil {
@@ -283,7 +298,26 @@ func (a *Authenticator) verifySigned(token string) (Identity, error) {
 		return Identity{}, unauthenticated("%v", err)
 	}
 	return Identity{AgentID: c.Subject, Owner: c.Owner, Scopes: scopes, Method: "signed",
-		KeyID: h.Kid, ExpiresAt: time.Unix(c.ExpiresAt, 0)}, nil
+		KeyID: kid, ExpiresAt: time.Unix(c.ExpiresAt, 0)}, nil
+}
+
+// verifyHMAC checks an HS256 token against the shared secrets. Its header
+// must be exactly what Mint writes.
+func (a *Authenticator) verifyHMAC(t *jose.Token) error {
+	if err := t.StrictHeader(); err != nil {
+		return unauthenticated("bad header: %v", err)
+	}
+	if h := t.Header; h.Typ != "" && h.Typ != "JWT" {
+		return unauthenticated("unsupported token type %q", h.Typ)
+	}
+	key, ok := a.verifyKey(t.Header.Kid)
+	if !ok {
+		return unauthenticated("unknown key id")
+	}
+	if err := t.VerifyHMAC(key); err != nil {
+		return unauthenticated("bad signature")
+	}
+	return nil
 }
 
 // verifyKey returns the secret of the key kid names, if it verifies now.
