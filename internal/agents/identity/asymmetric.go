@@ -119,8 +119,13 @@ func checkPublicKey(k jose.Key) error {
 	return nil
 }
 
-// Lookup implements KeySource.
+// Lookup implements KeySource. Only the algorithms of
+// AsymmetricAlgorithms are served: an RSA key without an alg would fit
+// PS256 too, which agent tokens may not use.
 func (ks *KeySet) Lookup(kid, alg string) (jose.Key, bool) {
+	if !slices.Contains(AsymmetricAlgorithms, alg) {
+		return jose.Key{}, false
+	}
 	var k jose.Key
 	if kid == "" {
 		if ks.only == nil {
@@ -156,28 +161,4 @@ func checkAlgorithms(algs []string) ([]string, error) {
 		seen[alg] = true
 	}
 	return slices.Clone(algs), nil
-}
-
-// verifyAsymmetric checks the signature of a token whose header names an
-// asymmetric algorithm and returns the kid of the key that verified it.
-func (a *Authenticator) verifyAsymmetric(t *jose.Token) (string, error) {
-	h := t.Header
-	if a.cfg.PublicKeys == nil {
-		return "", unauthenticated("no public keys for %q", h.Alg)
-	}
-	if !slices.Contains(a.cfg.Algorithms, h.Alg) {
-		return "", unauthenticated("unsupported algorithm %q", h.Alg)
-	}
-	// RFC 9068 access tokens say at+jwt; other issuers JWT or nothing.
-	if h.Typ != "" && h.Typ != "JWT" && h.Typ != "at+jwt" && h.Typ != "application/at+jwt" {
-		return "", unauthenticated("unsupported token type %q", h.Typ)
-	}
-	key, ok := a.cfg.PublicKeys.Lookup(h.Kid, h.Alg)
-	if !ok {
-		return "", unauthenticated("no key %q for %s", h.Kid, h.Alg)
-	}
-	if err := t.Verify(key, a.cfg.Algorithms); err != nil {
-		return "", unauthenticated("bad signature: %v", err)
-	}
-	return key.ID, nil
 }

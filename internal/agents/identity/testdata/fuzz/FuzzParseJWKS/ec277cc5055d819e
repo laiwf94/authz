@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"keys\":[{\"kty\":\"RSA\",\"n\":\"vj7qZCxqwUlAGo5D6njUPvf7Ag6oqSyY64e4xamsvztoNstduyoN5nc7X_8JX9iUyma4bWfAKDwdFsrvMz6EjUs40G2DGhBlOeKEdFoEJ_H478IzEd7mwclHOh8hxC54WcEDHgErtjBQV5aO0SrW3Sp5yNjzSDYRrV8bEQAYKgh1WE9hk7WzVv6D6mbW9InC9BsXyKoztKR-H9Jfe064YpSMd1Zp-5DbUEiY4GoNMUcJL5C-ozGkD5vtuFzNccgRXca-s9esKPFqxekHRzwlJ-2NnbwxOy5T7lRXLqF8fLeEnWxEqwpnXbzO5po2Jy-VekxlC2rBB-Hvnc7mooxS4Q\",\"e\":\"AQAB\"}]}")

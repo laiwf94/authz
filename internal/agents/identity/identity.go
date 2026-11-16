@@ -29,6 +29,15 @@
 //     (internal/agents/egress), at most 64 KiB, without redirects, with
 //     ETag revalidation, a scheduled refresh and at most one fetch a
 //     minute for kids it doesn't hold.
+//   - Tokens of other issuers (Config.Issuers): an authorization server or
+//     identity provider pinned by its iss, with its own KeySource,
+//     audience (aud may be a string or an array holding it), algorithms,
+//     longest lifetime and claim mapping, which names the claims holding
+//     the agent id, its owner and its scopes (a space-separated string or
+//     an array). A token's unverified iss picks the issuer, and only that
+//     issuer's keys may verify it; claims are read only after that, and a
+//     claims set with a member name twice is refused. Config.PublicKeys is
+//     one such issuer under Config.Issuer with the default claims.
 package identity
 
 import (
@@ -42,6 +51,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,6 +80,7 @@ type Identity struct {
 	Owner     string
 	Scopes    []string
 	Method    string    // "static" or "signed"
+	Issuer    string    // signed tokens: the iss claim
 	KeyID     string    // signed tokens: the key that verified it
 	ExpiresAt time.Time // signed tokens only
 }
@@ -95,17 +106,21 @@ type Config struct {
 	// (default AsymmetricAlgorithms).
 	PublicKeys KeySource
 	Algorithms []string
-	Issuer     string
-	Audience   string
-	MaxTTL     time.Duration // longest accepted exp - iat; default DefaultMaxTTL
-	Leeway     time.Duration // clock skew allowed; default DefaultLeeway
-	Now        func() time.Time
+	// Issuers are more issuers of asymmetrically signed tokens, each with
+	// its own keys, audience, algorithms, claim mapping and lifetime.
+	Issuers  []Issuer
+	Issuer   string
+	Audience string
+	MaxTTL   time.Duration // longest accepted exp - iat; default DefaultMaxTTL
+	Leeway   time.Duration // clock skew allowed; default DefaultLeeway
+	Now      func() time.Time
 }
 
 // Authenticator verifies credentials. It is safe for concurrent use.
 type Authenticator struct {
-	agents []Agent
-	cfg    Config
+	agents  []Agent
+	cfg     Config
+	issuers map[string]*trustedIssuer // by iss; read-only after New
 }
 
 var keyIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
@@ -168,17 +183,17 @@ func New(cfg Config) (*Authenticator, error) {
 	if cfg.PublicKeys == nil && len(cfg.Algorithms) > 0 {
 		return nil, errors.New("identity: algorithms are set but there are no public keys")
 	}
-	algs, err := checkAlgorithms(cfg.Algorithms)
-	if err != nil {
-		return nil, err
-	}
-	cfg.Algorithms = algs
 	if len(cfg.Keys) > 0 || cfg.Ring != nil || cfg.PublicKeys != nil {
 		if cfg.Issuer == "" || cfg.Audience == "" {
 			return nil, errors.New("identity: signed tokens need an issuer and an audience")
 		}
 	}
-	return &Authenticator{agents: cfg.Agents, cfg: cfg}, nil
+	issuers, err := newIssuers(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Issuers = slices.Clone(cfg.Issuers)
+	return &Authenticator{agents: cfg.Agents, cfg: cfg, issuers: issuers}, nil
 }
 
 func checkScopes(scopes []string) error {
@@ -263,13 +278,10 @@ func (a *Authenticator) verifySigned(token string) (Identity, error) {
 	if err != nil {
 		return Identity{}, unauthenticated("%v", err)
 	}
-	h := t.Header
-	kid := h.Kid
-	if h.Alg == jose.HS256 {
-		if err := a.verifyHMAC(t); err != nil {
-			return Identity{}, err
-		}
-	} else if kid, err = a.verifyAsymmetric(t); err != nil {
+	if t.Header.Alg != jose.HS256 {
+		return a.verifyIssued(t)
+	}
+	if err := a.verifyHMAC(t); err != nil {
 		return Identity{}, err
 	}
 	var c Claims
@@ -303,7 +315,7 @@ func (a *Authenticator) verifySigned(token string) (Identity, error) {
 		return Identity{}, unauthenticated("%v", err)
 	}
 	return Identity{AgentID: c.Subject, Owner: c.Owner, Scopes: scopes, Method: "signed",
-		KeyID: kid, ExpiresAt: time.Unix(c.ExpiresAt, 0)}, nil
+		Issuer: c.Issuer, KeyID: t.Header.Kid, ExpiresAt: time.Unix(c.ExpiresAt, 0)}, nil
 }
 
 // verifyHMAC checks an HS256 token against the shared secrets. Its header

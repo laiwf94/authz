@@ -172,6 +172,11 @@ func clampInterval(d time.Duration) time.Duration {
 
 // Lookup implements KeySource.
 func (j *JWKS) Lookup(kid, alg string) (jose.Key, bool) {
+	// No document could serve another algorithm, so it is no reason to
+	// fetch one.
+	if !slices.Contains(AsymmetricAlgorithms, alg) {
+		return jose.Key{}, false
+	}
 	if st := j.fresh(); st != nil {
 		if k, ok := st.set.Lookup(kid, alg); ok {
 			return k, true
