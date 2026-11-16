@@ -1694,6 +1694,51 @@ request half of the context missing it costs about the same, and the
 result names the three missing parameters. FuzzEvalContext feeds arbitrary JSON
 contexts to Eval.
 
+### Caveats in schemas
+
+A schema declares caveats with SpiceDB's syntax, and a relation's subject
+type names one with `with`:
+
+```
+caveat ip_allowed(allowed cidr, client_ip ipaddress) {
+  allowed.containsIP(client_ip)
+}
+
+definition document {
+  relation viewer: user | user with ip_allowed | group#member with ip_allowed
+}
+```
+
+Parameter types are the ones `cel.ParseType` reads (`any` is `dyn`). The
+body is compiled when the schema is parsed, against the parameters and
+required to be a bool, so a typo, a wrong type, a bad literal range or an
+expression over the CEL limits refuses the schema with a line and column in
+the schema itself. The schema lexer produces tokens on demand, which lets
+the parser hand everything between the caveat's braces to CEL: a small
+scanner skips CEL strings (quoted, triple-quoted, raw), comments and map
+literals to find the closing brace, and anything it gets wrong would leave
+an invalid expression, which CEL then refuses. Caveats and definitions
+share one namespace and may come in any order; a schema holds up to 256
+caveats of up to 32 parameters.
+
+A subject type with a caveat allows only relationships that carry that
+caveat, as in SpiceDB: `user | user with ip_allowed` takes both, `user with
+ip_allowed` alone takes no plain relationship. `Relation.Allows` keeps its
+meaning (no caveat) and `AllowsCaveat` names one. `Caveat.ValidateContext`
+checks a context against the parameters with the evaluator's own
+conversion (`cel.Type.Accepts`), so what a store accepts is exactly what a
+check can evaluate; parameters it leaves out are allowed and come back as
+missing.
+
+The canonical form prints caveats before definitions and keeps a caveat's
+expression as written, comments included, trimmed of surrounding
+whitespace, so a stored schema reads like its source and parsing the
+canonical form gives it back byte for byte. A schema diff compares caveats
+by parameters and parsed expression, so spacing and comments are not
+changes; a changed caveat counts as a change to every relation that lists
+it, and the permissions that read those relations are reported as
+affected.
+
 ## One clock (internal/platform/clock)
 
 Code that reads the time or waits on it takes a `clock.Clock` (week 2,

@@ -610,3 +610,13 @@ func typeName(v any) string {
 	}
 	return fmt.Sprintf("%T", v)
 }
+
+// Accepts reports whether Eval would take v as the value of a variable of
+// type t, converting it as the package doc describes. The error says what
+// is wrong, such as "is the string \"x\", want int", without a variable
+// name: a store checking a caveat's context before writing it names the
+// parameter itself.
+func (t *Type) Accepts(v any) error {
+	_, err := convertInput(t, v, 0)
+	return err
+}

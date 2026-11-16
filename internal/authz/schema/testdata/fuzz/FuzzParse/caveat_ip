@@ -1,0 +1,2 @@
+go test fuzz v1
+string("caveat ip_allowed(allowed list<cidr>, client_ip ipaddress) {\n  allowed.exists(r, r.containsIP(client_ip))\n}\ndefinition user {}\ndefinition doc {\n  relation viewer: user | user with ip_allowed | user:* with ip_allowed\n}\n")

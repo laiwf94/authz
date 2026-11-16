@@ -1,0 +1,2 @@
+go test fuzz v1
+string("definition user {}\ncaveat shift(now timestamp, start timestamp, length duration) { now >= start && now < start + length }\n")

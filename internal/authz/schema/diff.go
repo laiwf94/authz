@@ -19,15 +19,16 @@ const (
 // Change is one difference between two schemas.
 type Change struct {
 	Kind ChangeKind `json:"kind"`
-	// Object is "definition", "relation" or "permission": what the name is
-	// in the new schema, or in the old one for a removal.
+	// Object is "definition", "relation", "permission" or "caveat": what
+	// the name is in the new schema, or in the old one for a removal.
 	Object string `json:"object"`
-	// Name is "doc" for a definition and "doc#viewer" for a relation or
-	// permission.
+	// Name is "doc" for a definition or a caveat and "doc#viewer" for a
+	// relation or permission.
 	Name string `json:"name"`
 	// Detail shows a change as "before -> after": the allowed subjects of a
-	// relation, the expression of a permission, or "relation -> permission"
-	// when a name changes what it is.
+	// relation, the expression of a permission, the parameters and parsed
+	// expression of a caveat, or "relation -> permission" when a name
+	// changes what it is.
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -35,12 +36,15 @@ type Change struct {
 type Diff struct {
 	// Changes lists every difference: definitions, then their relations and
 	// permissions in the new schema's order, then what the old schema had
-	// and the new one drops.
+	// and the new one drops; then caveats the same way. A caveat counts as
+	// changed when its parameters or its parsed expression differ, not its
+	// spacing or comments.
 	Changes []Change `json:"changes"`
 	// Affected lists the permissions present in both schemas whose answer
 	// can differ under the new one: those whose expression changed and every
 	// permission that reaches a changed relation or permission, on its own
 	// object, across an arrow or through a userset such as group#member.
+	// A changed caveat changes every relation that lists it.
 	// The list is conservative: a relation that only gains a subject type
 	// counts as changed, though no stored relationship uses that type yet.
 	// They are in the new schema's order, as "doc#view".
@@ -86,6 +90,35 @@ func Compare(prev, next *Schema) Diff {
 			d.Changes = append(d.Changes, Change{Kind: Removed, Object: "definition", Name: dn})
 		}
 	}
+	changedCaveats := map[string]bool{}
+	for _, cn := range next.CaveatOrder {
+		nc := next.Caveats[cn]
+		oc, ok := prev.Caveats[cn]
+		switch {
+		case !ok:
+			d.Changes = append(d.Changes, Change{Kind: Added, Object: "caveat", Name: cn})
+		case oc.meaning() != nc.meaning():
+			d.Changes = append(d.Changes, Change{Kind: Changed, Object: "caveat", Name: cn, Detail: oc.meaning() + " -> " + nc.meaning()})
+			changedCaveats[cn] = true
+		}
+	}
+	for _, cn := range prev.CaveatOrder {
+		if _, ok := next.Caveats[cn]; !ok {
+			d.Changes = append(d.Changes, Change{Kind: Removed, Object: "caveat", Name: cn})
+		}
+	}
+	// A relation that lists a changed caveat grants differently even though
+	// its own text is the same.
+	for _, dn := range next.Order {
+		nd := next.Defs[dn]
+		for _, n := range nd.Order {
+			for _, a := range relationAllowed(nd, n) {
+				if changedCaveats[a.Caveat] {
+					changed[dn+"#"+n] = true
+				}
+			}
+		}
+	}
 
 	// Walk dependencies backwards from what changed. A removed name needs
 	// no seed: next validates, so whatever used it was rewritten and is
@@ -118,6 +151,15 @@ func Compare(prev, next *Schema) Diff {
 		}
 	}
 	return d
+}
+
+// relationAllowed returns the allowed subject types of n if it is a
+// relation, and nil if it is a permission.
+func relationAllowed(d *Definition, n string) []SubjectType {
+	if r, ok := d.Relations[n]; ok {
+		return r.Allowed
+	}
+	return nil
 }
 
 // kind names what n is on the definition.

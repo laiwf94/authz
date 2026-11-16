@@ -108,3 +108,32 @@ func TestJoinAndAssignable(t *testing.T) {
 		t.Error("null assignability")
 	}
 }
+
+func TestTypeAccepts(t *testing.T) {
+	cases := []struct {
+		typ  string
+		v    any
+		want string // "" when accepted, else part of the error
+	}{
+		{"int", float64(3), ""},
+		{"int", 3.5, "want int"},
+		{"timestamp", "2026-11-23T09:00:00Z", ""},
+		{"timestamp", "monday", "RFC 3339"},
+		{"list<cidr>", []any{"10.0.0.0/8"}, ""},
+		{"list<cidr>", []any{"10.0.0.1"}, "[0]"},
+		{"map<string, int>", map[string]any{"a": float64(1)}, ""},
+		{"map<string, int>", map[string]any{"a": "1"}, "[a]"},
+		{"bool", nil, "is null"},
+		{"dyn", nil, ""},
+	}
+	for _, c := range cases {
+		typ, err := ParseType(c.typ)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = typ.Accepts(c.v)
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%s.Accepts(%#v) = %v, want %q", c.typ, c.v, err, c.want)
+		}
+	}
+}

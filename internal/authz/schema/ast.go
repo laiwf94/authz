@@ -21,6 +21,21 @@
 // Operators, from tightest to loosest binding: "->" (arrow), "&"
 // (intersection), "+" (union), "-" (exclusion). Binary operators are
 // left-associative; parentheses group.
+//
+// A caveat is a named CEL condition with typed parameters. A subject type
+// followed by "with" and a caveat's name allows relationships that carry
+// that caveat, and only those; list the subject type without it as well
+// to allow both:
+//
+//	caveat ip_allowed(allowed cidr, client_ip ipaddress) {
+//	  allowed.containsIP(client_ip)
+//	}
+//
+//	definition document {
+//	  relation viewer: user | user with ip_allowed | group#member with ip_allowed
+//	}
+//
+// Caveats and definitions may come in any order and share one namespace.
 package schema
 
 import (
@@ -32,6 +47,9 @@ import (
 type Schema struct {
 	Defs  map[string]*Definition
 	Order []string // definition names in source order
+
+	Caveats     map[string]*Caveat
+	CaveatOrder []string // caveat names in source order
 }
 
 // Definition is one object type.
@@ -49,22 +67,26 @@ type Relation struct {
 }
 
 // SubjectType is one allowed subject for a relation, e.g. "user",
-// "user:*" or "group#member".
+// "user:*", "group#member" or "user with ip_allowed".
 type SubjectType struct {
 	Type     string
 	Relation string // set for usersets such as group#member
 	Wildcard bool   // set for "user:*"
+	Caveat   string // set for "user with ip_allowed"
 }
 
 func (t SubjectType) String() string {
+	s := t.Type
 	switch {
 	case t.Wildcard:
-		return t.Type + ":*"
+		s += ":*"
 	case t.Relation != "":
-		return t.Type + "#" + t.Relation
-	default:
-		return t.Type
+		s += "#" + t.Relation
 	}
+	if t.Caveat != "" {
+		s += " with " + t.Caveat
+	}
+	return s
 }
 
 // Permission is a name computed from an expression; it cannot be written to.
@@ -116,11 +138,18 @@ func (d *Definition) IsPermission(name string) bool { _, ok := d.Permissions[nam
 // Has reports whether name is a relation or permission on the definition.
 func (d *Definition) Has(name string) bool { return d.IsRelation(name) || d.IsPermission(name) }
 
-// Allows reports whether a relationship with the given subject may be stored
-// in relation rel. subjectID "*" is a wildcard.
+// Allows reports whether a relationship with the given subject and no
+// caveat may be stored in relation rel. subjectID "*" is a wildcard.
 func (r *Relation) Allows(subjectType, subjectID, subjectRelation string) bool {
+	return r.AllowsCaveat(subjectType, subjectID, subjectRelation, "")
+}
+
+// AllowsCaveat reports whether a relationship with the given subject and
+// caveat ("" for none) may be stored in relation rel. A subject type
+// listed with a caveat allows only relationships carrying that caveat.
+func (r *Relation) AllowsCaveat(subjectType, subjectID, subjectRelation, caveat string) bool {
 	for _, a := range r.Allowed {
-		if a.Type != subjectType {
+		if a.Type != subjectType || a.Caveat != caveat {
 			continue
 		}
 		if subjectID == "*" {
@@ -136,12 +165,21 @@ func (r *Relation) Allows(subjectType, subjectID, subjectRelation string) bool {
 	return false
 }
 
-// String renders the schema in canonical form. Parsing the output yields an
-// equivalent schema.
+// String renders the schema in canonical form: caveats first, then
+// definitions, each in source order. Parsing the output yields an
+// equivalent schema. A caveat's expression is kept as written, comments
+// included, apart from the whitespace around it.
 func (s *Schema) String() string {
 	var b strings.Builder
-	for i, name := range s.Order {
+	for i, name := range s.CaveatOrder {
 		if i > 0 {
+			b.WriteString("\n")
+		}
+		c := s.Caveats[name]
+		fmt.Fprintf(&b, "caveat %s%s {\n  %s\n}\n", c.Name, c.signature(), c.Expr)
+	}
+	for i, name := range s.Order {
+		if i > 0 || len(s.CaveatOrder) > 0 {
 			b.WriteString("\n")
 		}
 		d := s.Defs[name]

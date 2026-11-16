@@ -13,6 +13,8 @@ const (
 	MaxNamesPerDef  = 256
 	MaxExprDepth    = 32
 	MaxAllowedTypes = 32
+	MaxCaveats      = 256
+	MaxCaveatParams = 32
 )
 
 var identRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -51,12 +53,16 @@ const (
 	tMinus
 	tArrow
 	tStar
+	tComma
+	tLAngle
+	tRAngle
+	tErr // a lexical error; text holds the message
 )
 
 var tokNames = map[tokKind]string{
 	tEOF: "end of input", tIdent: "name", tLBrace: "'{'", tRBrace: "'}'", tLParen: "'('", tRParen: "')'",
 	tColon: "':'", tPipe: "'|'", tHash: "'#'", tEq: "'='", tPlus: "'+'", tAmp: "'&'", tMinus: "'-'",
-	tArrow: "'->'", tStar: "'*'",
+	tArrow: "'->'", tStar: "'*'", tComma: "','", tLAngle: "'<'", tRAngle: "'>'",
 }
 
 type token struct {
@@ -65,73 +71,155 @@ type token struct {
 	line, col int
 }
 
-func lex(src string) ([]token, error) {
-	var toks []token
-	line, col := 1, 1
-	i := 0
-	adv := func(n int) {
-		for k := 0; k < n; k++ {
-			if src[i] == '\n' {
-				line++
-				col = 1
-			} else {
-				col++
-			}
-			i++
+var single = [256]tokKind{'{': tLBrace, '}': tRBrace, '(': tLParen, ')': tRParen, ':': tColon, '|': tPipe,
+	'#': tHash, '=': tEq, '+': tPlus, '&': tAmp, '*': tStar, ',': tComma, '<': tLAngle, '>': tRAngle}
+
+// lexer produces tokens on demand, so the parser can hand the body of a
+// caveat, which is CEL and not schema syntax, to the CEL parser instead.
+type lexer struct {
+	src       string
+	i         int
+	line, col int
+}
+
+func (l *lexer) adv(n int) {
+	for k := 0; k < n; k++ {
+		if l.src[l.i] == '\n' {
+			l.line++
+			l.col = 1
+		} else {
+			l.col++
 		}
+		l.i++
 	}
-	single := map[byte]tokKind{'{': tLBrace, '}': tRBrace, '(': tLParen, ')': tRParen, ':': tColon, '|': tPipe,
-		'#': tHash, '=': tEq, '+': tPlus, '&': tAmp, '*': tStar}
-	for i < len(src) {
-		c := src[i]
+}
+
+func isNameByte(d byte) bool {
+	return d >= 'a' && d <= 'z' || d >= 'A' && d <= 'Z' || d >= '0' && d <= '9' || d == '_'
+}
+
+// next returns the next token, or a tErr token at the first character no
+// token starts with.
+func (l *lexer) next() token {
+	for l.i < len(l.src) {
+		c := l.src[l.i]
 		switch {
 		case c == ' ' || c == '\t' || c == '\r' || c == '\n':
-			adv(1)
-		case c == '/' && i+1 < len(src) && src[i+1] == '/':
-			for i < len(src) && src[i] != '\n' {
-				adv(1)
+			l.adv(1)
+		case c == '/' && l.i+1 < len(l.src) && l.src[l.i+1] == '/':
+			for l.i < len(l.src) && l.src[l.i] != '\n' {
+				l.adv(1)
 			}
 		case c == '-':
-			if i+1 < len(src) && src[i+1] == '>' {
-				toks = append(toks, token{tArrow, "->", line, col})
-				adv(2)
-			} else {
-				toks = append(toks, token{tMinus, "-", line, col})
-				adv(1)
+			t := token{tMinus, "-", l.line, l.col}
+			if l.i+1 < len(l.src) && l.src[l.i+1] == '>' {
+				t.kind, t.text = tArrow, "->"
 			}
+			l.adv(len(t.text))
+			return t
 		case single[c] != 0:
-			toks = append(toks, token{single[c], string(c), line, col})
-			adv(1)
-		case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_':
-			start, l, cl := i, line, col
-			for i < len(src) {
-				d := src[i]
-				if d >= 'a' && d <= 'z' || d >= 'A' && d <= 'Z' || d >= '0' && d <= '9' || d == '_' {
-					adv(1)
-					continue
-				}
-				break
+			t := token{single[c], string(c), l.line, l.col}
+			l.adv(1)
+			return t
+		case isNameByte(c):
+			start, line, col := l.i, l.line, l.col
+			for l.i < len(l.src) && isNameByte(l.src[l.i]) {
+				l.adv(1)
 			}
-			toks = append(toks, token{tIdent, src[start:i], l, cl})
+			return token{tIdent, l.src[start:l.i], line, col}
 		default:
-			return nil, &Error{line, col, fmt.Sprintf("unexpected character %q", c)}
+			return token{tErr, fmt.Sprintf("unexpected character %q", c), l.line, l.col}
 		}
 	}
-	toks = append(toks, token{tEOF, "", line, col})
-	return toks, nil
+	return token{tEOF, "", l.line, l.col}
+}
+
+// celBody reads the source of a caveat expression, from just after its '{'
+// up to the '}' that closes it, skipping braces inside CEL strings,
+// comments and map literals. It consumes the closing brace and returns the
+// body with the line and column where it starts.
+func (l *lexer) celBody() (body string, line, col int, err error) {
+	start, line, col := l.i, l.line, l.col
+	depth := 0
+	for l.i < len(l.src) {
+		c := l.src[l.i]
+		switch {
+		case c == '{':
+			depth++
+		case c == '}':
+			if depth == 0 {
+				body = l.src[start:l.i]
+				l.adv(1)
+				return body, line, col, nil
+			}
+			depth--
+		case c == '/' && l.i+1 < len(l.src) && l.src[l.i+1] == '/':
+			for l.i < len(l.src) && l.src[l.i] != '\n' {
+				l.adv(1)
+			}
+			continue
+		case c == '"' || c == '\'':
+			if err := l.celString(); err != nil {
+				return "", 0, 0, err
+			}
+			continue
+		}
+		l.adv(1)
+	}
+	return "", 0, 0, &Error{line, col, "caveat expression has no closing '}'"}
+}
+
+// celString skips a CEL string literal starting at the quote at l.i: single
+// or triple quoted, with backslash escapes unless an r or R before the
+// quote makes it raw. It only has to find where the string ends; the CEL
+// parser checks what is inside.
+func (l *lexer) celString() error {
+	line, col := l.line, l.col
+	q := l.src[l.i]
+	raw := l.i > 0 && (l.src[l.i-1] == 'r' || l.src[l.i-1] == 'R')
+	triple := strings.HasPrefix(l.src[l.i:], strings.Repeat(string(q), 3))
+	if triple {
+		l.adv(3)
+	} else {
+		l.adv(1)
+	}
+	for l.i < len(l.src) {
+		c := l.src[l.i]
+		switch {
+		case c == '\\' && !raw && l.i+1 < len(l.src):
+			l.adv(2)
+			continue
+		case c == q && !triple:
+			l.adv(1)
+			return nil
+		case c == q && strings.HasPrefix(l.src[l.i:], strings.Repeat(string(q), 3)):
+			l.adv(3)
+			return nil
+		case c == '\n' && !triple:
+			return &Error{l.line, l.col, "newline in string in caveat expression"}
+		}
+		l.adv(1)
+	}
+	return &Error{line, col, "string in caveat expression has no closing quote"}
 }
 
 type parser struct {
-	toks []token
-	pos  int
+	lx    lexer
+	tok   token
+	ahead bool // tok holds the next token
 }
 
-func (p *parser) peek() token { return p.toks[p.pos] }
+func (p *parser) peek() token {
+	if !p.ahead {
+		p.tok, p.ahead = p.lx.next(), true
+	}
+	return p.tok
+}
 
 func (p *parser) next() token {
-	t := p.toks[p.pos]
-	if t.kind != tEOF {
-		p.pos++
+	t := p.peek()
+	if t.kind != tEOF && t.kind != tErr {
+		p.ahead = false
 	}
 	return t
 }
@@ -144,7 +232,13 @@ func (p *parser) expect(k tokKind) (token, error) {
 	return t, nil
 }
 
-func (p *parser) errAt(t token, msg string) error { return &Error{t.line, t.col, msg} }
+// errAt reports msg at t, or the lexical error t holds.
+func (p *parser) errAt(t token, msg string) error {
+	if t.kind == tErr {
+		msg = t.text
+	}
+	return &Error{t.line, t.col, msg}
+}
 
 func describe(t token) string {
 	if t.kind == tIdent {
@@ -169,23 +263,34 @@ func Parse(src string) (*Schema, error) {
 	if len(src) > MaxSchemaBytes {
 		return nil, &Error{Msg: fmt.Sprintf("schema is larger than %d bytes", MaxSchemaBytes)}
 	}
-	toks, err := lex(src)
-	if err != nil {
-		return nil, err
-	}
-	p := &parser{toks: toks}
-	s := &Schema{Defs: map[string]*Definition{}}
+	p := &parser{lx: lexer{src: src, line: 1, col: 1}}
+	s := &Schema{Defs: map[string]*Definition{}, Caveats: map[string]*Caveat{}}
 	for p.peek().kind != tEOF {
 		kw := p.next()
-		if kw.kind != tIdent || kw.text != "definition" {
-			return nil, p.errAt(kw, fmt.Sprintf("expected \"definition\", found %s", describe(kw)))
+		if kw.kind != tIdent || kw.text != "definition" && kw.text != "caveat" {
+			return nil, p.errAt(kw, fmt.Sprintf("expected \"definition\" or \"caveat\", found %s", describe(kw)))
 		}
-		name, err := p.ident("definition")
+		name, err := p.ident(kw.text)
 		if err != nil {
 			return nil, err
 		}
 		if _, dup := s.Defs[name.text]; dup {
 			return nil, p.errAt(name, fmt.Sprintf("definition %q is declared twice", name.text))
+		}
+		if _, dup := s.Caveats[name.text]; dup {
+			return nil, p.errAt(name, fmt.Sprintf("caveat %q is declared twice", name.text))
+		}
+		if kw.text == "caveat" {
+			if len(s.CaveatOrder) >= MaxCaveats {
+				return nil, p.errAt(name, fmt.Sprintf("too many caveats (max %d)", MaxCaveats))
+			}
+			c, err := p.caveat(name)
+			if err != nil {
+				return nil, err
+			}
+			s.Caveats[c.Name] = c
+			s.CaveatOrder = append(s.CaveatOrder, c.Name)
+			continue
 		}
 		if len(s.Order) >= MaxDefinitions {
 			return nil, p.errAt(name, fmt.Sprintf("too many definitions (max %d)", MaxDefinitions))
@@ -272,6 +377,14 @@ func (p *parser) relation(name string) (*Relation, error) {
 				return nil, err
 			}
 			st.Relation = rn.text
+		}
+		if t := p.peek(); t.kind == tIdent && t.text == "with" {
+			p.next()
+			cn, err := p.ident("caveat")
+			if err != nil {
+				return nil, err
+			}
+			st.Caveat = cn.text
 		}
 		if seen[st.String()] {
 			return nil, p.errAt(tn, fmt.Sprintf("subject type %q is listed twice", st.String()))
@@ -374,6 +487,9 @@ func validate(s *Schema) error {
 					}
 					if a.Relation != "" && !target.Has(a.Relation) {
 						return &Error{Msg: fmt.Sprintf("%s#%s allows %s, but %q has no relation or permission %q", dn, n, a, a.Type, a.Relation)}
+					}
+					if _, ok := s.Caveats[a.Caveat]; a.Caveat != "" && !ok {
+						return &Error{Msg: fmt.Sprintf("%s#%s allows %s, but there is no caveat %q", dn, n, a, a.Caveat)}
 					}
 				}
 				continue

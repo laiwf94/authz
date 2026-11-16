@@ -1,0 +1,2 @@
+go test fuzz v1
+string("caveat c(x int, m map<string, int>) {\n  '''}''' != string(x) && r\"\\\" != \"}\" && {\"a\": 1}[\"a\"] == m[\"b\"] // }\n}\ndefinition g { relation m: g#m with c }\n")
