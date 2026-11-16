@@ -379,9 +379,14 @@ func TestFileReload(t *testing.T) {
 	loads := strings.Count(g.log.String(), `"event":"config_loaded"`)
 	g.write(gatewayDoc{extraHosts: []string{"new.example.com"}})
 	g.waitStatus("new.example.com", withB, 200)
-	waitFor(t, func() bool { return strings.Count(g.log.String(), `"event":"config_loaded"`) == loads+1 })
-	if !strings.Contains(g.log.String(), `"applied":["apps"],"on_restart":null`) {
-		t.Fatalf("app change not described:\n%s", g.log.String())
+	// The reloader swaps cookie keys before the serve loop rebuilds the
+	// runtime and logs config_loaded, so the record of the key change just
+	// above can land after loads was counted (#249): wait for at least one
+	// more, and check the app change was applied once.
+	waitFor(t, func() bool { return strings.Count(g.log.String(), `"event":"config_loaded"`) >= loads+1 })
+	if n := strings.Count(g.log.String(), `"applied":["apps"],"on_restart":null`); n != 1 {
+		t.Fatalf("app change described %d times (config_loaded %d, %d before):\n%s", n,
+			strings.Count(g.log.String(), `"event":"config_loaded"`), loads, g.log.String())
 	}
 
 	// An invalid change is refused and the running configuration kept: a
