@@ -40,11 +40,15 @@ type record struct {
 	Revalidated time.Time `json:"revalidated,omitzero"`
 	// SID is, on a create record, the provider's session handle.
 	SID string `json:"sid,omitempty"`
+	// Device and IP are, on a create record, the browser's label and the
+	// address it signed in from.
+	Device string `json:"device,omitempty"`
+	IP     string `json:"ip,omitempty"`
 }
 
 // createRecord is the record that recreates sess on replay.
 func createRecord(sess *Session) record {
-	r := record{Op: opCreate, Session: sess, Refresh: sess.refresh, SID: sess.sid}
+	r := record{Op: opCreate, Session: sess, Refresh: sess.refresh, SID: sess.sid, Device: sess.device, IP: sess.ip}
 	if sess.revalidated.After(sess.CreatedAt) {
 		r.Revalidated = sess.revalidated
 	}
@@ -181,6 +185,7 @@ func (r *replayer) apply(rec record) error {
 		rec.Session.persistedSeen = rec.Session.LastSeen
 		rec.Session.refresh = rec.Refresh
 		rec.Session.sid = rec.SID
+		rec.Session.device, rec.Session.ip = rec.Device, rec.IP
 		rec.Session.revalidated = rec.Session.CreatedAt
 		if rec.Revalidated.After(rec.Session.CreatedAt) {
 			rec.Session.revalidated = rec.Revalidated
@@ -248,6 +253,9 @@ func validate(rec record) error {
 		}
 		if rec.SID != "" && !ValidSID(rec.SID) {
 			return errors.New("create with a malformed sid")
+		}
+		if !validDevice(rec.Device, rec.IP) {
+			return errors.New("create with a malformed device or ip")
 		}
 	case opTouch, opRevoke:
 		if len(rec.ID) != 32 {

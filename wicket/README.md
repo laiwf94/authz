@@ -147,6 +147,8 @@ Public listener (`WICKET_ADDR`, default `:4180`):
 | `GET /saml/{provider}/metadata` | SP metadata to give the identity provider. |
 | `GET`, `POST /saml/{provider}/slo` | SAML SingleLogoutService (HTTP-Redirect, HTTP-POST): signed LogoutRequests from the IdP end the sessions they name; LogoutResponses finish a sign-out started here. |
 | `GET /logout`, `POST /logout` | Confirmation page; the POST (with its CSRF token) ends the session. |
+| `GET /sessions` | The signed-in user's sessions at their provider: device, address, sign-in time and last use. |
+| `POST /sessions/end` | Ends one of the user's sessions (`id`) or all but this one (`all=others`), with the page's CSRF token. Ending this browser's session signs it out here. |
 | `GET /.well-known/jwks.json` | Keys that verify `X-Auth-Token`. |
 | `GET /healthz` | Liveness. |
 

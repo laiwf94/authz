@@ -514,6 +514,21 @@ its answer through a sealed, single-use cookie. It is on when the provider
 has an SP key and the IdP metadata lists a SingleLogoutService. See
 [wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md#saml-single-logout).
 
+**Self-service sessions** (#79). `GET /sessions` lists the signed-in
+user's live sessions at the provider they signed in with, most recently
+used first, from the store's per-subject index (a map lookup, not a scan:
+about 3 µs among 100,000 sessions). Each session keeps a short device label
+derived from a fixed list of browser and system tokens in the User-Agent
+(never the raw header) and the client address after the trusted-proxy
+rules, both in its create record and, like the provider `sid`, out of the
+admin API's JSON. `POST /sessions/end` takes a form with a CSRF token sealed
+for the `sessions` purpose and bound to the viewing session, the same
+Origin check as `/logout`, and the login rate limit; the store ends a
+session only when it belongs to the same provider and subject, so one user
+cannot name another's. Ending the current session clears the cookie
+locally; `/logout` remains the way to also sign out at the provider. Each
+ended session is a `session_revoked` audit record with `by: "user"`.
+
 ### Key rings in the gateway
 
 Without a keys file the gateway keeps wicket's two key lists.

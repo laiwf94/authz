@@ -21,7 +21,7 @@ Two rules apply to every proxy:
    proxy configuration can't turn into an impersonation. `examples/whoami`
    is a small app that does exactly that.
 2. **Route the browser-facing endpoints** (`/login`, `/callback/...`,
-   `/saml/...`, `/logout`, `/logged-out`, `/.well-known/jwks.json`) to the
+   `/saml/...`, `/logout`, `/logged-out`, `/sessions`, `/.well-known/jwks.json`) to the
    gateway under the `public_url` from its config. The examples use
    `https://app.example.com/_wicket`. The path is only an example and any
    prefix works, but existing deployments can keep `/_wicket` unchanged.

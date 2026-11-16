@@ -200,6 +200,8 @@ func (s *Server) routes() {
 	s.route(s.public, "GET /logout", s.handleLogoutPage)
 	s.route(s.public, "POST /logout", s.limited(s.handleLogout))
 	s.route(s.public, "GET /logged-out", s.handleLoggedOut)
+	s.route(s.public, "GET /sessions", s.handleSessionsPage)
+	s.route(s.public, "POST /sessions/end", s.limited(s.handleEndSession))
 	s.route(s.public, "GET /.well-known/jwks.json", s.handleJWKS)
 	s.route(s.public, "GET /healthz", s.handleHealth)
 	s.route(s.public, "/", func(w http.ResponseWriter, r *http.Request) {

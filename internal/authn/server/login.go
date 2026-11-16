@@ -344,6 +344,7 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime
 		}
 	}
 	extra.Refresh = sealed
+	extra.Device, extra.IP = s.deviceOf(r)
 	secret, sess, err := s.sessions.CreateWith(id, extra)
 	if err != nil {
 		s.loginFailed(w, r, rt, st.Provider, st.App, reasonOf(err), err)

@@ -259,6 +259,21 @@ link the roadmap issue they come from.
   written. The gateway now keeps the parsed form (`https://`). Found once the
   SAML fuzz targets, which had spent their CI time minimizing inputs, fuzzed
   for their whole time.
+- **Users see and end their own sessions** ([#79](https://github.com/laiwf94/authz/issues/79)).
+  `GET /sessions` lists the signed-in user's live sessions at their
+  provider, most recently used first: a device label such as "Firefox on
+  Linux" (from a fixed list of User-Agent tokens, never the raw header), the
+  address it signed in from (after the trusted-proxy rules), and when it
+  signed in, was last used and ends. Each has a form to end it, and one ends
+  every session but the current one; `POST /sessions/end` needs the page's
+  CSRF token (bound to the viewing session, and not interchangeable with the
+  logout token), refuses another origin, is rate limited like logins, and
+  only ends sessions of the same provider and subject. Ending the current
+  session signs the browser out here. Each ended session is audited as
+  `authn.session_revoked` with `by: "user"`; a bad token as
+  `authn.logout_rejected` with action `session.revoke`. Sessions created
+  before this release show "Unknown device" and an unknown address. The
+  admin API's session JSON is unchanged.
 - **SAML single logout** ([#79](https://github.com/laiwf94/authz/issues/79)).
   `/saml/{provider}/slo` is the SingleLogoutService for the HTTP-Redirect
   (GET) and HTTP-POST (POST) bindings, on for a SAML provider with an SP key

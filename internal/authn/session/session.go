@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -64,6 +65,41 @@ type Session struct {
 	// this one (OpenID Connect sid), so a logout at the provider can name
 	// it. Like refresh it stays out of List and the admin API.
 	sid string
+	// device and ip describe the browser that signed in: a short label
+	// derived from its User-Agent and its address. They are for the user's
+	// own sessions page, not for the admin API.
+	device string
+	ip     string
+}
+
+// Device returns the label of the browser that signed in, or "".
+func (s *Session) Device() string { return s.device }
+
+// IP returns the address the session signed in from, or "".
+func (s *Session) IP() string { return s.ip }
+
+// MaxDeviceBytes bounds a device label the store keeps.
+const MaxDeviceBytes = 64
+
+// ErrBadDevice is a device label that is too long or not printable ASCII,
+// or an address that does not parse.
+var ErrBadDevice = errors.New("session: device must be at most 64 printable ASCII characters and ip a valid address")
+
+// validDevice reports whether device and ip can be kept on a session.
+func validDevice(device, ip string) bool {
+	if len(device) > MaxDeviceBytes {
+		return false
+	}
+	for i := 0; i < len(device); i++ {
+		if device[i] < 0x20 || device[i] > 0x7e {
+			return false
+		}
+	}
+	if ip == "" {
+		return true
+	}
+	a, err := netip.ParseAddr(ip)
+	return err == nil && !a.Is4In6() && a.Zone() == "" && a.String() == ip
 }
 
 // SID returns the identity provider's session handle, or "" when it gave
@@ -267,6 +303,11 @@ type Extra struct {
 	// SID is the provider's handle for its session (OpenID Connect sid),
 	// indexed so EndProviderSessions can find the session by it.
 	SID string
+	// Device is a short label for the browser (see MaxDeviceBytes) and IP
+	// the address it signed in from, in netip's canonical form. Both are
+	// shown on the user's own sessions page.
+	Device string
+	IP     string
 }
 
 // CreateWith is Create with everything a login can bring.
@@ -277,6 +318,9 @@ func (s *Store) CreateWith(id policy.Identity, e Extra) (string, *Session, error
 	}
 	if e.SID != "" && !ValidSID(e.SID) {
 		return "", nil, ErrBadSID
+	}
+	if !validDevice(e.Device, e.IP) {
+		return "", nil, ErrBadDevice
 	}
 	var raw [secretBytes]byte
 	_, _ = rand.Read(raw[:])
@@ -292,7 +336,8 @@ func (s *Store) CreateWith(id policy.Identity, e Extra) (string, *Session, error
 		return "", nil, ErrExpired
 	}
 	sess := &Session{ID: IDFromSecret(secret), Identity: id, CreatedAt: now, LastSeen: now, ExpiresAt: exp,
-		refresh: sealedRefresh, revalidated: now, persistedSeen: now, sid: e.SID}
+		refresh: sealedRefresh, revalidated: now, persistedSeen: now, sid: e.SID,
+		device: e.Device, ip: e.IP}
 
 	if len(s.byID) >= s.opts.MaxSessions {
 		s.sweepLocked(now)
@@ -510,6 +555,42 @@ func (s *Store) EndProviderSessions(provider, subject, sid string) ([]Ended, err
 		s.unindex(s.byID[e.ID])
 	}
 	return out, s.append(true, recs...)
+}
+
+// UserSessions returns the live sessions of one user at one provider, most
+// recently used first (ties by id), for the user's own sessions page.
+func (s *Store) UserSessions(provider, subject string) []Session {
+	now := s.opts.Now()
+	s.mu.Lock()
+	var out []Session
+	for id := range s.bySubject[subjectKey(provider, subject)] {
+		if sess := s.byID[id]; s.live(sess, now) {
+			out = append(out, *sess)
+		}
+	}
+	s.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].LastSeen.Equal(out[j].LastSeen) {
+			return out[i].LastSeen.After(out[j].LastSeen)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+// RevokeUser ends the session with this public id only if it belongs to
+// subject at provider, so a user can end their own sessions and no one
+// else's. It returns false when there is no such live session of theirs.
+// Like Revoke, the session stops working even if the log write fails.
+func (s *Store) RevokeUser(provider, subject, id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.byID[id]
+	if !ok || sess.Identity.Provider != provider || sess.Identity.Subject != subject || !s.live(sess, s.opts.Now()) {
+		return false, nil
+	}
+	s.unindex(sess)
+	return true, s.append(true, record{Op: opRevoke, ID: id})
 }
 
 // List returns live sessions, oldest first. A non-empty subject filters to

@@ -78,7 +78,8 @@ type Logout struct {
 
 // LogoutRejected is a logout that failed its CSRF check, or a back-channel
 // logout token that failed validation. Envelope: action "logout", decision
-// deny.
+// deny. A request from the sessions page to end a session that failed its
+// CSRF check is one too, with action "session.revoke".
 type LogoutRejected struct {
 	Reason  string `json:"reason"`
 	Session string `json:"session,omitempty"`
@@ -87,8 +88,10 @@ type LogoutRejected struct {
 	Provider string `json:"provider,omitempty"`
 }
 
-// SessionRevoked is an administrator ending sessions. Envelope: actor (the
-// administrator), subject (the session or user), action "session.revoke".
+// SessionRevoked is an administrator ending sessions, or a user ending one
+// of their own from the sessions page (By "user"). Envelope: actor (the
+// administrator or the user's subject), subject (the session or user),
+// action "session.revoke".
 type SessionRevoked struct {
 	Session  string `json:"session,omitempty"`
 	Provider string `json:"provider,omitempty"`

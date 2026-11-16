@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"html/template"
 	"net/http"
+	"strings"
 )
 
 // pageCSS is the only style on wicket's pages. The Content-Security-Policy
@@ -25,15 +26,46 @@ button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .who{color:var(--text);font-weight:600}
 `
 
-var contentSecurityPolicy = func() string {
-	sum := sha256.Sum256([]byte(pageCSS))
-	return "default-src 'none'; style-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) +
-		"'; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'"
-}()
+// sessionsCSS is the sessions page's own addition to pageCSS. It is a
+// second stylesheet, allowed only on that page (sessionsPolicy), so every
+// other page and its policy stay byte for byte what the golden transcripts
+// recorded.
+const sessionsCSS = `
+main.wide{max-width:560px}
+ul.sessions{list-style:none;margin:20px 0 0;padding:0;display:grid;gap:12px}
+ul.sessions li{border:1px solid var(--line);border-radius:8px;padding:14px}
+ul.sessions p{margin:0 0 4px;font-size:14px}
+ul.sessions form{margin-top:10px}
+.tag{font-size:13px;color:var(--accent);font-weight:600}
+button.danger{color:var(--danger)}
+form.all{margin-top:20px}
+`
+
+func styleHash(css string) string {
+	sum := sha256.Sum256([]byte(css))
+	return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+}
+
+func cspWithStyles(css ...string) string {
+	src := make([]string, len(css))
+	for i, c := range css {
+		src[i] = styleHash(c)
+	}
+	return "default-src 'none'; style-src " + strings.Join(src, " ") +
+		"; form-action 'self' https:; frame-ancestors 'none'; base-uri 'none'"
+}
+
+var (
+	contentSecurityPolicy = cspWithStyles(pageCSS)
+	sessionsPolicy        = cspWithStyles(pageCSS, sessionsCSS)
+)
 
 var pages = template.Must(template.New("layout").Parse(`{{define "top"}}<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer"><title>{{.Title}}</title><style>` + pageCSS + `</style></head><body><main>{{end}}
+{{define "topwide"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>{{.Title}}</title><style>` + pageCSS + `</style><style>` + sessionsCSS + `</style></head><body><main class="wide">{{end}}
 {{define "bottom"}}</main></body></html>{{end}}
 
 {{define "choose"}}{{template "top" .}}
@@ -57,6 +89,16 @@ var pages = template.Must(template.New("layout").Parse(`{{define "top"}}<!doctyp
 {{define "logout"}}{{template "top" .}}
 <h1>Sign out?</h1><p>You are signed in as <span class="who">{{.User}}</span>.</p>
 <form method="post" action="{{.LogoutURL}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="rd" value="{{.Return}}"><button class="primary" type="submit">Sign out</button></form>
+{{template "bottom" .}}{{end}}
+
+{{define "sessions"}}{{template "topwide" .}}
+<h1>Your sessions</h1><p>Signed in as <span class="who">{{.User}}</span>. End any session you don't recognise.</p>
+<ul class="sessions">{{range .Sessions}}<li>
+<p class="who">{{.Device}}{{if .Current}} <span class="tag">This browser</span>{{end}}</p>
+<p>Address {{.IP}}</p><p>Signed in {{.SignedIn}} · last used {{.LastUsed}}</p><p>Ends by {{.Ends}}</p>
+<form method="post" action="{{$.EndURL}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="danger" type="submit">{{if .Current}}End this session and sign out{{else}}End session{{end}}</button></form>
+</li>{{end}}</ul>
+{{if .Others}}<form class="all" method="post" action="{{.EndURL}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="all" value="others"><button class="primary" type="submit">End all other sessions</button></form>{{end}}
 {{template "bottom" .}}{{end}}
 
 {{define "loggedout"}}{{template "top" .}}
