@@ -610,6 +610,40 @@ errors shown to browsers carry only a request id. State, nonce, `at_hash`,
 logout tokens and the admin token are compared in constant time (the admin
 token as SHA-256 digests).
 
+The logout endpoints have their own attack suites, run end to end
+through the gateway (`internal/authn/server/logoutattacks_test.go`). Each
+case checks the 400, the audited reason, and that the session it names is
+still signed in. The attacker gets more than a real one would: back-channel
+tokens are signed with the provider's own key, so only the claim under test
+is wrong, and SAML messages are the IdP's genuine signed ones, altered after
+signing or stripped of their signature. The suites cover:
+
+- **Replayed logout tokens.** The same token again, the same token
+  percent-encoded differently, a new token reusing a jti, a replay after a
+  reload, a replay after the token expired, and 16 concurrent copies (exactly
+  one is accepted). A captured token naming only a user never ends a session
+  that user starts later.
+- **The wrong audience or issuer.** Another client; no audience, an empty
+  one, or one in another case; the issuer or the endpoint as the audience;
+  this client among untrusted audiences; a foreign `azp`; another tenant's
+  issuer at the same provider.
+- **A missing or wrong `events` claim.** None at all, null or empty; a list
+  or a string; front-channel, CAEP or RISC events only; the event URI under
+  https, with a trailing slash or in upper case; the event member as
+  something other than an object; a refreshed ID token, which has no nonce;
+  security event tokens and access tokens that carry the event.
+- **Unsigned SAML logout.** On HTTP-Redirect: unsigned; `Signature` or
+  `SigAlg` removed or empty; `SigAlg` swapped; RSA-SHA1 with the IdP's real
+  key; the attacker's key; `RelayState` added or removed after signing;
+  another message under a real signature; a repeated `SAMLRequest`; an
+  XML-signed message without a query signature. On HTTP-POST: unsigned;
+  signature removed; the attacker's key; NameID or SessionIndex changed after
+  signing; a signed request wrapped inside an unsigned one; a signature moved
+  from another request; query-signature fields in the form. The IdP's
+  LogoutResponse to an SP-initiated sign-out with its signature stripped, on
+  each binding, is refused before the pending sign-out is consumed, so the
+  genuine answer still completes it.
+
 The admin API is on a separate listener, loopback-only unless
 `WICKET_ADMIN_TOKEN` (at least 16 characters) is set; wicket refuses to start
 with a non-loopback admin address and no token. Metrics are there too, since
