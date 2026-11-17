@@ -81,11 +81,19 @@ type Settings struct {
 	DrainDelay pcfg.Duration `json:"drain_delay"`
 	// DrainTimeout is TOOLGATE_DRAIN_TIMEOUT.
 	DrainTimeout pcfg.Duration `json:"drain_timeout"`
+	// Issuers are external issuers of signed agent tokens, after those of
+	// the agents config, which may list them too: each with its issuer,
+	// audience, pinned jwks_uri, algorithms, claims, max_ttl_seconds,
+	// private_networks and ca_file (gateway.IssuerConfig). They have no
+	// AUTHZ_MCP_ variable.
+	Issuers []gateway.IssuerConfig `json:"issuers"`
 
 	// What the check built from the files the section names, so the
 	// gateway starts, and reloads, from exactly what was checked.
 	agents *gateway.Config
 	auth   *identity.Authenticator
+	// The issuers' CA files as the check read them, by path.
+	cas map[string][]byte
 }
 
 // Section describes the mcp section with toolgate's defaults and the rules
@@ -172,10 +180,10 @@ func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
 			c.Errorf(c.Field("signing_keys"), "holds no key")
 		}
 	}
-	if gc != nil && keysOK {
+	if all := checkIssuers(s, gc, c); all != nil && keysOK {
 		// The agents config and the signing keys must make an
 		// authenticator, as they must when the gateway starts.
-		auth, err := gc.NewAuthenticator(keys, active)
+		auth, err := all.NewAuthenticator(keys, active)
 		if err != nil {
 			path := c.Field("config")
 			if len(keys) > 0 {
@@ -183,7 +191,7 @@ func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
 			}
 			c.Errorf(path, "%v", err)
 		} else {
-			s.agents, s.auth = gc, auth
+			s.agents, s.auth = all, auth
 		}
 	}
 	checkKeys(s, gc, c)
@@ -191,6 +199,60 @@ func checkSettings(getenv func(string) string, s *Settings, c *pcfg.Checker) {
 		c.Errorf(c.Field("log_level"), "%q is not debug, info, warn or error", s.LogLevel)
 	}
 	checkHTTP(s, c)
+}
+
+// checkIssuers checks the issuers of the section and reads the CA files
+// of every issuer, the agents config's too, so they are watched with the
+// rest. It returns gc with the section's issuers added, or nil when they
+// are not valid.
+func checkIssuers(s *Settings, gc *gateway.Config, c *pcfg.Checker) *gateway.Config {
+	ok := true
+	for i, ic := range s.Issuers {
+		if err := ic.Check(); err != nil {
+			ok = false
+			c.Errorf(pcfg.IndexPath(c.Field("issuers"), i), "%v", err)
+		}
+	}
+	if ok {
+		if err := gateway.CheckIssuers(s.Issuers); err != nil {
+			ok = false
+			c.Errorf(c.Field("issuers"), "%v", err)
+		}
+	}
+	if gc == nil {
+		return nil
+	}
+	s.cas = map[string][]byte{}
+	read := func(path, ca string) {
+		if _, done := s.cas[ca]; ca == "" || done {
+			return
+		}
+		b, err := c.ReadFile(ca, gateway.MaxCAFileBytes)
+		if err == nil {
+			_, err = gateway.ParseCA(b)
+		}
+		if err != nil {
+			ok = false
+			c.Errorf(path, "ca_file %s: %v", ca, err)
+			return
+		}
+		s.cas[ca] = b
+	}
+	for _, ic := range gc.Issuers {
+		read(c.Field("config"), ic.CAFile)
+	}
+	for i, ic := range s.Issuers {
+		read(pcfg.IndexPath(c.Field("issuers"), i), ic.CAFile)
+	}
+	if !ok {
+		return nil
+	}
+	all, err := gc.WithIssuers(s.Issuers)
+	if err != nil {
+		c.Errorf(c.Field("issuers"), "with those of %s: %v", s.Config, err)
+		return nil
+	}
+	return all
 }
 
 // checkKeys applies the rules of the keys_file agent ring: the file must

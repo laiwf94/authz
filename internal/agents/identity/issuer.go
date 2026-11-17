@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -146,6 +147,34 @@ func checkIssuer(is Issuer, defaultTTL time.Duration) (*trustedIssuer, error) {
 		return nil, fmt.Errorf("max TTL must be from 1s to %s", MaxIssuerTTL)
 	}
 	return &trustedIssuer{Issuer: is, maxTTL: int64(is.MaxTTL / time.Second)}, nil
+}
+
+// noKeys stands in for an issuer's keys while CheckIssuer checks the rest.
+type noKeys struct{}
+
+func (noKeys) Lookup(string, string) (jose.Key, bool) { return jose.Key{}, false }
+
+// CheckIssuer reports whether New would accept is, apart from its Keys,
+// with defaultTTL as Config.MaxTTL (DefaultMaxTTL when 0). Configuration
+// readers use it to check an issuer before its keys exist.
+func CheckIssuer(is Issuer, defaultTTL time.Duration) error {
+	if defaultTTL <= 0 {
+		defaultTTL = DefaultMaxTTL
+	}
+	if is.Keys == nil {
+		is.Keys = noKeys{}
+	}
+	_, err := checkIssuer(is, defaultTTL)
+	return err
+}
+
+// CheckJWKSURL reports whether NewJWKS would accept u as a jwks_uri.
+func CheckJWKSURL(u string) error {
+	p, err := url.Parse(u)
+	if err != nil || p.Scheme != "https" || p.Host == "" || p.User != nil || p.Fragment != "" || p.Opaque != "" {
+		return fmt.Errorf("identity: JWKS URL %q must be an absolute https URL without user info or fragment", u)
+	}
+	return nil
 }
 
 // newIssuers validates the issuers of cfg, Config.PublicKeys first.

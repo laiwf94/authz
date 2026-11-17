@@ -717,3 +717,48 @@ func TestLookupServesAgentAlgorithmsOnly(t *testing.T) {
 		t.Error("JWKS: rsa1 not handed out for RS256")
 	}
 }
+
+func TestCheckIssuer(t *testing.T) {
+	good := Issuer{Issuer: "https://idp.example.com", Audience: "https://mcp.example.com"}
+	if err := CheckIssuer(good, 0); err != nil {
+		t.Fatal(err)
+	}
+	// The keys are not checked, and given keys change nothing.
+	good.Keys = noKeys{}
+	if err := CheckIssuer(good, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		is   Issuer
+		ttl  time.Duration
+		want string
+	}{
+		"no issuer":   {Issuer{Audience: "a"}, 0, "issuer is required"},
+		"no audience": {Issuer{Issuer: "i"}, 0, "audience is required"},
+		"algorithm":   {Issuer{Issuer: "i", Audience: "a", Algorithms: []string{"HS256"}}, 0, `algorithm "HS256"`},
+		"claim":       {Issuer{Issuer: "i", Audience: "a", Claims: ClaimMap{Scopes: "nbf"}}, 0, `claim "nbf"`},
+		"ttl":         {Issuer{Issuer: "i", Audience: "a", MaxTTL: 25 * time.Hour}, 0, "max TTL must be from 1s"},
+		"default ttl": {Issuer{Issuer: "i", Audience: "a"}, 48 * time.Hour, "max TTL must be from 1s"},
+	} {
+		if err := CheckIssuer(tc.is, tc.ttl); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want %q", name, err, tc.want)
+		}
+	}
+}
+
+func TestCheckJWKSURL(t *testing.T) {
+	if err := CheckJWKSURL("https://idp.example.com/.well-known/jwks.json"); err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []string{"", "http://idp/k", "https://", "/jwks", "https://u@idp/k", "https://idp/k#f", "https:opaque", "https://idp/%zz"} {
+		if CheckJWKSURL(u) == nil {
+			t.Errorf("%q accepted", u)
+		}
+		if _, err := NewJWKS(JWKSConfig{URL: u}); err == nil {
+			t.Errorf("NewJWKS accepted %q", u)
+		}
+	}
+	if _, ok := (noKeys{}).Lookup("k", ES256); ok {
+		t.Fatal("noKeys gave a key")
+	}
+}

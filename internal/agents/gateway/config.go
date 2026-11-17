@@ -94,6 +94,9 @@ type Config struct {
 	Upstreams []UpstreamConfig `json:"upstreams"`
 	Limits    Limits           `json:"limits"`
 	Approvals ApprovalConfig   `json:"approvals"`
+	// Issuers are the external issuers whose signed tokens agents may
+	// present, each with keys from its pinned jwks_uri.
+	Issuers []IssuerConfig `json:"issuers"`
 }
 
 // ParseConfig validates a configuration document. getenv resolves upstream
@@ -132,6 +135,9 @@ func ParseConfig(src []byte, getenv func(string) string) (*Config, error) {
 		if c.Tokens.MaxTTLSeconds < 0 || c.Tokens.MaxTTLSeconds > 86400 {
 			return nil, errors.New("config: tokens.max_ttl_seconds must be from 0 to 86400")
 		}
+	}
+	if err := CheckIssuers(c.Issuers); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	a := &c.Approvals
 	if a.WaitSeconds < 0 || a.WaitSeconds > 60 {
@@ -234,24 +240,32 @@ func (c *Config) NewAuthenticator(keys map[string][]byte, activeKey string) (*id
 		cfg.Issuer, cfg.Audience = c.Tokens.Issuer, c.Tokens.Audience
 		cfg.MaxTTL = time.Duration(c.Tokens.MaxTTLSeconds) * time.Second
 	}
+	if err := c.addIssuers(&cfg, nil); err != nil {
+		return nil, err
+	}
 	return identity.New(cfg)
 }
 
 // NewRingAuthenticator builds the authenticator for this configuration
 // with signed tokens on an HS256 key ring (internal/platform/keys): its
 // current key signs, and every key it accepts verifies, so the ring may
-// rotate under the authenticator. A nil ring accepts static keys only.
+// rotate under the authenticator. A nil ring accepts static keys only,
+// and the configured issuers' tokens with keys from LazyIssuerKeys.
 func (c *Config) NewRingAuthenticator(ring *keys.Ring) (*identity.Authenticator, error) {
+	return c.NewIssuerAuthenticator(ring, nil)
+}
+
+func (c *Config) ringConfig(ring *keys.Ring) (identity.Config, error) {
 	cfg := identity.Config{Agents: c.identityAgents()}
 	if ring != nil {
 		if c.Tokens == nil {
-			return nil, errors.New("config: signing keys are set but the config has no tokens section")
+			return cfg, errors.New("config: signing keys are set but the config has no tokens section")
 		}
 		cfg.Ring = ring
 		cfg.Issuer, cfg.Audience = c.Tokens.Issuer, c.Tokens.Audience
 		cfg.MaxTTL = time.Duration(c.Tokens.MaxTTLSeconds) * time.Second
 	}
-	return identity.New(cfg)
+	return cfg, nil
 }
 
 // MaxTokenTTL is the longest lifetime a signed token may have under this

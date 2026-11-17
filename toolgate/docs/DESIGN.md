@@ -234,6 +234,19 @@ fetching.
 The issuer of signed tokens holds the signing key and is trusted: it can mint
 any agent id with any scopes. Policy is the limit on what those scopes do.
 
+External issuers are listed in the `issuers` section of the agents config,
+and in `$.mcp.issuers` of the platform file after them: each names its
+`issuer` (the exact `iss`), `audience` (the gateway's resource indicator,
+which `aud` must hold), `jwks_uri` (an absolute https URL), the accepted
+`algorithms` (EdDSA, ES256 and RS256 by default), the `claims` holding the
+agent id, owner and scopes, `max_ttl_seconds`, the `private_networks` its
+key set may be fetched from and an optional `ca_file`. Keys come only from
+that URL, through the egress guard, never from a URL a token names.
+`authz mcp serve` runs one JWKS client per key set, shared by issuers with
+the same URL, networks and CA certificates; a reload keeps a client and the
+keys it holds while those are unchanged, and the clients stop with the
+server.
+
 ## Human approval
 
 When an allowed rule says `requires_approval`, the gateway computes a binding:

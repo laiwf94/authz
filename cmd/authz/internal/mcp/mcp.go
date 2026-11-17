@@ -466,10 +466,21 @@ func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, 
 	if err != nil {
 		return err
 	}
-	auth, err := gc.NewRingAuthenticator(ring)
+	// Each issuer's JWKS client refreshes its keys until shutdown, and a
+	// reload keeps it while its jwks_uri is unchanged.
+	jwks := newJWKSPool(ctx, log)
+	defer jwks.close()
+	var cas map[string][]byte
+	var section []gateway.IssuerConfig
+	if fm != nil {
+		st := pcfg.Get[Settings](fm.watcher.Current(), SectionName)
+		cas, section = st.cas, st.Issuers
+	}
+	pd, err := jwks.authenticator(gc, ring, cas)
 	if err != nil {
 		return err
 	}
+	auth := pd.auth
 	pol, err := policy.OpenStore(cfg.policyPath, nil)
 	if err != nil {
 		return err
@@ -506,6 +517,7 @@ func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, 
 		return err
 	}
 	defer gw.Close()
+	jwks.commit(pd)
 	if fk != nil {
 		kctx, stopKeys := context.WithCancel(ctx)
 		stopped := fk.start(kctx, cfg.keysFile, log)
@@ -527,14 +539,14 @@ func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, 
 	bg, cancelBG := context.WithCancel(ctx)
 	defer cancelBG()
 	if fm != nil {
-		fm.rl.start(log, gw, pol, cfg, gc, ring)
+		fm.rl.start(log, gw, pol, cfg, gc, ring, jwks, section)
 		go func() { _ = fm.watcher.Run(bg) }()
 		log.Info("configuration loaded", "config", fm.path, "sources", len(fm.watcher.Current().Sources()))
 	}
 	addrs := g.Addrs()
 	n, head := auditLog.Head()
 	log.Info("listening", "addr", addrs[0], "admin_addr", addrs[1],
-		"policy", pol.Current().Hash, "audit_records", n, "audit_head", head, "upstreams", len(gc.Upstreams))
+		"policy", pol.Current().Hash, "audit_records", n, "audit_head", head, "upstreams", len(gc.Upstreams), "issuers", len(gc.Issuers))
 	if ready != nil {
 		ready(addrs[0], addrs[1])
 	}

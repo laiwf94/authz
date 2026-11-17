@@ -16,7 +16,6 @@ import (
 
 	"github.com/laiwf94/authz/cmd/authz/internal/part"
 	"github.com/laiwf94/authz/internal/agents/gateway"
-	"github.com/laiwf94/authz/internal/agents/identity"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	pcfg "github.com/laiwf94/authz/internal/platform/config"
 	"github.com/laiwf94/authz/internal/platform/httpserver"
@@ -164,6 +163,7 @@ type reloader struct {
 
 	mu            sync.Mutex
 	fileRing      *keys.Ring // the keys_file's agent ring; nil without one
+	jwks          *jwksPool  // the issuers' JWKS clients
 	log           *slog.Logger
 	gw            *gateway.Gateway
 	pol           *policy.Store
@@ -171,20 +171,23 @@ type reloader struct {
 	startedAgents *gateway.Config // the agents config it started with
 	applied       config          // the signing keys and level in use
 	appliedAgents *gateway.Config // the agents in use
-	policyHash    string          // the policy the last reload saw in force
+	// The section's issuers in use, the last of appliedAgents.Issuers.
+	appliedIssuers []gateway.IssuerConfig
+	policyHash     string // the policy the last reload saw in force
 }
 
 // start hands the reloader the running gateway. The watcher is started
 // after it, so reload and refused always have a gateway and a log.
-func (r *reloader) start(log *slog.Logger, gw *gateway.Gateway, pol *policy.Store, cfg config, gc *gateway.Config, ring *keys.Ring) {
+func (r *reloader) start(log *slog.Logger, gw *gateway.Gateway, pol *policy.Store, cfg config, gc *gateway.Config, ring *keys.Ring, jwks *jwksPool, section []gateway.IssuerConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.log, r.gw, r.pol = log, gw, pol
+	r.log, r.gw, r.pol, r.jwks = log, gw, pol, jwks
 	if cfg.keysFile != "" {
 		r.fileRing = ring
 	}
 	r.started, r.applied = cfg, cfg
 	r.startedAgents, r.appliedAgents = gc, gc
+	r.appliedIssuers = section
 	r.policyHash = pol.Current().Hash
 }
 
@@ -198,25 +201,33 @@ func (r *reloader) reload(_, cur *pcfg.Config, warnings pcfg.Problems) {
 		return
 	}
 	var applied []string
-	agentsChanged := !sameAgents(r.appliedAgents, s.agents)
+	// The agents config's own issuers count as config; the section's, and
+	// a CA file whose certificates changed, as issuers.
+	agentsChanged := !sameAgents(ownAgents(r.appliedAgents, len(r.appliedIssuers)), ownAgents(s.agents, len(s.Issuers)))
+	issuersChanged := !slices.EqualFunc(r.appliedIssuers, s.Issuers, sameIssuer) ||
+		(!agentsChanged && !r.jwks.same(s.agents, s.cas))
 	// With a keys_file the signing keys only seeded its agent ring, which
 	// rotates on its own.
 	keysChanged := r.fileRing == nil && !sameKeys(r.applied, cfg)
-	if agentsChanged || keysChanged {
-		auth, err := r.authenticator(s.agents, cfg)
+	if agentsChanged || issuersChanged || keysChanged {
+		pd, err := r.authenticator(s.agents, cfg, s.cas)
 		if err == nil {
-			err = r.gw.SetAgents(s.agents, auth)
+			err = r.gw.SetAgents(s.agents, pd.auth)
 		}
 		if err != nil {
 			r.log.Error("configuration change refused; keeping the running agents", "error", err.Error())
 		} else {
+			r.jwks.commit(pd)
 			if agentsChanged {
 				applied = append(applied, "config")
+			}
+			if issuersChanged {
+				applied = append(applied, "issuers")
 			}
 			if keysChanged {
 				applied = append(applied, "signing_keys")
 			}
-			r.appliedAgents = s.agents
+			r.appliedAgents, r.appliedIssuers = s.agents, s.Issuers
 			r.applied.keys, r.applied.activeKey = cfg.keys, cfg.activeKey
 		}
 	}
@@ -254,7 +265,7 @@ func (r *reloader) reload(_, cur *pcfg.Config, warnings pcfg.Problems) {
 // authenticator is the authenticator for the agents config gc: on the
 // keys_file's agent ring, which keeps rotating under it, or on cfg's
 // signing keys as a configured ring.
-func (r *reloader) authenticator(gc *gateway.Config, cfg config) (*identity.Authenticator, error) {
+func (r *reloader) authenticator(gc *gateway.Config, cfg config, cas map[string][]byte) (*pending, error) {
 	ring := r.fileRing
 	if ring == nil {
 		var err error
@@ -262,7 +273,7 @@ func (r *reloader) authenticator(gc *gateway.Config, cfg config) (*identity.Auth
 			return nil, err
 		}
 	}
-	return gc.NewRingAuthenticator(ring)
+	return r.jwks.authenticator(gc, ring, cas)
 }
 
 // refused logs a change the watcher would not load. The policy store
@@ -280,8 +291,19 @@ func (r *reloader) refused(err error) {
 // sameAgents reports whether two agents configs agree on everything
 // SetAgents puts in force.
 func sameAgents(a, b *gateway.Config) bool {
-	return reflect.DeepEqual(a.Agents, b.Agents) && reflect.DeepEqual(a.Tokens, b.Tokens) && a.Limits == b.Limits
+	return reflect.DeepEqual(a.Agents, b.Agents) && reflect.DeepEqual(a.Tokens, b.Tokens) && a.Limits == b.Limits &&
+		slices.EqualFunc(a.Issuers, b.Issuers, sameIssuer)
 }
+
+// ownAgents is gc without the last n issuers, those of the mcp section:
+// the agents config's own.
+func ownAgents(gc *gateway.Config, n int) *gateway.Config {
+	out := *gc
+	out.Issuers = gc.Issuers[:len(gc.Issuers)-n]
+	return &out
+}
+
+func sameIssuer(a, b gateway.IssuerConfig) bool { return reflect.DeepEqual(a, b) }
 
 func sameKeys(a, b config) bool {
 	return a.activeKey == b.activeKey && maps.EqualFunc(a.keys, b.keys, func(x, y []byte) bool { return string(x) == string(y) })

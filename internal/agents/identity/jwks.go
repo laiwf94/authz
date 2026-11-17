@@ -124,10 +124,10 @@ type JWKSStats struct {
 // NewJWKS validates cfg. It does not fetch: call Refresh to fail fast on
 // a bad issuer, or let the first Lookup fetch.
 func NewJWKS(cfg JWKSConfig) (*JWKS, error) {
-	u, err := url.Parse(cfg.URL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
-		return nil, fmt.Errorf("identity: JWKS URL %q must be an absolute https URL without user info or fragment", cfg.URL)
+	if err := CheckJWKSURL(cfg.URL); err != nil {
+		return nil, err
 	}
+	u, _ := url.Parse(cfg.URL)
 	if cfg.Interval < 0 || cfg.MaxStale < 0 || cfg.Timeout < 0 {
 		return nil, errors.New("identity: JWKS durations must not be negative")
 	}
