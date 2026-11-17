@@ -8,6 +8,8 @@ import (
 
 // Cache is a sharded LRU of check results. Keys include the revision, and a
 // snapshot never changes, so a cached answer is never stale for its key.
+// Results that depended on a check's caveat context have the context's
+// hash in their key as well.
 type Cache struct {
 	seed   maphash.Seed
 	shards []*shard
@@ -22,7 +24,7 @@ type shard struct {
 
 type item struct {
 	key string
-	val bool
+	val Result
 }
 
 const cacheShards = 16
@@ -48,21 +50,35 @@ func (c *Cache) shard(key string) *shard {
 	return c.shards[maphash.String(c.seed, key)%cacheShards]
 }
 
-// Get returns the cached value for key.
+// Get returns whether the cached result for key is allowed.
 func (c *Cache) Get(key string) (bool, bool) {
+	r, ok := c.get(key)
+	return r.Allowed(), ok
+}
+
+// Put stores an allowed or denied result, evicting the least recently used
+// entry when full.
+func (c *Cache) Put(key string, val bool) {
+	r := denied
+	if val {
+		r = allowed
+	}
+	c.put(key, r)
+}
+
+func (c *Cache) get(key string) (Result, bool) {
 	s := c.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	el, ok := s.items[key]
 	if !ok {
-		return false, false
+		return denied, false
 	}
 	s.ll.MoveToFront(el)
 	return el.Value.(*item).val, true
 }
 
-// Put stores a value, evicting the least recently used entry when full.
-func (c *Cache) Put(key string, val bool) {
+func (c *Cache) put(key string, val Result) {
 	s := c.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()

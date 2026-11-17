@@ -46,6 +46,17 @@ type walRecord struct {
 	// Expiring holds a checkpoint's relationships that have an expiry;
 	// Rels holds the rest, so a checkpoint without any reads as before.
 	Expiring []expiringRel `json:"expiring,omitempty"`
+	// Caveated holds a checkpoint's relationships that carry a caveat,
+	// with their expiry if they have one.
+	Caveated []caveatedRel `json:"caveated,omitempty"`
+}
+
+// caveatedRel is a relationship, its caveat and its expiry in Unix
+// nanoseconds (0: none).
+type caveatedRel struct {
+	Relationship Relationship `json:"relationship"`
+	ExpiresAt    int64        `json:"expires_at,omitempty"`
+	Caveat       *Caveat      `json:"caveat"`
 }
 
 // expiringRel is a relationship and its expiry in Unix nanoseconds.
@@ -94,7 +105,9 @@ func (w *walLog) append(rec walRecord) error {
 func (w *walLog) checkpoint(head Revision, t int64, schemaSrc string, live []Stored) error {
 	rec := walRecord{Rev: head, Time: t, Type: recCheckpoint, Schema: schemaSrc}
 	for _, st := range live {
-		if st.ExpiresAt.IsZero() {
+		if st.Caveat != nil {
+			rec.Caveated = append(rec.Caveated, caveatedRel{Relationship: st.Relationship, ExpiresAt: expiryNano(st.ExpiresAt), Caveat: st.Caveat})
+		} else if st.ExpiresAt.IsZero() {
 			rec.Rels = append(rec.Rels, st.Relationship)
 		} else {
 			rec.Expiring = append(rec.Expiring, expiringRel{Relationship: st.Relationship, ExpiresAt: st.ExpiresAt.UnixNano()})

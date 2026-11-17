@@ -129,7 +129,7 @@ func (x *expander) node(typ, id, rel string, depth int) error {
 	}
 	node, parent := x.tr.open(n)
 	if node == nil {
-		x.tr.close(nil, parent, false, false)
+		x.tr.close(nil, parent, denied, false)
 		return nil
 	}
 	// Only a recorded node is expanded, so the node limit (never above
@@ -145,7 +145,7 @@ func (x *expander) node(typ, id, rel string, depth int) error {
 		err = x.direct(typ, id, rel, depth)
 	}
 	delete(x.active, k)
-	x.tr.close(node, parent, false, false)
+	x.tr.close(node, parent, denied, false)
 	return err
 }
 
@@ -153,6 +153,9 @@ func (x *expander) node(typ, id, rel string, depth int) error {
 // schema no longer allows (only possible at a snapshot older than a schema
 // change), exactly as Check does.
 func (x *expander) direct(typ, id, rel string, depth int) error {
+	if err := refuseCaveated(x.sc, typ, rel); err != nil {
+		return err
+	}
 	rels, err := x.e.r.ReadDirect(x.rev, typ, id, rel)
 	if err != nil {
 		return err
@@ -186,7 +189,7 @@ func (x *expander) expr(typ, id string, e schema.Expr, depth int) error {
 		if node != nil {
 			err = x.arrow(typ, id, e, depth)
 		}
-		x.tr.close(node, parent, false, false)
+		x.tr.close(node, parent, denied, false)
 		return err
 	case *schema.Union:
 		kind, l, r = KindUnion, e.L, e.R
@@ -204,13 +207,16 @@ func (x *expander) expr(typ, id string, e schema.Expr, depth int) error {
 			err = x.expr(typ, id, r, depth)
 		}
 	}
-	x.tr.close(node, parent, false, false)
+	x.tr.close(node, parent, denied, false)
 	return err
 }
 
 // arrow lists the objects the tupleset names, each with the computed
 // relation, skipping the ones Check skips.
 func (x *expander) arrow(typ, id string, e *schema.Arrow, depth int) error {
+	if err := refuseCaveated(x.sc, typ, e.Tupleset); err != nil {
+		return err
+	}
 	rels, err := x.e.r.ReadDirect(x.rev, typ, id, e.Tupleset)
 	if err != nil {
 		return err

@@ -235,7 +235,9 @@ fail.
 ### Caching
 
 Results are cached in a sharded LRU keyed by
-`revision | object#relation | subject`. A snapshot is immutable, so an entry can
+`revision | object#relation | subject`, and a hash of the check's context for
+results that depended on a caveat (see "Caveats on relationships and in
+checks"). A snapshot is immutable, so an entry can
 never be wrong. The only question is whether it is still useful, which LRU
 handles. Shared snapshots (above) make repeated checks land on the same keys.
 
@@ -1753,6 +1755,82 @@ by parameters and parsed expression, so spacing and comments are not
 changes; a changed caveat counts as a change to every relation that lists
 it, and the permissions that read those relations are reported as
 affected.
+
+### Caveats on relationships and in checks
+
+A touch or create can carry a caveat the schema declares and a context to
+store with it (`store.Update.Caveat`). The relation must list the subject
+type with that caveat, and `ValidateContext` must accept the context, so a
+store never holds a caveat a check cannot evaluate. A context is at most 4
+KiB of JSON. The store encodes it and decodes it again with numbers as
+`json.Number`, the form a recovered log holds, so a context reads back the
+same before and after a restart and an integer too large for a float64
+keeps every digit. Encoding that form gives canonical JSON (sorted keys,
+numbers as written), which is the caveat's identity: touching with the
+same caveat and context is no change, and touching with another, or none,
+opens a new version, so older snapshots keep the caveat they saw. Write
+records and watch changes carry the caveat on the touch; a checkpoint
+lists caveated relationships, with their expiry if any, under `caveated`,
+so a log without caveats is byte for byte what it was. A schema change
+that would leave a stored caveat unlisted, undeclared or with a context
+its new parameters refuse is refused, and a dry run lists those
+relationships.
+
+A check answers allowed, denied or conditional
+(`Engine.CheckResult`). Each caveated relationship the walk reaches
+evaluates its caveat with the stored context over the check's context
+(stored values win, as in SpiceDB), with CEL's three-valued result: a
+caveat that depends on a parameter neither supplies is conditional, with
+the parameter's name. The answers combine as Kleene logic: `+` and a
+relation's subjects are allowed if any branch is and conditional if any is
+and none is allowed; `&` is denied if either side is; `a - b` is `a` and
+not `b`, so an exclusion whose right side is conditional is conditional
+too, never allowed. A caveated userset is the caveat and the membership; a
+caveated arrow is the caveat and the computed relation. The missing names
+are the sorted union over the branches that left the answer open. A caveat
+is evaluated only where it can matter: a relationship whose subject does
+not match, and the right side of a decided `+`, are skipped as before. A
+relationship whose caveat the current schema no longer lets its relation
+hold, which only an old snapshot can show, grants nothing. `Check` and
+`Explain` keep their boolean answer, with a conditional answer false, and
+`LookupResources` lists only definite answers.
+
+The caveats of one check share a cost budget of 1,000,000 CEL units on top
+of each caveat's own limit, so a graph of many caveated relationships
+cannot pin a CPU; past it the check fails as too much work. A check's
+context is at most 16 KiB of JSON. A caveat that fails at check time (a
+context value of the wrong type, a missing map key) fails the check with
+`ErrCaveat` rather than counting as a denial. `Stats` count the caveats
+evaluated and their cost. An explanation marks a conditional node with
+`conditional` and its `missing` names, names the caveat on each caveated
+subject node, and marks the branches of a conditional answer with the
+`conditional` role.
+
+Only results that depended on a caveat depend on the check's context, and
+only they carry it in their cache key. The walk counts caveat evaluations
+and reuses of results that depended on one; a node whose evaluation added
+none took a path no context can change, and is cached under
+`revision | object#relation | subject` as before, shared by checks with
+any context. The others are cached under that key and a 128-bit SHA-256
+prefix of the canonical context (no context is a context of its own). A
+lookup tries the context-free key first, and the keyed one only when the
+schema declares caveats, so a schema without caveats does exactly the
+lookups it did. The per-check memo packs each result in a byte, with the
+missing names of conditional ones on the side.
+
+Expand and LookupSubjects follow only relationships without a caveat. Rather
+than leave out subjects a caveat might grant, or keep subjects a caveated
+exclusion might remove, they refuse with `ErrCaveatedRelation` when they
+reach a relation that lists a subject type with a caveat; relations without
+caveated subject types work as before.
+
+Measured on a 4-core 2.1 GHz Xeon, a check through a caveated group
+membership and a caveated direct relationship takes about 6.8 µs
+uncached with both caveats evaluated, 3.3 µs when the answer is
+conditional, and 4.5 µs with the context-free part cached. Checks without
+caveats run as before (a cached check about 450 ns, 344 B, 5 allocations);
+an uncached one allocates 8% more, the caveat pointer on each relationship
+read.
 
 ## One clock (internal/platform/clock)
 

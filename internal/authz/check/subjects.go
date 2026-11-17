@@ -316,6 +316,9 @@ func (w *subjectWalker) node(typ, id, rel string, depth int) (set subjectSet, ta
 // the members of every userset it names that the current schema still
 // has, exactly as Check follows them.
 func (w *subjectWalker) direct(typ, id, rel string, depth int) (subjectSet, bool, error) {
+	if err := refuseCaveated(w.sc, typ, rel); err != nil {
+		return subjectSet{}, false, err
+	}
 	rels, err := w.e.r.ReadDirect(w.rev, typ, id, rel)
 	if err != nil {
 		return subjectSet{}, false, err
@@ -356,6 +359,9 @@ func (w *subjectWalker) expr(typ, id string, e schema.Expr, depth int) (subjectS
 	case *schema.Ref:
 		return w.node(typ, id, e.Name, depth)
 	case *schema.Arrow:
+		if err := refuseCaveated(w.sc, typ, e.Tupleset); err != nil {
+			return subjectSet{}, false, err
+		}
 		rels, err := w.e.r.ReadDirect(w.rev, typ, id, e.Tupleset)
 		if err != nil {
 			return subjectSet{}, false, err

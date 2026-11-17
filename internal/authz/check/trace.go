@@ -36,8 +36,9 @@ type TraceRole string
 // Trace roles. A node with no role was evaluated but did not decide the
 // answer, for example the false side of a union that was true anyway.
 const (
-	RoleGrant TraceRole = "grant" // on the path that granted access
-	RoleDeny  TraceRole = "deny"  // on a branch that denied access
+	RoleGrant       TraceRole = "grant"       // on the path that granted access
+	RoleDeny        TraceRole = "deny"        // on a branch that denied access
+	RoleConditional TraceRole = "conditional" // on the branches a conditional answer depends on
 )
 
 // TraceNode is one evaluated object#relation, operator or matching
@@ -48,7 +49,15 @@ type TraceNode struct {
 	Relation string    `json:"relation,omitempty"` // relation or permission name, for relation, permission and self nodes
 	Expr     string    `json:"expr,omitempty"`     // the operator's expression, for operator nodes
 	Subject  string    `json:"subject,omitempty"`  // the stored subject that matched, for subject nodes
-	Result   bool      `json:"result"`
+	// Caveat names the caveat of a subject node's relationship. Its
+	// Result is the caveat's: a caveated subject node that is false
+	// matched but its caveat did not hold.
+	Caveat string `json:"caveat,omitempty"`
+	Result bool   `json:"result"`
+	// Conditional marks a result that depends on the caveat parameters
+	// Missing names; Result is then false.
+	Conditional bool     `json:"conditional,omitempty"`
+	Missing     []string `json:"missing,omitempty"`
 	// Tainted marks a result that depended on a cycle cut. It is exact for
 	// the root but would not be reused for the same node entered elsewhere.
 	Tainted bool `json:"tainted,omitempty"`
@@ -82,33 +91,42 @@ type Trace struct {
 // the reasoning instead of a cache hit; results are still written to it.
 // On error the trace is nil.
 func (e *Engine) Explain(ctx context.Context, sc *schema.Schema, rev store.Revision, q Request, maxNodes int) (bool, *Trace, Stats, error) {
+	r, t, st, err := e.ExplainResult(ctx, sc, rev, q, nil, maxNodes)
+	return r.Allowed(), t, st, err
+}
+
+// ExplainResult is Explain with CheckResult's caveat context and
+// three-valued answer.
+func (e *Engine) ExplainResult(ctx context.Context, sc *schema.Schema, rev store.Revision, q Request, caveatCtx map[string]any, maxNodes int) (Result, *Trace, Stats, error) {
 	if maxNodes <= 0 {
 		maxNodes = DefaultTraceNodes
 	}
 	if maxNodes > MaxTraceNodes {
 		maxNodes = MaxTraceNodes
 	}
-	if err := q.Validate(sc); err != nil {
-		return false, nil, Stats{}, err
-	}
 	tr := &tracer{max: maxNodes}
 	tr.cur = &tr.top
-	st := &state{e: e, ctx: ctx, sc: sc, rev: rev, target: q.Subject,
-		memo: map[string]bool{}, active: map[string]bool{}, tr: tr}
-	ok, _, err := st.check(q.ResourceType, q.ResourceID, q.Permission, 0)
+	st := &state{}
+	if err := e.initState(st, ctx, sc, rev, q, caveatCtx, tr); err != nil {
+		return denied, nil, Stats{}, err
+	}
+	r, _, err := st.check(q.ResourceType, q.ResourceID, q.Permission, 0)
 	if err != nil {
-		return false, nil, st.stats, err
+		return denied, nil, st.stats, err
 	}
 	t := &Trace{Nodes: tr.n, Truncated: tr.truncated}
 	if len(tr.top.Children) == 1 {
 		t.Root = tr.top.Children[0]
 		role := RoleDeny
-		if ok {
+		switch r.Permissionship {
+		case Allowed:
 			role = RoleGrant
+		case Conditional:
+			role = RoleConditional
 		}
 		mark(t.Root, role)
 	}
-	return ok, t, st.stats, nil
+	return r, t, st.stats, nil
 }
 
 // tracer builds the tree as a stack: open makes a node the current parent
@@ -141,18 +159,29 @@ func (t *tracer) open(n TraceNode) (node, parent *TraceNode) {
 	return node, parent
 }
 
-func (t *tracer) close(node, parent *TraceNode, ok, tainted bool) {
+func (t *tracer) close(node, parent *TraceNode, r Result, tainted bool) {
 	if node != nil {
-		node.Result = ok
+		node.Result = r.Permissionship == Allowed
+		node.Conditional = r.Permissionship == Conditional
+		node.Missing = r.Missing
 		node.Tainted = tainted
 	}
 	t.cur = parent
 }
 
-// leaf records a node with no children.
+// leaf records a node with no children, keeping its Result and Tainted.
 func (t *tracer) leaf(n TraceNode) {
 	node, parent := t.open(n)
-	t.close(node, parent, n.Result, n.Tainted)
+	if node != nil {
+		node.Result, node.Tainted = n.Result, n.Tainted
+	}
+	t.cur = parent
+}
+
+// leafResult records a node with no children and result r.
+func (t *tracer) leafResult(n TraceNode, r Result, tainted bool) {
+	node, parent := t.open(n)
+	t.close(node, parent, r, tainted)
 }
 
 func (s *state) traceKind(typ, rel string) TraceKind {
@@ -164,7 +193,7 @@ func (s *state) traceKind(typ, rel string) TraceKind {
 
 // traceExpr evaluates an operator expression inside a trace node. A bare
 // reference is not a node of its own: the referenced relation is.
-func (s *state) traceExpr(typ, id string, e schema.Expr, depth int) (bool, bool, error) {
+func (s *state) traceExpr(typ, id string, e schema.Expr, depth int) (Result, bool, error) {
 	var kind TraceKind
 	switch e.(type) {
 	case *schema.Union:
@@ -179,9 +208,9 @@ func (s *state) traceExpr(typ, id string, e schema.Expr, depth int) (bool, bool,
 		return s.evalExpr(typ, id, e, depth)
 	}
 	node, parent := s.tr.open(TraceNode{Kind: kind, Object: typ + ":" + id, Expr: exprString(e)})
-	ok, tainted, err := s.evalExpr(typ, id, e, depth)
-	s.tr.close(node, parent, ok, tainted)
-	return ok, tainted, err
+	r, tainted, err := s.evalExpr(typ, id, e, depth)
+	s.tr.close(node, parent, r, tainted)
+	return r, tainted, err
 }
 
 // exprString prints e with only the parentheses its shape needs, so a
@@ -248,7 +277,8 @@ func subjectString(r store.Relationship) string {
 // false child of an intersection, so when that short circuit happened the
 // last child alone decided; otherwise every child did. An exclusion that
 // is false was decided by its last child too: a false left side or a true
-// right side. When children were omitted the deciding one may not be
+// right side. A conditional result never short-circuits, so every child
+// decided it. When children were omitted the deciding one may not be
 // recorded, so nothing below is marked.
 func mark(n *TraceNode, role TraceRole) {
 	n.Role = role
@@ -260,7 +290,7 @@ func mark(n *TraceNode, role TraceRole) {
 	case KindRelation, KindArrow, KindUnion:
 		lastOnly = n.Result
 	case KindIntersection, KindExclusion:
-		lastOnly = !n.Result
+		lastOnly = !n.Result && !n.Conditional
 	}
 	if lastOnly {
 		if n.Omitted == 0 {

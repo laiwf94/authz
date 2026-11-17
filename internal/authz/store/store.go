@@ -58,6 +58,12 @@ type Update struct {
 	// it. Zero means it never expires. Touching a relationship that exists
 	// with another expiry, or none, replaces its expiry. Deletes ignore it.
 	ExpiresAt time.Time `json:"expires_at,omitzero"`
+	// Caveat, on a touch or create, makes the relationship conditional on
+	// a caveat the schema declares, with the context stored with it. The
+	// relation must list the subject type with that caveat. Touching a
+	// relationship that exists with another caveat or context, or none,
+	// replaces them. Deletes ignore it.
+	Caveat *Caveat `json:"caveat,omitempty"`
 }
 
 // Precondition guards a write: it must hold at the moment of the write.
@@ -120,21 +126,29 @@ type Change struct {
 	// deletes. A relationship that reaches its expiry has no change of its
 	// own: it is simply not visible from that revision on.
 	ExpiresAt time.Time `json:"expires_at,omitzero"`
+	// Caveat is the caveat a touch set, in its stored form; nil for none
+	// and on deletes.
+	Caveat *Caveat    `json:"caveat,omitempty"`
+	cav    *caveatVal // Caveat with its identity; set by Write and recovery
 }
 
-// Stored is a relationship as a snapshot holds it, with its expiry.
+// Stored is a relationship as a snapshot holds it, with its expiry and
+// caveat.
 type Stored struct {
 	Relationship
 	ExpiresAt time.Time // in UTC; zero when it never expires
+	Caveat    *Caveat   // nil when it has none; shared, not to be modified
 }
 
 // version is one life of a relationship: visible from revision created
 // until revision deleted (0: not deleted), and only at revisions whose
 // commit time is before expires (Unix nanoseconds, 0: never expires).
 // Commit times never go backwards, so an expired version stays expired.
+// caveat is the caveat it carries, nil for none.
 type version struct {
 	created, deleted Revision
 	expires          int64
+	caveat           *caveatVal
 }
 
 func (v version) visibleAt(rev Revision, t int64) bool {
@@ -178,7 +192,7 @@ func (e *entry) visibleAt(rev Revision, t int64) (version, bool) {
 }
 
 func (e *entry) stored(v version) Stored {
-	return Stored{Relationship: e.rel, ExpiresAt: expiryTime(v.expires)}
+	return Stored{Relationship: e.rel, ExpiresAt: expiryTime(v.expires), Caveat: v.caveat.caveat()}
 }
 
 // Store is a multi-version relationship store. It is safe for concurrent use.
@@ -345,9 +359,9 @@ func (s *Store) WriteSchema(src string) (Revision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := s.nextTimeLocked()
-	for _, r := range s.aliveLocked(t) {
-		if err := checkAgainst(sc, r); err != nil {
-			return 0, fmt.Errorf("%w: existing relationship %s would no longer be valid: %v", ErrPrecondition, r, err)
+	for _, r := range s.liveLocked(t) {
+		if err := checkAgainstCaveat(sc, r.Relationship, r.Caveat); err != nil {
+			return 0, fmt.Errorf("%w: existing relationship %s would no longer be valid: %v", ErrPrecondition, r.Relationship, err)
 		}
 	}
 	rev := s.head + 1
@@ -402,14 +416,14 @@ func (s *Store) DryRunSchema(src string, limit int) (SchemaDryRun, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out.Previous, out.Revision = s.schema, s.head
-	for _, r := range s.aliveLocked(s.nextTimeLocked()) {
-		err := checkAgainst(sc, r)
+	for _, r := range s.liveLocked(s.nextTimeLocked()) {
+		err := checkAgainstCaveat(sc, r.Relationship, r.Caveat)
 		if err == nil {
 			continue
 		}
 		out.BrokenCount++
 		if len(out.Broken) < limit {
-			out.Broken = append(out.Broken, Broken{Relationship: r, Reason: strings.TrimPrefix(err.Error(), ErrInvalid.Error()+": ")})
+			out.Broken = append(out.Broken, Broken{Relationship: r.Relationship, Reason: strings.TrimPrefix(err.Error(), ErrInvalid.Error()+": ")})
 		}
 	}
 	return out, nil
@@ -426,7 +440,11 @@ func (s *Store) applySchema(rev Revision, t int64, sc *schema.Schema, src string
 // subject. Write applies the same rule to every update.
 func CheckAgainst(sc *schema.Schema, r Relationship) error { return checkAgainst(sc, r) }
 
-func checkAgainst(sc *schema.Schema, r Relationship) error {
+func checkAgainst(sc *schema.Schema, r Relationship) error { return checkAllows(sc, r, "") }
+
+// checkAllows is checkAgainst for a relationship carrying the named caveat
+// ("" for none).
+func checkAllows(sc *schema.Schema, r Relationship, caveat string) error {
 	d, ok := sc.Defs[r.ResourceType]
 	if !ok {
 		return invalid("type %q is not defined in the schema", r.ResourceType)
@@ -438,12 +456,15 @@ func checkAgainst(sc *schema.Schema, r Relationship) error {
 		}
 		return invalid("%q has no relation %q", r.ResourceType, r.Relation)
 	}
-	if !rel.Allows(r.SubjectType, r.SubjectID, r.SubjectRelation) {
+	if !rel.AllowsCaveat(r.SubjectType, r.SubjectID, r.SubjectRelation, caveat) {
 		sub := r.SubjectType
 		if r.SubjectID == "*" {
 			sub += ":*"
 		} else if r.SubjectRelation != "" {
 			sub += "#" + r.SubjectRelation
+		}
+		if caveat != "" {
+			sub += " with " + caveat
 		}
 		allowed := make([]string, len(rel.Allowed))
 		for i, a := range rel.Allowed {
@@ -476,6 +497,7 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 		return 0, invalid("a write can have at most %d preconditions", MaxPreconditions)
 	}
 	seen := make(map[string]bool, len(updates))
+	cavs := make([]*caveatVal, len(updates))
 	for i, u := range updates {
 		if u.Op != OpTouch && u.Op != OpCreate && u.Op != OpDelete {
 			return 0, invalid("update %d: op must be touch, create or delete", i)
@@ -485,6 +507,13 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 		}
 		if err := validExpiry(u.ExpiresAt); err != nil {
 			return 0, fmt.Errorf("update %d: %w", i, err)
+		}
+		if u.Op != OpDelete {
+			cv, err := normalizeCaveat(u.Caveat)
+			if err != nil {
+				return 0, fmt.Errorf("update %d: %w", i, err)
+			}
+			cavs[i] = cv
 		}
 		k := u.Relationship.String()
 		if seen[k] {
@@ -510,7 +539,7 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 		if u.Op == OpDelete {
 			continue // deleting something the schema no longer allows is always fine
 		}
-		if err := checkAgainst(s.schema, u.Relationship); err != nil {
+		if err := checkAgainstCaveat(s.schema, u.Relationship, cavs[i].caveat()); err != nil {
 			return 0, fmt.Errorf("update %d: %w", i, err)
 		}
 	}
@@ -519,19 +548,22 @@ func (s *Store) Write(updates []Update, preconds []Precondition) (Revision, erro
 	}
 
 	var changes []Change
-	for _, u := range updates {
+	for i, u := range updates {
 		cur, alive := s.lookup(u.Relationship).liveAt(t)
 		exp := expiryNano(u.ExpiresAt)
+		cv := cavs[i]
+		touch := Change{Op: OpTouch, Relationship: u.Relationship, ExpiresAt: expiryTime(exp), Caveat: cv.caveat(), cav: cv}
 		switch u.Op {
 		case OpCreate:
 			if alive {
 				return 0, fmt.Errorf("%w: %s already exists", ErrConflict, u.Relationship)
 			}
-			changes = append(changes, Change{Op: OpTouch, Relationship: u.Relationship, ExpiresAt: expiryTime(exp)})
+			changes = append(changes, touch)
 		case OpTouch:
-			// Touching with another expiry, or none, replaces the expiry.
-			if !alive || cur.expires != exp {
-				changes = append(changes, Change{Op: OpTouch, Relationship: u.Relationship, ExpiresAt: expiryTime(exp)})
+			// Touching with another expiry or caveat, or none, replaces
+			// them.
+			if !alive || cur.expires != exp || cur.caveat.id() != cv.id() {
+				changes = append(changes, touch)
 			}
 		case OpDelete:
 			if alive {
@@ -829,7 +861,7 @@ func (s *Store) applyChanges(rev Revision, t int64, changes []Change) {
 				subs[sk] = e
 			}
 			exp := expiryNano(c.ExpiresAt)
-			e.versions = append(e.versions, version{created: rev, expires: exp})
+			e.versions = append(e.versions, version{created: rev, expires: exp, caveat: c.cav})
 			if exp != 0 {
 				s.expiring++
 			}
@@ -912,8 +944,9 @@ func (s *Store) snapshotLocked(rev Revision) (int64, error) {
 	return s.times[rev-s.minRev], nil
 }
 
-// ReadDirect returns the relationships stored on one object relation at a
-// revision, in a stable order.
+// ReadDirect returns the relationships without a caveat stored on one
+// object relation at a revision, in subject order. ReadDirectCaveated
+// returns every relationship, with its caveat.
 func (s *Store) ReadDirect(rev Revision, resourceType, resourceID, relation string) ([]Relationship, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -924,11 +957,38 @@ func (s *Store) ReadDirect(rev Revision, resourceType, resourceID, relation stri
 	subs := s.byType[resourceType][objectKey(resourceID, relation)]
 	out := make([]Relationship, 0, len(subs))
 	for _, e := range subs {
-		if _, ok := e.visibleAt(rev, t); ok {
+		if v, ok := e.visibleAt(rev, t); ok && v.caveat == nil {
 			out = append(out, e.rel)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return subjectKey(out[i]) < subjectKey(out[j]) })
+	return out, nil
+}
+
+// Caveated is a relationship and its caveat (nil for none), as
+// ReadDirectCaveated returns them.
+type Caveated struct {
+	Relationship
+	Caveat *Caveat // shared, not to be modified
+}
+
+// ReadDirectCaveated returns every relationship stored on one object
+// relation at a revision, with its caveat, in subject order.
+func (s *Store) ReadDirectCaveated(rev Revision, resourceType, resourceID, relation string) ([]Caveated, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, err := s.snapshotLocked(rev)
+	if err != nil {
+		return nil, err
+	}
+	subs := s.byType[resourceType][objectKey(resourceID, relation)]
+	out := make([]Caveated, 0, len(subs))
+	for _, e := range subs {
+		if v, ok := e.visibleAt(rev, t); ok {
+			out = append(out, Caveated{Relationship: e.rel, Caveat: v.caveat.caveat()})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return subjectKey(out[i].Relationship) < subjectKey(out[j].Relationship) })
 	return out, nil
 }
 
@@ -1086,17 +1146,8 @@ func (s *Store) WaitForRevision(ctx context.Context, after Revision) error {
 	}
 }
 
-// aliveLocked returns, in text order, the relationships open at the head
-// that have not expired by commit time t.
-func (s *Store) aliveLocked(t int64) []Relationship {
-	var out []Relationship
-	for _, st := range s.liveLocked(t) {
-		out = append(out, st.Relationship)
-	}
-	return out
-}
-
-// liveLocked is aliveLocked with each relationship's expiry.
+// liveLocked returns, in text order, the relationships open at the head
+// that have not expired by commit time t, with their expiry and caveat.
 func (s *Store) liveLocked(t int64) []Stored {
 	var out []Stored
 	for _, objs := range s.byType {
@@ -1130,7 +1181,7 @@ func (s *Store) replay(rec walRecord) error {
 			}
 			s.schema, s.schemaSrc = sc, rec.Schema
 		}
-		changes := make([]Change, 0, len(rec.Rels)+len(rec.Expiring))
+		changes := make([]Change, 0, len(rec.Rels)+len(rec.Expiring)+len(rec.Caveated))
 		for _, r := range rec.Rels {
 			changes = append(changes, Change{Revision: rec.Rev, Op: OpTouch, Relationship: r})
 		}
@@ -1143,6 +1194,23 @@ func (s *Store) replay(rec walRecord) error {
 			}
 			changes = append(changes, Change{Revision: rec.Rev, Op: OpTouch, Relationship: x.Relationship, ExpiresAt: expiryTime(x.ExpiresAt)})
 		}
+		for _, x := range rec.Caveated {
+			if err := x.Relationship.Validate(); err != nil {
+				return fmt.Errorf("checkpoint: %v", err)
+			}
+			if x.ExpiresAt < 0 {
+				return fmt.Errorf("checkpoint: %s has expiry %d", x.Relationship, x.ExpiresAt)
+			}
+			if x.Caveat == nil {
+				return fmt.Errorf("checkpoint: %s is listed as caveated without a caveat", x.Relationship)
+			}
+			cv, err := normalizeCaveat(x.Caveat)
+			if err != nil {
+				return fmt.Errorf("checkpoint: %s: %v", x.Relationship, err)
+			}
+			changes = append(changes, Change{Revision: rec.Rev, Op: OpTouch, Relationship: x.Relationship,
+				ExpiresAt: expiryTime(x.ExpiresAt), Caveat: cv.caveat(), cav: cv})
+		}
 		s.applyChanges(rec.Rev, rec.Time, changes)
 		s.changes = nil
 	case recSchema:
@@ -1152,10 +1220,18 @@ func (s *Store) replay(rec walRecord) error {
 		}
 		s.applySchema(rec.Rev, rec.Time, sc, rec.Schema)
 	case recWrite:
-		for _, c := range rec.Changes {
+		for i, c := range rec.Changes {
 			if err := c.Relationship.Validate(); err != nil {
 				return fmt.Errorf("write record: %v", err)
 			}
+			if c.Op != OpTouch {
+				continue
+			}
+			cv, err := normalizeCaveat(c.Caveat)
+			if err != nil {
+				return fmt.Errorf("write record: %s: %v", c.Relationship, err)
+			}
+			rec.Changes[i].Caveat, rec.Changes[i].cav = cv.caveat(), cv
 		}
 		s.applyChanges(rec.Rev, rec.Time, rec.Changes)
 	default:
