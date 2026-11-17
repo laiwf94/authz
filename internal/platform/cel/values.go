@@ -448,8 +448,17 @@ func toInt(v any) (int64, bool) {
 		}
 		return int64(v), true
 	case json.Number:
-		i, err := v.Int64()
-		return i, err == nil
+		// An integer literal converts exactly, whatever its size; any
+		// other number as encoding/json would decode it into a float64,
+		// so both decodings of a context agree.
+		if i, err := v.Int64(); err == nil {
+			return i, true
+		}
+		f, err := v.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return toInt(f)
 	}
 	return 0, false
 }
@@ -480,8 +489,16 @@ func toUint(v any) (uint64, bool) {
 		}
 		return uint64(v), true
 	case json.Number:
-		u, err := strconv.ParseUint(string(v), 10, 64)
-		return u, err == nil
+		// As in toInt: "-0", "1e3" and "2.0" convert as their float64
+		// values do.
+		if u, err := strconv.ParseUint(string(v), 10, 64); err == nil {
+			return u, true
+		}
+		f, err := v.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return toUint(f)
 	}
 	return 0, false
 }
