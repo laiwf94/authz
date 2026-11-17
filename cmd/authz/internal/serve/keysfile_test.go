@@ -222,9 +222,9 @@ func TestServeKeysFileRotation(t *testing.T) {
 	if code, tokB := s.readAt(tokA); code != 200 || tokB == tokA {
 		t.Fatalf("token from before the rotation: %d, new token differs: %v", code, tokB != tokA)
 	}
-	if len(s.log.logged("key ring rotated")) == 0 {
-		t.Fatalf("rotation not logged:\n%s", s.log)
-	}
+	// The rotation is logged just after the keys file is saved, so the
+	// line can trail the change the test saw (#248).
+	waitUntil(t, "the rotation logged", func() bool { return len(s.log.logged("key ring rotated")) > 0 })
 	s.stop()
 
 	// A restart inside the overlap keeps the saved keys, so tokA still
