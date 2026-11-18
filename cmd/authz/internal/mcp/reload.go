@@ -292,7 +292,7 @@ func (r *reloader) refused(err error) {
 // SetAgents puts in force.
 func sameAgents(a, b *gateway.Config) bool {
 	return reflect.DeepEqual(a.Agents, b.Agents) && reflect.DeepEqual(a.Tokens, b.Tokens) && a.Limits == b.Limits &&
-		slices.EqualFunc(a.Issuers, b.Issuers, sameIssuer)
+		reflect.DeepEqual(a.Resource, b.Resource) && slices.EqualFunc(a.Issuers, b.Issuers, sameIssuer)
 }
 
 // ownAgents is gc without the last n issuers, those of the mcp section:

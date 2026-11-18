@@ -119,6 +119,10 @@ type Error struct {
 	RPC        *jsonrpc.Error
 	Status     int           // 0 means 200
 	RetryAfter time.Duration // sets Retry-After when positive
+	// Challenge is sent in WWW-Authenticate with a 401 or 403. Such an
+	// error keeps its status in a legacy session too: the authorization
+	// specification asks for these statuses in every revision.
+	Challenge *Challenge
 }
 
 func (e *Error) Error() string { return e.RPC.Error() }

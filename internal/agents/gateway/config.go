@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/laiwf94/authz/internal/agents/identity"
 	"github.com/laiwf94/authz/internal/agents/jsonrpc"
+	"github.com/laiwf94/authz/internal/agents/mcp"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/agents/ratelimit"
 	"github.com/laiwf94/authz/internal/platform/keys"
@@ -97,6 +99,73 @@ type Config struct {
 	// Issuers are the external issuers whose signed tokens agents may
 	// present, each with keys from its pinned jwks_uri.
 	Issuers []IssuerConfig `json:"issuers"`
+	// Resource makes the gateway an OAuth protected resource (RFC 9728):
+	// it publishes metadata, challenges point at it, and every signed
+	// token's audience must be its URL.
+	Resource *ResourceConfig `json:"resource"`
+}
+
+// ResourceConfig is the gateway's protected resource identity.
+//
+//	{"url": "https://mcp.example.com/mcp",
+//	 "authorization_servers": ["https://idp.example.com"],
+//	 "scopes_supported": ["tools.read"], "name": "Example tools"}
+type ResourceConfig struct {
+	// URL is the resource identifier (RFC 8707): the canonical https URL
+	// agents reach the MCP endpoint at. Tokens must carry it as audience.
+	URL string `json:"url"`
+	// AuthorizationServers are the issuer identifiers published in the
+	// metadata; empty publishes the configured issuers.
+	AuthorizationServers []string `json:"authorization_servers"`
+	ScopesSupported      []string `json:"scopes_supported"`
+	Name                 string   `json:"name"`
+	Documentation        string   `json:"documentation"`
+}
+
+// NewResource returns the protected resource c describes, with
+// authorization_servers defaulting to its issuers; nil without a resource
+// section.
+func (c *Config) NewResource() (*mcp.Resource, error) {
+	if c.Resource == nil {
+		return nil, nil
+	}
+	r := c.Resource
+	as := r.AuthorizationServers
+	if len(as) == 0 {
+		for _, ic := range c.Issuers {
+			if !slices.Contains(as, ic.Issuer) {
+				as = append(as, ic.Issuer)
+			}
+		}
+		if len(as) > mcp.MaxAuthorizationServers {
+			as = as[:mcp.MaxAuthorizationServers]
+		}
+	}
+	res, err := mcp.NewResource(mcp.ResourceMetadata{Resource: r.URL, AuthorizationServers: as,
+		ScopesSupported: r.ScopesSupported, Name: r.Name, Documentation: r.Documentation})
+	if err != nil {
+		return nil, fmt.Errorf("resource: %w", err)
+	}
+	return res, nil
+}
+
+// checkAudiences binds every signed token to the resource: with a
+// resource section, tokens.audience and each issuer's audience must be its
+// URL, so a token minted for another resource is refused (RFC 8707).
+func (c *Config) checkAudiences() error {
+	if c.Resource == nil {
+		return nil
+	}
+	want := c.Resource.URL
+	if c.Tokens != nil && c.Tokens.Audience != want {
+		return fmt.Errorf("tokens.audience %q is not the resource %q", c.Tokens.Audience, want)
+	}
+	for i, ic := range c.Issuers {
+		if ic.Audience != want {
+			return fmt.Errorf("issuers[%d]: audience %q is not the resource %q", i, ic.Audience, want)
+		}
+	}
+	return nil
 }
 
 // ParseConfig validates a configuration document. getenv resolves upstream
@@ -137,6 +206,14 @@ func ParseConfig(src []byte, getenv func(string) string) (*Config, error) {
 		}
 	}
 	if err := CheckIssuers(c.Issuers); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	if c.Resource != nil {
+		if _, err := c.NewResource(); err != nil {
+			return nil, fmt.Errorf("config: %w", err)
+		}
+	}
+	if err := c.checkAudiences(); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	a := &c.Approvals

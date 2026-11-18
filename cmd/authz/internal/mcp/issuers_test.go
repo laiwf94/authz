@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -419,4 +420,84 @@ func TestRunIssuers(t *testing.T) {
 		!strings.Contains(out.String(), "holds no PEM certificate") {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
+}
+
+// A resource section in the agents config: the served metadata, the
+// challenge and the audience binding follow it across reloads.
+func TestServeFileResource(t *testing.T) {
+	is := newTestIssuer(t)
+	f := newFileSetup(t)
+	agentsWith := func(resource map[string]any) string {
+		var c map[string]any
+		if err := json.Unmarshal([]byte(f.agentsDoc(t, false, 0)), &c); err != nil {
+			t.Fatal(err)
+		}
+		c["tokens"].(map[string]any)["audience"] = "https://mcp.test"
+		c["resource"] = resource
+		b, _ := json.Marshal(c)
+		return string(b)
+	}
+	f.write(t, f.agents, agentsWith(map[string]any{"url": "https://mcp.test", "name": "Test tools"}))
+	f.section["issuers"] = toMap(t, []gateway.IssuerConfig{is.config("/jwks")})
+	f.writeDoc(t, nil)
+	r := f.start(t)
+	metadata := func() (int, string) {
+		res, err := http.Get(r.gw + "/.well-known/oauth-protected-resource")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(b)
+	}
+	if code, doc := metadata(); code != 200 || doc != `{"authorization_servers":["https://idp.test"],"bearer_methods_supported":["header"],"resource":"https://mcp.test","resource_name":"Test tools"}`+"\n" {
+		t.Fatalf("metadata: %d %s", code, doc)
+	}
+	challenge := func() string {
+		req, _ := http.NewRequest("POST", r.gw+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+		req.Header.Set("Content-Type", "application/json")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != 401 {
+			t.Fatalf("status %d", res.StatusCode)
+		}
+		return res.Header.Get("WWW-Authenticate")
+	}
+	if got := challenge(); got != `Bearer realm="toolgate", resource_metadata="https://mcp.test/.well-known/oauth-protected-resource"` {
+		t.Fatalf("challenge %s", got)
+	}
+	tok := is.token(t, "ci-bot")
+	if res := readFile(t, r, tok); !ok(res) {
+		t.Fatalf("issuer token: %v", res)
+	}
+
+	// The resource changes with the agents config.
+	f.write(t, f.agents, agentsWith(map[string]any{"url": "https://mcp.test", "name": "Renamed", "scopes_supported": []string{"files:read"}}))
+	within(t, "resource reloaded", func() bool { _, doc := metadata(); return strings.Contains(doc, `"resource_name":"Renamed"`) })
+	if got := challenge(); !strings.HasSuffix(got, `, scope="files:read"`) {
+		t.Fatalf("challenge after the reload: %s", got)
+	}
+	within(t, "reload logged", func() bool {
+		return strings.Contains(r.logs.String(), `"msg":"configuration reloaded","applied":["config"]`)
+	})
+
+	// A section issuer for another audience is refused; the running
+	// issuer stays.
+	other := is.config("/jwks")
+	other.Audience = "https://other.test"
+	f.writeDoc(t, map[string]any{"issuers": toMap(t, []gateway.IssuerConfig{other})})
+	within(t, "unbound issuer refused", func() bool {
+		return strings.Contains(r.logs.String(), `audience \"https://other.test\" is not the resource \"https://mcp.test\"`)
+	})
+	if res := readFile(t, r, tok); !ok(res) {
+		t.Fatalf("issuer token after the refused change: %v", res)
+	}
+
+	// Without the section the metadata is gone.
+	f.write(t, f.agents, agentsWith(nil))
+	within(t, "resource removed", func() bool { code, _ := metadata(); return code == 404 })
+	r.stop(t)
 }

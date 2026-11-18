@@ -247,6 +247,25 @@ the same URL, networks and CA certificates; a reload keeps a client and the
 keys it holds while those are unchanged, and the clients stop with the
 server.
 
+The `resource` section makes the gateway an OAuth protected resource, as
+the MCP authorization specification asks in both protocol eras. Its `url`
+is the resource identifier (RFC 8707), written in canonical form: https
+(http only on loopback), lower-case scheme and host, no default port,
+query, fragment or trailing slash. With it, `tokens.audience` and every
+issuer's `audience`, the section's included, must be that URL, so a token
+an authorization server minted for another resource is refused. The
+gateway serves the RFC 9728 document at the path the URL inserts
+`/.well-known/oauth-protected-resource` into and at that path's root:
+`resource`, `authorization_servers` (the configured issuers unless the
+section lists its own), `scopes_supported`, `bearer_methods_supported`,
+`resource_name` and `resource_documentation`. Every 401 carries
+`WWW-Authenticate: Bearer realm="toolgate", resource_metadata="…",
+scope="…"`, with `error="invalid_token"` for a bad token and
+`error="invalid_request"` for another scheme, and nothing about why the
+token failed. A 403 with a challenge (`insufficient_scope` with the scopes
+needed) keeps its status inside a 2025 session, where other errors are
+sent with 200. The section reloads with the agents.
+
 ## Human approval
 
 When an allowed rule says `requires_approval`, the gateway computes a binding:

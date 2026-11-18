@@ -166,6 +166,10 @@ func New(opt Options) (*Gateway, error) {
 		approvals: approvals,
 		ups:       map[string]*upstream{},
 	}
+	res, err := c.NewResource()
+	if err != nil {
+		return nil, err
+	}
 	g.agents.Store(newAgentSet(c, opt.Auth))
 	for _, uc := range c.Upstreams {
 		h := http.Header{}
@@ -191,6 +195,7 @@ func New(opt Options) (*Gateway, error) {
 		MaxBodyBytes:   MaxBodyBytes,
 		Log:            opt.Log,
 		Now:            opt.Now,
+		Resource:       res,
 	})
 	g.m.Gauge("toolgate_approvals_pending", "Approval requests awaiting a decision.", func() float64 { return float64(g.approvals.PendingCount()) })
 	g.m.Gauge("toolgate_tools_quarantined", "Tools whose definition changed and awaits review.", func() float64 { return float64(opt.Pins.QuarantinedCount()) })
@@ -208,6 +213,11 @@ func (g *Gateway) Handler() http.Handler {
 	hs := &httpx.Server{Name: "gateway", Prefix: "toolgate", Log: g.log, Metrics: g.m}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", hs.Wrap("/mcp", g.server.ServeHTTP))
+	// Protected resource metadata (RFC 9728), at the root and at the
+	// path the resource URL inserts it in; 404 without a resource section.
+	meta := hs.Wrap("/.well-known/oauth-protected-resource", g.server.MetadataHandler())
+	mux.Handle(mcp.MetadataWellKnown, meta)
+	mux.Handle(mcp.MetadataWellKnown+"/", meta)
 	mux.Handle("GET /healthz", hs.Wrap("/healthz", g.healthz))
 	mux.Handle("/", hs.Wrap("other", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "no such endpoint")
@@ -255,11 +265,18 @@ func (s *agentSet) limitsFor(agent string) Limits {
 // started with; rate-limit buckets and daily quotas are kept per agent, so
 // an agent that stays keeps what it has used. The upstreams and approval
 // settings of c are not used: they are fixed when the gateway is built.
+// Its resource section is put in force with the agents, since the
+// audiences it binds belong to them.
 func (g *Gateway) SetAgents(c *Config, auth *identity.Authenticator) error {
 	if c == nil || auth == nil {
 		return errors.New("gateway: SetAgents needs a config and an authenticator")
 	}
+	res, err := c.NewResource()
+	if err != nil {
+		return err
+	}
 	g.agents.Store(newAgentSet(c, auth))
+	g.server.SetResource(res)
 	return nil
 }
 
@@ -271,11 +288,27 @@ func (g *Gateway) count(name, labels, help string) { g.m.Counter(name, labels, h
 // agent's overall request rate.
 func (g *Gateway) Authenticate(r *http.Request) (any, string, error) {
 	set := g.agents.Load()
-	id, err := set.auth.Authenticate(httpx.Bearer(r))
+	cred := httpx.Bearer(r)
+	id, err := set.auth.Authenticate(cred)
 	if err != nil {
 		g.count("toolgate_auth_failures_total", "", "Requests with a missing or invalid credential.")
 		g.log.Warn("authentication failed", "request_id", httpx.RequestID(r.Context()), "reason", err.Error())
-		return nil, "", mcp.NewError(http.StatusUnauthorized, mcp.CodeUnauthenticated, "missing or invalid credential")
+		e := mcp.NewError(http.StatusUnauthorized, mcp.CodeUnauthenticated, "missing or invalid credential")
+		// RFC 6750 §3.1: a request without credentials gets a challenge
+		// without an error code, one with another scheme invalid_request,
+		// and a bad credential invalid_token, without saying what was
+		// wrong with it.
+		switch {
+		case cred != "":
+			e.Challenge = &mcp.Challenge{Error: mcp.ChallengeInvalidToken,
+				Description: "the access token is malformed, expired, revoked or not for this resource"}
+		case r.Header.Get("Authorization") != "":
+			e.Challenge = &mcp.Challenge{Error: mcp.ChallengeInvalidRequest,
+				Description: "send the access token as Authorization: Bearer"}
+		default:
+			e.Challenge = &mcp.Challenge{}
+		}
+		return nil, "", e
 	}
 	if ok, wait := g.limiter.Take(platformlimit.Key("agent", id.AgentID), set.limitsFor(id.AgentID).agent()); !ok {
 		g.count("toolgate_rate_limited_total", `scope="agent"`, "Requests refused by a rate limit.")

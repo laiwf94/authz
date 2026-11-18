@@ -36,6 +36,7 @@ TARGETS=(
   "./internal/agents/identity FuzzAuthenticateIssuers 20s"
   "./internal/agents/identity FuzzIssuerClaims 20s"
   "./internal/agents/identity FuzzParseJWKS 20s"
+  "./internal/agents/mcp FuzzCanonicalResource 20s"
   "./internal/platform/audit FuzzVerify 20s"
   "./internal/platform/audit FuzzParseFilter 20s"
   "./internal/platform/audit FuzzParseIndex 20s"

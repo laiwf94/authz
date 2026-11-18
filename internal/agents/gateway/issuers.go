@@ -122,6 +122,9 @@ func (c *Config) WithIssuers(more []IssuerConfig) (*Config, error) {
 	if err := CheckIssuers(out.Issuers); err != nil {
 		return nil, err
 	}
+	if err := out.checkAudiences(); err != nil {
+		return nil, err
+	}
 	return &out, nil
 }
 

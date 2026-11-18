@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/laiwf94/authz/internal/agents/httpx"
@@ -55,6 +56,12 @@ type ServerConfig struct {
 	MaxSessionsPerKey int
 	Log               *slog.Logger
 	Now               func() time.Time
+	// Realm is the realm of Bearer challenges; empty is "toolgate".
+	Realm string
+	// Resource makes the server a protected resource: 401 and 403
+	// challenges carry resource_metadata and its scopes, and
+	// MetadataHandler serves its document. SetResource replaces it.
+	Resource *Resource
 }
 
 // Server serves MCP over Streamable HTTP at a single endpoint.
@@ -62,6 +69,7 @@ type Server struct {
 	cfg      ServerConfig
 	origins  map[string]bool
 	sessions *sessionStore
+	resource atomic.Pointer[Resource]
 }
 
 // NewServer applies defaults and returns a server.
@@ -87,12 +95,31 @@ func NewServer(cfg ServerConfig) *Server {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.Realm == "" {
+		cfg.Realm = "toolgate"
+	}
 	s := &Server{cfg: cfg, origins: map[string]bool{},
 		sessions: newSessionStore(cfg.SessionIdle, cfg.MaxSessions, cfg.MaxSessionsPerKey, cfg.Now)}
+	s.resource.Store(cfg.Resource)
 	for _, o := range cfg.AllowedOrigins {
 		s.origins[strings.ToLower(o)] = true
 	}
 	return s
+}
+
+// SetResource puts r in force for the challenges and the metadata
+// document of requests that start after it; nil stops being a protected
+// resource.
+func (s *Server) SetResource(r *Resource) { s.resource.Store(r) }
+
+// Resource returns the protected resource in force, or nil.
+func (s *Server) Resource() *Resource { return s.resource.Load() }
+
+// MetadataHandler serves the protected resource metadata of the resource
+// in force (see Resource.ServeHTTP), or 404 without one. Mount it at
+// MetadataWellKnown and below it.
+func (s *Server) MetadataHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { s.resource.Load().ServeHTTP(w, r) }
 }
 
 // SessionCount returns the number of open legacy sessions.
@@ -110,8 +137,14 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (s *Server) writeError(w http.ResponseWriter, status int, id json.RawMessage, e *jsonrpc.Error) {
-	if status == http.StatusUnauthorized {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="toolgate"`)
+	s.writeChallenge(w, status, id, e, nil)
+}
+
+// writeChallenge sends an error; a 401, and a 403 with a challenge, carry
+// WWW-Authenticate.
+func (s *Server) writeChallenge(w http.ResponseWriter, status int, id json.RawMessage, e *jsonrpc.Error, c *Challenge) {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden && c != nil {
+		w.Header().Set("WWW-Authenticate", s.resource.Load().WWWAuthenticate(s.cfg.Realm, c))
 	}
 	s.writeJSON(w, status, jsonrpc.ErrorResponse(id, e))
 }
@@ -130,7 +163,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, id json.RawMessage
 			secs := int((me.RetryAfter + time.Second - 1) / time.Second)
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
 		}
-		s.writeError(w, status, id, me.RPC)
+		s.writeChallenge(w, status, id, me.RPC, me.Challenge)
 	case errors.As(err, &je):
 		s.writeError(w, http.StatusOK, id, je)
 	default:
@@ -442,9 +475,12 @@ func statusFor(c *Caller, status int) int {
 
 // legacyStatus sends a handler's error with HTTP 200 on a legacy session.
 // Retry-After is kept, so a rate-limited client still learns when to retry.
+// A 401 or 403 with a challenge keeps its status: clients of every
+// revision start authorization, or step up their scopes, from it.
 func legacyStatus(c *Caller, err error) error {
 	var me *Error
-	if c.Legacy && errors.As(err, &me) && me.Status != 0 && me.Status != http.StatusOK {
+	if c.Legacy && errors.As(err, &me) && me.Status != 0 && me.Status != http.StatusOK &&
+		(me.Challenge == nil || me.Status != http.StatusUnauthorized && me.Status != http.StatusForbidden) {
 		cp := *me
 		cp.Status = http.StatusOK
 		return &cp
