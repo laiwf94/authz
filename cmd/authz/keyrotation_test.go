@@ -179,7 +179,9 @@ func (f *rotationFixture) checks(w int, stop *atomic.Bool) {
 	}
 }
 
-// agentToken is a signed agent token and when it was minted.
+// agentToken is a signed agent token and when its mint started: the key it
+// is signed with was current then, so its overlap runs from that moment,
+// however long the mint process took to start and finish.
 type agentToken struct {
 	tok string
 	at  time.Time
@@ -190,13 +192,14 @@ type agentToken struct {
 // to the MCP clients.
 func (f *rotationFixture) mints(t *testing.T, latest *atomic.Pointer[agentToken], stop *atomic.Bool) {
 	for !stop.Load() {
+		started := time.Now()
 		code, out, errOut := runToEnd(t, "mcp token mint -sub ci-bot -scope s -ttl 1m", f.p.env...)
 		tok := strings.TrimSpace(out)
 		if code != 0 || strings.Count(tok, ".") != 2 {
 			f.fail("token mint: exit %d: %s", code, errOut)
 			return
 		}
-		latest.Store(&agentToken{tok, time.Now()})
+		latest.Store(&agentToken{tok, started})
 		time.Sleep(150 * time.Millisecond)
 	}
 }
@@ -277,11 +280,12 @@ func TestRunRotatesEveryKey(t *testing.T) {
 		latest atomic.Pointer[agentToken]
 		wg     sync.WaitGroup
 	)
+	started := time.Now()
 	code, out, errOut := runToEnd(t, "mcp token mint -sub ci-bot -scope s -ttl 1m", p.env...)
 	if code != 0 {
 		t.Fatalf("token mint: exit %d: %s", code, errOut)
 	}
-	latest.Store(&agentToken{strings.TrimSpace(out), time.Now()})
+	latest.Store(&agentToken{strings.TrimSpace(out), started})
 
 	for range 2 {
 		wg.Go(func() { f.logins(&stop) })
