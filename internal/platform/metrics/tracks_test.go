@@ -30,6 +30,7 @@ func registerTracks(r *Registry) {
 	}
 	r.Counter("grantd_check_dispatches_total", "", "object#relation evaluations across all checks.").Add(17)
 	r.Counter("grantd_check_cache_hits_total", "", "Check sub-results served from the cache.").Add(5)
+	r.Counter("grantd_check_caveats_total", "", "Caveat expressions evaluated across all checks.").Add(3)
 
 	// wicket: internal/authn/server.
 	r.Gauge("wicket_sessions", "Sessions held in memory.", func() float64 { return 7 })

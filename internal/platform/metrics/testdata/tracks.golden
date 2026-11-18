@@ -7,6 +7,9 @@ grantd_audit_records_total{event="relationships.write"} 3
 # HELP grantd_check_cache_hits_total Check sub-results served from the cache.
 # TYPE grantd_check_cache_hits_total counter
 grantd_check_cache_hits_total 5
+# HELP grantd_check_caveats_total Caveat expressions evaluated across all checks.
+# TYPE grantd_check_caveats_total counter
+grantd_check_caveats_total 3
 # HELP grantd_check_dispatches_total object#relation evaluations across all checks.
 # TYPE grantd_check_dispatches_total counter
 grantd_check_dispatches_total 17

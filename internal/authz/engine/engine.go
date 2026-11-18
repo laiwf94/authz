@@ -31,7 +31,9 @@ import (
 // snapshot it used; every write reports the snapshot at which it is
 // visible. Implementations are safe for concurrent use.
 type Engine interface {
-	// Check reports whether a subject has a permission on one object.
+	// Check reports whether a subject has a permission on one object:
+	// allowed, denied, or conditional on caveat parameters that neither
+	// the request's context nor the relationships' stored contexts supply.
 	Check(ctx context.Context, req CheckRequest) (CheckResult, error)
 	// CheckBulk answers up to MaxBulkChecks checks at one snapshot. A check
 	// that is invalid on its own (an unknown type, say) is answered with an
@@ -121,27 +123,37 @@ func invalid(format string, args ...any) error { return argError(fmt.Sprintf(for
 func InvalidArgument(format string, args ...any) error { return invalid(format, args...) }
 
 // CheckRequest is one permission check. Subject may be a userset
-// (group:eng#member).
+// (group:eng#member). Context holds values for the parameters of the
+// caveats the check reaches (check.Engine.CheckResult); the context stored
+// with a caveated relationship wins over it. It is at most
+// check.MaxContextSize bytes of JSON, and nil is no context.
 type CheckRequest struct {
 	ResourceType string
 	ResourceID   string
 	Permission   string // relation or permission name
 	Subject      store.Subject
 	Consistency  Consistency
+	Context      map[string]any
 }
 
-// CheckResult answers a CheckRequest.
+// CheckResult answers a CheckRequest. Allowed is Permissionship ==
+// check.Allowed; a conditional answer is not allowed, and Missing names,
+// sorted, the caveat parameters it depends on.
 type CheckResult struct {
-	Allowed bool
-	At      Snapshot
+	Allowed        bool
+	Permissionship check.Permissionship
+	Missing        []string
+	At             Snapshot
 }
 
-// CheckItem is one check of a bulk request.
+// CheckItem is one check of a bulk request, with its own caveat context
+// as in CheckRequest.
 type CheckItem struct {
 	ResourceType string
 	ResourceID   string
 	Permission   string
 	Subject      store.Subject
+	Context      map[string]any
 }
 
 // CheckBulkRequest is a set of checks answered at one snapshot.
@@ -156,11 +168,15 @@ type CheckBulkResult struct {
 	At      Snapshot
 }
 
-// ItemResult is the answer to one check of a bulk request. Err is set,
-// and Allowed false, when that check alone was invalid or too expensive.
+// ItemResult is the answer to one check of a bulk request, as a
+// CheckResult gives it. Err is set, Allowed false and Permissionship
+// check.Denied, when that check alone was invalid, too expensive or its
+// caveat failed (check.ErrCaveat).
 type ItemResult struct {
-	Allowed bool
-	Err     error
+	Allowed        bool
+	Permissionship check.Permissionship
+	Missing        []string
+	Err            error
 }
 
 // LookupResourcesRequest asks which objects of ResourceType Subject has
@@ -295,7 +311,8 @@ type Options struct {
 	// shared snapshot for its HTTP handlers and its in-process callers.
 	Snapshot func() store.Revision
 	// Metrics receives the check metrics (grantd_check_duration_seconds,
-	// grantd_check_dispatches_total, grantd_check_cache_hits_total); nil
+	// grantd_check_dispatches_total, grantd_check_cache_hits_total,
+	// and, from the first caveat evaluated, grantd_check_caveats_total); nil
 	// keeps them in a private registry.
 	Metrics *metrics.Registry
 }
@@ -311,6 +328,7 @@ type Local struct {
 	checkTime  *metrics.Histogram
 	dispatches *metrics.Counter
 	cacheHits  *metrics.Counter
+	metrics    *metrics.Registry
 
 	quantum  time.Duration
 	snapMu   sync.Mutex
@@ -334,6 +352,7 @@ func New(opts Options) (*Local, error) {
 		checkTime:  m.Histogram("grantd_check_duration_seconds", "", "Time to evaluate one check."),
 		dispatches: m.Counter("grantd_check_dispatches_total", "", "object#relation evaluations across all checks."),
 		cacheHits:  m.Counter("grantd_check_cache_hits_total", "", "Check sub-results served from the cache."),
+		metrics:    m,
 	}
 	if e.quantum <= 0 {
 		e.quantum = DefaultQuantum
@@ -411,13 +430,18 @@ func (e *Local) resolve(c Consistency) (store.Revision, error) {
 }
 
 // run evaluates one check and records its metrics.
-func (e *Local) run(ctx context.Context, sc *schema.Schema, rev store.Revision, q check.Request) (bool, error) {
+func (e *Local) run(ctx context.Context, sc *schema.Schema, rev store.Revision, q check.Request, caveatCtx map[string]any) (check.Result, error) {
 	start := time.Now()
-	ok, stats, err := e.eng.Check(ctx, sc, rev, q)
+	r, stats, err := e.eng.CheckResult(ctx, sc, rev, q, caveatCtx)
 	e.checkTime.Observe(time.Since(start))
 	e.dispatches.Add(uint64(stats.Dispatches))
 	e.cacheHits.Add(uint64(stats.CacheHits))
-	return ok, err
+	if stats.Caveats > 0 {
+		// Registered at the first caveat, so a server whose schema has
+		// none exposes exactly grantd's metrics.
+		e.metrics.Counter("grantd_check_caveats_total", "", "Caveat expressions evaluated across all checks.").Add(uint64(stats.Caveats))
+	}
+	return r, err
 }
 
 // Check implements Engine.
@@ -427,12 +451,12 @@ func (e *Local) Check(ctx context.Context, req CheckRequest) (CheckResult, error
 		return CheckResult{}, err
 	}
 	sc, _ := e.st.Schema()
-	ok, err := e.run(ctx, sc, rev, check.Request{ResourceType: req.ResourceType, ResourceID: req.ResourceID,
-		Permission: req.Permission, Subject: req.Subject})
+	r, err := e.run(ctx, sc, rev, check.Request{ResourceType: req.ResourceType, ResourceID: req.ResourceID,
+		Permission: req.Permission, Subject: req.Subject}, req.Context)
 	if err != nil {
 		return CheckResult{}, err
 	}
-	return CheckResult{Allowed: ok, At: e.at(rev)}, nil
+	return CheckResult{Allowed: r.Allowed(), Permissionship: r.Permissionship, Missing: r.Missing, At: e.at(rev)}, nil
 }
 
 // CheckBulk implements Engine. An empty request resolves the snapshot and
@@ -448,8 +472,8 @@ func (e *Local) CheckBulk(ctx context.Context, req CheckBulkRequest) (CheckBulkR
 	sc, _ := e.st.Schema()
 	results := make([]ItemResult, len(req.Items))
 	for i, it := range req.Items {
-		ok, err := e.run(ctx, sc, rev, check.Request{ResourceType: it.ResourceType, ResourceID: it.ResourceID,
-			Permission: it.Permission, Subject: it.Subject})
+		r, err := e.run(ctx, sc, rev, check.Request{ResourceType: it.ResourceType, ResourceID: it.ResourceID,
+			Permission: it.Permission, Subject: it.Subject}, it.Context)
 		if err != nil {
 			if ctx.Err() != nil {
 				return CheckBulkResult{}, ctx.Err()
@@ -460,7 +484,7 @@ func (e *Local) CheckBulk(ctx context.Context, req CheckBulkRequest) (CheckBulkR
 			results[i].Err = err
 			continue
 		}
-		results[i].Allowed = ok
+		results[i] = ItemResult{Allowed: r.Allowed(), Permissionship: r.Permissionship, Missing: r.Missing}
 	}
 	return CheckBulkResult{Results: results, At: e.at(rev)}, nil
 }

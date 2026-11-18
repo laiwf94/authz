@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/laiwf94/authz/internal/authz/check"
 	"github.com/laiwf94/authz/internal/authz/engine"
@@ -404,7 +405,7 @@ func TestNewFake(t *testing.T) {
 	ra, _ := a.Check(bg, engine.CheckRequest{ResourceType: "doc", ResourceID: "plan", Permission: "view", Subject: store.Subject{Type: "user", ID: "alice"}})
 	rb, err := b.Check(bg, engine.CheckRequest{ResourceType: "doc", ResourceID: "plan", Permission: "view",
 		Subject: store.Subject{Type: "user", ID: "alice"}, Consistency: exact(ra.At)})
-	if err != nil || ra != rb {
+	if err != nil || !reflect.DeepEqual(ra, rb) {
 		t.Fatalf("fakes differ: %+v and %+v, %v", ra, rb, err)
 	}
 	if rev, err := a.Tokens().Decode(ra.At.Token); err != nil || rev != ra.At.Revision {
@@ -485,4 +486,22 @@ func TestFakeLimits(t *testing.T) {
 	wantErr(t, "check of a very long chain", err, check.ErrTooMuchWork)
 	_, err = f.LookupSubjects(bg, engine.LookupSubjectsRequest{ResourceType: "folder", ResourceID: "f0", Permission: "view", SubjectType: "user"})
 	wantErr(t, "lookup subjects of a very long chain", err, check.ErrTooMuchWork)
+}
+
+// The fake keeps no caveats or expiry, so it refuses writes that set
+// them rather than store a relationship that grants more than it should.
+// Deletes ignore both, as the store's do.
+func TestFakeRefusesCaveatsAndExpiry(t *testing.T) {
+	f, err := NewFake(SharingSchema, SharingRelationships...)
+	ok(t, err)
+	r := relationship(t, "doc:plan#viewer@user:zed")
+	for _, u := range []store.Update{
+		{Op: store.OpTouch, Relationship: r, Caveat: &store.Caveat{Name: "c"}},
+		{Op: store.OpCreate, Relationship: r, ExpiresAt: time.Now().Add(time.Hour)},
+	} {
+		_, err := f.Write(bg, engine.WriteRequest{Updates: []store.Update{u}})
+		wantErr(t, "a write with a caveat or expiry", err, engine.ErrInvalidArgument)
+	}
+	_, err = f.Write(bg, engine.WriteRequest{Updates: []store.Update{{Op: store.OpDelete, Relationship: r, ExpiresAt: time.Now()}}})
+	ok(t, err)
 }

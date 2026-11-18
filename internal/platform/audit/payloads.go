@@ -39,6 +39,10 @@ type CheckDecided struct {
 	Principal string `json:"principal"` // who was checked, "user:alice"
 	Revision  string `json:"revision"`  // the zed token it was checked at
 	Bulk      int    `json:"bulk,omitempty"`
+	// Conditional marks a deny whose answer depended on caveat
+	// parameters the check did not supply; Missing names them.
+	Conditional bool     `json:"conditional,omitempty"`
+	Missing     []string `json:"missing,omitempty"`
 }
 
 // --- authn track (wicket, authz gateway) ---

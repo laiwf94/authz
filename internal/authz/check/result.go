@@ -176,6 +176,15 @@ type requestContext struct {
 	hash string         // "-" for none
 }
 
+// ValidateContext reports whether ctx is acceptable as a check's caveat
+// context: it encodes as JSON, within MaxContextSize. The error matches
+// store.ErrInvalid. CheckResult runs the same validation; other engines
+// use this to refuse the same contexts.
+func ValidateContext(ctx map[string]any) error {
+	_, err := newRequestContext(ctx)
+	return err
+}
+
 func newRequestContext(ctx map[string]any) (requestContext, error) {
 	if len(ctx) == 0 {
 		return requestContext{hash: "-"}, nil

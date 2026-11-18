@@ -394,15 +394,15 @@ The authorization API (`authz serve`). All `/v1` endpoints take `Authorization: 
 |---|---|
 | `PUT /v1/schema` | Replace the schema. Refused if existing data would break it. With `?dry_run=true` it writes nothing and lists the `changes`, the `affected_permissions` and the `breaking_relationships` (up to `limit`, at most 1,000, with `breaking_count` for all). |
 | `GET /v1/schema` | Current schema in canonical form. |
-| `POST /v1/relationships/write` | Atomic batch of `touch` / `create` / `delete`, with optional preconditions. Returns `written_at`. |
+| `POST /v1/relationships/write` | Atomic batch of `touch` / `create` / `delete`, with optional preconditions. A touch or create may set `expires_at` (RFC 3339) and a `caveat` (`{"name":...,"context":{...}}`) the schema declares. Returns `written_at`. |
 | `POST /v1/relationships/read` | Filtered, paged read at a snapshot. |
 | `POST /v1/relationships/delete` | Delete everything matching a filter in one revision, up to `limit` (at most 1,000), with optional preconditions; `allow_partial` deletes the first `limit` in text order and answers `partial: true`. Returns `deleted` and `deleted_at`. |
-| `POST /v1/check` | One permission check. |
-| `POST /v1/check/bulk` | Up to 100 checks at one snapshot. |
+| `POST /v1/check` | One permission check, with an optional caveat `context`. An answer that depends on caveat parameters nobody supplied is `{"allowed":false,"conditional":true,"missing":[...]}`. |
+| `POST /v1/check/bulk` | Up to 100 checks at one snapshot, each with its own `context`. |
 | `POST /v1/lookup/resources` | Objects of a type the subject can access, paged. |
 | `POST /v1/lookup/subjects` | Subjects of a type (or `group#member` usersets) that hold a permission on one object, paged; a wildcard comes back as `user:*` with the IDs it `excluded`. |
 | `POST /v1/expand` | Who holds a permission on one object, as a userset tree; `recursive` follows usersets, `max_nodes` bounds it. |
-| `POST /v1/watch` | Changes after a token; waits up to 30 s for new ones. |
+| `POST /v1/watch` | Changes after a token, with the `expires_at` and `caveat` each touch set; waits up to 30 s for new ones. |
 | `GET /healthz`, `GET /metrics` | Health (no auth) and Prometheus metrics. |
 
 Every read takes an optional `consistency`:

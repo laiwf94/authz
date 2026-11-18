@@ -261,6 +261,38 @@ func (c *contract) check(t *testing.T) {
 		_, err := e.Check(bg, tc.req)
 		wantErr(t, tc.name, err, tc.want)
 	}
+
+	// A caveat context changes nothing where no caveat is stored, and the
+	// answer's permissionship agrees with Allowed. A context too large to
+	// keep is refused, alone and in a bulk check.
+	big := map[string]any{"pad": strings.Repeat("x", check.MaxContextSize)}
+	for _, sub := range []string{"user:alice", "user:sam"} {
+		req := engine.CheckRequest{ResourceType: "doc", ResourceID: "plan", Permission: "view", Subject: subject(t, sub), Consistency: cons}
+		plain, err := e.Check(bg, req)
+		ok(t, err)
+		req.Context = map[string]any{"client_ip": "10.0.0.1", "n": 3}
+		with, err := e.Check(bg, req)
+		ok(t, err)
+		want := check.Denied
+		if plain.Allowed {
+			want = check.Allowed
+		}
+		if with.Allowed != plain.Allowed || with.Permissionship != want || plain.Permissionship != want || len(with.Missing) > 0 {
+			t.Errorf("doc:plan#view for %s: %+v without a context, %+v with one", sub, plain, with)
+		}
+		req.Context = big
+		_, err = e.Check(bg, req)
+		wantErr(t, "an oversized context", err, store.ErrInvalid)
+	}
+	res, err := e.CheckBulk(bg, engine.CheckBulkRequest{Consistency: cons, Items: []engine.CheckItem{
+		{ResourceType: "doc", ResourceID: "plan", Permission: "view", Subject: subject(t, "user:alice"), Context: big},
+		{ResourceType: "doc", ResourceID: "plan", Permission: "view", Subject: subject(t, "user:alice"), Context: map[string]any{"a": 1}},
+	}})
+	ok(t, err)
+	wantErr(t, "an oversized context in a bulk check", res.Results[0].Err, store.ErrInvalid)
+	if r := res.Results[1]; r.Err != nil || !r.Allowed || r.Permissionship != check.Allowed {
+		t.Errorf("bulk check with a context: %+v", r)
+	}
 }
 
 func (c *contract) checkBulk(t *testing.T) {

@@ -1832,6 +1832,33 @@ caveats run as before (a cached check about 450 ns, 344 B, 5 allocations);
 an uncached one allocates 8% more, the caveat pointer on each relationship
 read.
 
+### Caveats and expiry through the engine and the HTTP API
+
+`engine.CheckRequest` and each `engine.CheckItem` carry a `Context`, and
+`CheckResult` and `ItemResult` carry the `Permissionship` and the `Missing`
+names next to `Allowed`, which stays true only for an allowed answer, so
+in-process callers that read `Allowed` (the gateway, the MCP proxy) treat
+a conditional answer as a denial. Writes already take `store.Update`, so
+`ExpiresAt` and `Caveat` reach the store unchanged. The test fake
+(`enginetest.Fake`) stores neither: it refuses writes that set them, and
+validates check contexts as the real engine does (`check.ValidateContext`),
+so the Engine contract checks both refuse an oversized context.
+
+Over HTTP a check or bulk item takes `"context": {...}`, decoded with
+numbers as `json.Number` so an integer keeps every digit on its way to the
+caveat. A decided answer is `{"allowed": true|false, ...}` as before; a
+conditional one adds `"conditional": true, "missing": [...]`, so clients
+that read only `allowed` keep failing closed and grantd's recorded
+transcripts are unchanged. A caveat that fails at check time is a 400
+`invalid_argument` (in a bulk check, that item's `error`), as is
+`ErrCaveatedRelation` from expand and lookup subjects. A write update takes
+`expires_at` (RFC 3339) and `"caveat": {"name": ..., "context": {...}}`;
+watch reports both on the touch that set them. With check auditing, a
+conditional answer is an `authz.check_decided` deny with `conditional` and
+`missing` in its payload. `grantd_check_caveats_total` counts caveat
+evaluations; it is registered at the first one, so a server without
+caveats exposes exactly grantd's metrics.
+
 ## One clock (internal/platform/clock)
 
 Code that reads the time or waits on it takes a `clock.Clock` (week 2,

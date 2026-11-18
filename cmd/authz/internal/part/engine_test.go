@@ -3,6 +3,7 @@ package part
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestEngineWaitsForServe(t *testing.T) {
 	}
 	want, _ := fake.Check(context.Background(), engine.CheckRequest{ResourceType: "doc", ResourceID: "readme",
 		Permission: "view", Subject: store.Subject{Type: "user", ID: "anyone"}})
-	if res != want {
+	if !reflect.DeepEqual(res, want) {
 		t.Fatalf("check through the Host: %+v, want %+v", res, want)
 	}
 }

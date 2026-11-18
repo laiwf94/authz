@@ -239,15 +239,28 @@ func (f *Fake) Check(ctx context.Context, req engine.CheckRequest) (engine.Check
 	}
 	defer f.mu.RUnlock()
 	ok, err := f.check(ctx, rev, check.Request{ResourceType: req.ResourceType, ResourceID: req.ResourceID,
-		Permission: req.Permission, Subject: req.Subject})
+		Permission: req.Permission, Subject: req.Subject}, req.Context)
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
-	return engine.CheckResult{Allowed: ok, At: f.at(rev)}, nil
+	return engine.CheckResult{Allowed: ok, Permissionship: permissionship(ok), At: f.at(rev)}, nil
 }
 
-func (f *Fake) check(ctx context.Context, rev store.Revision, q check.Request) (bool, error) {
+func permissionship(ok bool) check.Permissionship {
+	if ok {
+		return check.Allowed
+	}
+	return check.Denied
+}
+
+// check answers q. The fake stores no caveats (Write refuses them), so a
+// caveat context cannot change an answer; it is validated as the real
+// engine validates it.
+func (f *Fake) check(ctx context.Context, rev store.Revision, q check.Request, caveatCtx map[string]any) (bool, error) {
 	if err := q.Validate(f.sc); err != nil {
+		return false, err
+	}
+	if err := check.ValidateContext(caveatCtx); err != nil {
 		return false, err
 	}
 	if err := f.checkRev(rev); err != nil {
@@ -279,7 +292,7 @@ func (f *Fake) CheckBulk(ctx context.Context, req engine.CheckBulkRequest) (engi
 	results := make([]engine.ItemResult, len(req.Items))
 	for i, it := range req.Items {
 		ok, err := f.check(ctx, rev, check.Request{ResourceType: it.ResourceType, ResourceID: it.ResourceID,
-			Permission: it.Permission, Subject: it.Subject})
+			Permission: it.Permission, Subject: it.Subject}, it.Context)
 		if err != nil {
 			if ctx.Err() != nil {
 				return engine.CheckBulkResult{}, ctx.Err()
@@ -287,7 +300,7 @@ func (f *Fake) CheckBulk(ctx context.Context, req engine.CheckBulkRequest) (engi
 			results[i].Err = err
 			continue
 		}
-		results[i].Allowed = ok
+		results[i] = engine.ItemResult{Allowed: ok, Permissionship: permissionship(ok)}
 	}
 	return engine.CheckBulkResult{Results: results, At: f.at(rev)}, nil
 }
@@ -554,6 +567,9 @@ func validateWrite(req engine.WriteRequest) error {
 		}
 		if err := u.Relationship.Validate(); err != nil {
 			return fmt.Errorf("update %d: %w", i, err)
+		}
+		if u.Op != store.OpDelete && (u.Caveat != nil || !u.ExpiresAt.IsZero()) {
+			return engine.InvalidArgument("update %d: the fake engine does not store caveats or expiry", i)
 		}
 		k := u.Relationship.String()
 		if seen[k] {

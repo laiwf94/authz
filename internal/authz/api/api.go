@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -355,8 +356,9 @@ var errAuditUnavailable = &apiError{status: http.StatusServiceUnavailable, code:
 // recordDecisions writes one authz.check_decided record per answered check
 // when check auditing is on. Unlike the records of writes, which describe
 // something already committed, a decision is only given once its record is
-// durable, so a failure is returned.
-func (s *Server) recordDecisions(ctx context.Context, at string, items []checkItem, allowed []bool, answered []bool) error {
+// durable, so a failure is returned. A conditional answer grants nothing,
+// so its decision is deny, marked conditional with the missing parameters.
+func (s *Server) recordDecisions(ctx context.Context, at string, items []checkItem, decisions []decision, answered []bool) error {
 	if !s.checks {
 		return nil
 	}
@@ -373,12 +375,13 @@ func (s *Server) recordDecisions(ctx context.Context, at string, items []checkIt
 			continue
 		}
 		d := audit.Deny
-		if allowed[i] {
+		if decisions[i].Allowed {
 			d = audit.Allow
 		}
 		envs = append(envs, audit.Envelope{Actor: actor, Subject: audit.Clean(it.Resource, audit.MaxEnvelopeBytes),
 			Action: audit.Clean(it.Permission, audit.MaxEnvelopeBytes), Decision: d, CorrelationID: corr})
-		ps = append(ps, audit.CheckDecided{Principal: it.Subject, Revision: at, Bulk: bulk})
+		ps = append(ps, audit.CheckDecided{Principal: it.Subject, Revision: at, Bulk: bulk,
+			Conditional: decisions[i].Conditional, Missing: decisions[i].Missing})
 	}
 	// A bulk check's records share one fsync.
 	if err := s.audit.WriteAll(envs, ps); err != nil {
@@ -412,7 +415,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.As(err, &mbe):
 		writeError(w, r, http.StatusRequestEntityTooLarge, "invalid_argument", fmt.Sprintf("request body is larger than %d bytes", MaxBodyBytes))
 	case errors.Is(err, engine.ErrInvalidArgument), errors.Is(err, store.ErrInvalid), errors.Is(err, check.ErrUnknownType), errors.Is(err, check.ErrUnknownName),
-		errors.Is(err, token.ErrInvalid):
+		errors.Is(err, token.ErrInvalid), errors.Is(err, check.ErrCaveat), errors.Is(err, check.ErrCaveatedRelation):
 		writeError(w, r, http.StatusBadRequest, "invalid_argument", err.Error())
 	case errors.Is(err, store.ErrNoSchema):
 		writeError(w, r, http.StatusFailedDependency, "no_schema", "write a schema first (PUT /v1/schema)")
@@ -589,10 +592,35 @@ func (s *Server) dryRunSchema(w http.ResponseWriter, src, limitParam string) err
 	return nil
 }
 
+// caveatContext is a caveat context in a request body: a JSON object whose
+// numbers are kept as json.Number, so an integer keeps every digit on its
+// way to the caveat. null is no context.
+type caveatContext map[string]any
+
+func (c *caveatContext) UnmarshalJSON(b []byte) error {
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	var m map[string]any
+	if err := d.Decode(&m); err != nil {
+		return fmt.Errorf("context must be a JSON object: %w", err)
+	}
+	*c = m
+	return nil
+}
+
+// writeCaveat is the caveat of a written relationship: a caveat the schema
+// declares, and the context stored with it.
+type writeCaveat struct {
+	Name    string        `json:"name"`
+	Context caveatContext `json:"context"`
+}
+
 type writeBody struct {
 	Updates []struct {
-		Op           string `json:"op"`
-		Relationship string `json:"relationship"`
+		Op           string       `json:"op"`
+		Relationship string       `json:"relationship"`
+		ExpiresAt    time.Time    `json:"expires_at"`
+		Caveat       *writeCaveat `json:"caveat"`
 	} `json:"updates"`
 	Preconditions []store.Precondition `json:"preconditions"`
 }
@@ -608,7 +636,10 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return fmt.Errorf("updates[%d]: %w", i, err)
 		}
-		updates[i] = store.Update{Op: store.Op(u.Op), Relationship: rel}
+		updates[i] = store.Update{Op: store.Op(u.Op), Relationship: rel, ExpiresAt: u.ExpiresAt}
+		if u.Caveat != nil {
+			updates[i].Caveat = &store.Caveat{Name: u.Caveat.Name, Context: u.Caveat.Context}
+		}
 	}
 	res, err := s.eng.Write(r.Context(), engine.WriteRequest{Updates: updates, Preconditions: body.Preconditions})
 	if err != nil {
@@ -680,9 +711,24 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request) error {
 }
 
 type checkItem struct {
-	Resource   string `json:"resource"`   // type:id
-	Permission string `json:"permission"` // relation or permission
-	Subject    string `json:"subject"`    // type:id or type:id#relation
+	Resource   string        `json:"resource"`   // type:id
+	Permission string        `json:"permission"` // relation or permission
+	Subject    string        `json:"subject"`    // type:id or type:id#relation
+	Context    caveatContext `json:"context"`    // caveat parameters, optional
+}
+
+// decision is the answer to one check as the API reports and audits it.
+type decision struct {
+	Allowed     bool     `json:"allowed"`
+	Conditional bool     `json:"conditional,omitempty"`
+	Missing     []string `json:"missing,omitempty"`
+}
+
+func newDecision(p check.Permissionship, missing []string) decision {
+	if p == check.Conditional {
+		return decision{Conditional: true, Missing: missing}
+	}
+	return decision{Allowed: p == check.Allowed}
 }
 
 func (c checkItem) item() (engine.CheckItem, error) {
@@ -694,7 +740,7 @@ func (c checkItem) item() (engine.CheckItem, error) {
 	if err != nil {
 		return engine.CheckItem{}, err
 	}
-	return engine.CheckItem{ResourceType: rt, ResourceID: rid, Permission: c.Permission, Subject: subj}, nil
+	return engine.CheckItem{ResourceType: rt, ResourceID: rid, Permission: c.Permission, Subject: subj, Context: c.Context}, nil
 }
 
 func (s *Server) check(w http.ResponseWriter, r *http.Request) error {
@@ -717,14 +763,19 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request) error {
 	ctx, cancel := s.withTimeout(r)
 	defer cancel()
 	res, err := s.eng.Check(ctx, engine.CheckRequest{ResourceType: it.ResourceType, ResourceID: it.ResourceID,
-		Permission: it.Permission, Subject: it.Subject, Consistency: body.Consistency})
+		Permission: it.Permission, Subject: it.Subject, Consistency: body.Consistency, Context: it.Context})
 	if err != nil {
 		return err
 	}
-	if err := s.recordDecisions(r.Context(), res.At.Token, []checkItem{body.checkItem}, []bool{res.Allowed}, nil); err != nil {
+	d := newDecision(res.Permissionship, res.Missing)
+	if err := s.recordDecisions(r.Context(), res.At.Token, []checkItem{body.checkItem}, []decision{d}, nil); err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"allowed": res.Allowed, "checked_at": res.At.Token})
+	out := map[string]any{"allowed": d.Allowed, "checked_at": res.At.Token}
+	if d.Conditional {
+		out["conditional"], out["missing"] = true, d.Missing
+	}
+	writeJSON(w, http.StatusOK, out)
 	return nil
 }
 
@@ -740,8 +791,8 @@ func (s *Server) checkBulk(w http.ResponseWriter, r *http.Request) error {
 		return badRequest("items must have between 1 and %d checks", MaxBulkChecks)
 	}
 	type result struct {
-		Allowed bool   `json:"allowed"`
-		Error   string `json:"error,omitempty"`
+		decision
+		Error string `json:"error,omitempty"`
 	}
 	// An item that does not parse is answered with its error; the rest go
 	// to the engine together, at one snapshot.
@@ -768,14 +819,14 @@ func (s *Server) checkBulk(w http.ResponseWriter, r *http.Request) error {
 			results[index[j]].Error = ir.Err.Error()
 			continue
 		}
-		results[index[j]].Allowed = ir.Allowed
+		results[index[j]].decision = newDecision(ir.Permissionship, ir.Missing)
 	}
 	if s.checks {
-		allowed, answered := make([]bool, len(results)), make([]bool, len(results))
+		decisions, answered := make([]decision, len(results)), make([]bool, len(results))
 		for i, res := range results {
-			allowed[i], answered[i] = res.Allowed, res.Error == ""
+			decisions[i], answered[i] = res.decision, res.Error == ""
 		}
-		if err := s.recordDecisions(r.Context(), res.At.Token, body.Items, allowed, answered); err != nil {
+		if err := s.recordDecisions(r.Context(), res.At.Token, body.Items, decisions, answered); err != nil {
 			return err
 		}
 	}
@@ -960,13 +1011,16 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request) error {
 		next = head // schema writes advance the head without relationship changes
 	}
 	type change struct {
-		Revision     string `json:"revision"`
-		Op           string `json:"op"`
-		Relationship string `json:"relationship"`
+		Revision     string        `json:"revision"`
+		Op           string        `json:"op"`
+		Relationship string        `json:"relationship"`
+		ExpiresAt    time.Time     `json:"expires_at,omitzero"`
+		Caveat       *store.Caveat `json:"caveat,omitempty"`
 	}
 	out := make([]change, len(changes))
 	for i, c := range changes {
-		out[i] = change{Revision: s.tokens.Encode(c.Revision), Op: string(c.Op), Relationship: c.Relationship.String()}
+		out[i] = change{Revision: s.tokens.Encode(c.Revision), Op: string(c.Op), Relationship: c.Relationship.String(),
+			ExpiresAt: c.ExpiresAt, Caveat: c.Caveat}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"changes": out, "next": s.tokens.Encode(next)})
 	return nil
