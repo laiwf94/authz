@@ -259,6 +259,18 @@ link the roadmap issue they come from.
   written. The gateway now keeps the parsed form (`https://`). Found once the
   SAML fuzz targets, which had spent their CI time minimizing inputs, fuzzed
   for their whole time.
+- **Logout interop with Keycloak** ([#79](https://github.com/laiwf94/authz/issues/79)).
+  A new workflow, `.github/workflows/interop.yml`, runs
+  `scripts/interop-keycloak.sh`: Keycloak 26.4.2 with throwaway TLS
+  certificates, against `authz gateway`. OpenID Connect back-channel logout
+  is tested three ways: an administrator ending one Keycloak session, the
+  user signing out on Keycloak's end-session page, and an administrator
+  signing a user out everywhere. SAML single logout is tested IdP-initiated
+  (Keycloak's signed back-channel LogoutRequest naming one SessionIndex) and
+  SP-initiated (the gateway's signed LogoutRequest, then Keycloak's signed
+  LogoutResponse). Each logout at Keycloak must end the matching gateway
+  session within 2 s, and no other. The Keycloak client settings are listed
+  in wicket/docs/DESIGN.md. No gateway behaviour changed.
 - **Users see and end their own sessions** ([#79](https://github.com/laiwf94/authz/issues/79)).
   `GET /sessions` lists the signed-in user's live sessions at their
   provider, most recently used first: a device label such as "Firefox on

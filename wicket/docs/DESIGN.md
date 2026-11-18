@@ -411,6 +411,52 @@ SingleLogoutService for either binding, records
 a SessionIndex per SAML login, ends the sessions a service provider's
 LogoutRequest names and answers it, and builds IdP-initiated requests.
 
+### Logout interop with Keycloak
+
+`.github/workflows/interop.yml` runs both logout protocols against a real
+Keycloak (26.4.2, pinned in `scripts/interop-keycloak.sh`) on every push and
+pull request. The script makes a throwaway CA and one certificate for
+`localhost` and `127.0.0.1`, starts Keycloak on `https://localhost:8443`
+with an in-memory database, a random admin password and the CA in its
+truststore (so it can post to the gateway), and runs the tests in
+`cmd/authz/internal/interop` (`-tags interop`). Each test creates its own
+realm through the admin API, runs `authz gateway` in process on a free
+loopback port, and signs browsers in through Keycloak's own login pages.
+A logout at Keycloak must end the matching gateway session within 2 s;
+locally the slowest takes under 300 ms.
+
+- OpenID Connect: an administrator ends one of alice's two Keycloak
+  sessions, and only that browser is signed out (by `sid`). Alice then
+  signs out on Keycloak's end-session page on her other browser, and then
+  an administrator signs bob out everywhere. Bob stays signed in until it is
+  his turn. Each is one `authn.session_ended` with reason
+  `backchannel_logout` and no `authn.logout_rejected`.
+- SAML, IdP-initiated: the same two Keycloak logouts arrive as signed
+  LogoutRequests on the back channel (POST binding) naming one
+  SessionIndex. Only that browser is signed out (`saml_logout`).
+- SAML, SP-initiated: bob signs out at the gateway. Keycloak verifies the
+  signed LogoutRequest against the SP certificate registered on its client,
+  ends its session, and answers with a signed LogoutResponse that brings
+  the browser to `/logged-out` with status Success.
+
+The Keycloak settings the tests use are the ones a deployment needs:
+
+| Keycloak client | Setting |
+|---|---|
+| OpenID Connect | Confidential, standard flow, redirect URI `<public_url>/callback/<id>`; *Front channel logout* off; *Backchannel logout URL* `<public_url>/backchannel-logout/<id>` with *Backchannel logout session required* on (the token carries `sid`). |
+| SAML | Client ID `<public_url>/saml/<id>/metadata`; ACS POST URL `<public_url>/saml/<id>/acs`; *Logout Service POST* and *Redirect Binding URL* `<public_url>/saml/<id>/slo`; *Front channel logout* off, so Keycloak sends LogoutRequests itself; *Sign documents*, *Sign assertions* and *Client signature required* on, with the gateway's `sp_cert_file` as the client's signing certificate; RSA_SHA256. |
+
+The gateway reads Keycloak's IdP metadata from
+`/realms/<realm>/protocol/saml/descriptor`, which lists the
+SingleLogoutService, and needs `sign_requests` for Keycloak to accept its
+LogoutRequests. Keycloak's `truststore-paths` must hold the CA of the
+gateway's certificate, since it posts logouts to the gateway itself.
+
+```console
+$ ./scripts/interop-keycloak.sh                                  # Keycloak in Docker
+$ KEYCLOAK_HOME=/opt/keycloak-26.4.2 ./scripts/interop-keycloak.sh  # an unpacked distribution, Java 21
+```
+
 ### JWKS cache
 
 Keys are fetched from the discovered `jwks_uri` on first use and cached for

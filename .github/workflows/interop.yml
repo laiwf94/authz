@@ -1,0 +1,36 @@
+# Interop with real identity providers, next to the ci gate. Keycloak
+# (pinned in scripts/interop-keycloak.sh, run from its image on the host
+# network) against `authz gateway` (#79):
+#   - OpenID Connect Back-Channel Logout 1.0: an administrator ending one
+#     Keycloak session, the user signing out at Keycloak, and an
+#     administrator signing a user out everywhere each end the matching
+#     gateway sessions, by sid, within 2 s, and no others;
+#   - SAML single logout: Keycloak's signed LogoutRequest on the back
+#     channel ends only the browser its SessionIndex names, within 2 s, and
+#     the gateway's signed LogoutRequest ends the Keycloak session, with
+#     Keycloak's signed LogoutResponse bringing the browser back.
+# The tests are in cmd/authz/internal/interop, built with -tags interop.
+name: interop
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keycloak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet (interop)
+        run: go vet -tags interop ./cmd/authz/internal/interop
+      - name: Keycloak back-channel logout and SAML single logout
+        run: ./scripts/interop-keycloak.sh -race

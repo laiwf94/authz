@@ -199,7 +199,11 @@ IdP lists a SingleLogoutService gets SAML single logout at
 `<public_url>/saml/<provider>/slo`, started by either side, over the
 HTTP-Redirect and HTTP-POST bindings. Signed-in users see their own
 sessions at `<public_url>/sessions` (device, address, sign-in time and last
-use) and can end any of them, or all but the current one.
+use) and can end any of them, or all but the current one. Both logout
+protocols are tested against a real Keycloak on every push: a logout there
+ends the gateway session within 2 s (`.github/workflows/interop.yml`; the
+Keycloak client settings are in
+[wicket/docs/DESIGN.md](wicket/docs/DESIGN.md#logout-interop-with-keycloak)).
 
 The end-to-end responses are pinned byte for byte in golden transcripts
 recorded from wicket before the move, and CI replays them through
