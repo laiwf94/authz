@@ -41,7 +41,23 @@ type platform struct {
 	dir    string
 	idp    *httptest.Server
 	client *http.Client
+	logins atomic.Int64 // picks the next of runUsers
 }
+
+// runUsers sign in at the gateway in turn. The gateway keeps at most
+// session.DefaultMaxPerSubject sessions per user and revokes the oldest
+// beyond that, so a crash test that signed one user in on every login would
+// see its oldest acknowledged sessions end once a slow run piled up more
+// than that across its rounds (#253). With eight users each stays far below
+// the limit, and every acknowledged session must survive a kill.
+var runUsers = func() []fakeidp.User {
+	users := []fakeidp.User{fakeidp.DemoUsers[0]}
+	for i := 1; i < 8; i++ {
+		users = append(users, fakeidp.User{Username: fmt.Sprintf("user%d", i), Password: fmt.Sprintf("user%d-pass", i),
+			Email: fmt.Sprintf("user%d@example.org", i), Name: fmt.Sprintf("User %d", i), Groups: []string{"eng"}})
+	}
+	return users
+}()
 
 const (
 	runAPIKey     = "run-test-api-key-0123456789"
@@ -85,7 +101,7 @@ func newPlatform(t *testing.T) *platform {
 	}
 	keyDER, _ := x509.MarshalPKCS8PrivateKey(spKey)
 	idpSrv := httptest.NewUnstartedServer(nil)
-	idp, err := fakeidp.New(fakeidp.Config{Issuer: "https://" + idpSrv.Listener.Addr().String(),
+	idp, err := fakeidp.New(fakeidp.Config{Issuer: "https://" + idpSrv.Listener.Addr().String(), Users: runUsers,
 		ServiceProviders: []fakeidp.ServiceProvider{{EntityID: runPublicURL + "/saml/partner/metadata",
 			ACSURL: runPublicURL + "/saml/partner/acs", SignAssertion: true, SignResponse: true}}})
 	if err != nil {
@@ -272,8 +288,8 @@ func cookieHeader(cs []*http.Cookie) string {
 	return strings.Join(parts, "; ")
 }
 
-// login signs alice in at the gateway with SAML, as a browser would, and
-// returns her session cookie. ok is false when the gateway did not answer
+// login signs the next of runUsers in at the gateway with SAML, as a
+// browser would, and returns the session cookie. ok is false when the gateway did not answer
 // (it was killed); the login is acknowledged only once the gateway has
 // answered the assertion with its session cookie.
 func (p *platform) login(public string) (string, bool) {
@@ -296,8 +312,9 @@ func (p *platform) login(public string) (string, bool) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	action, fields := runForm(string(body))
-	fields.Set("username", "alice")
-	fields.Set("password", "alice-pass")
+	u := runUsers[int(p.logins.Add(1)-1)%len(runUsers)]
+	fields.Set("username", u.Username)
+	fields.Set("password", u.Password)
 	resp, err = idp.PostForm(action, fields)
 	if err != nil {
 		t.Error(err)
