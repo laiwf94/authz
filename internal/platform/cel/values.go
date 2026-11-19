@@ -1,6 +1,7 @@
 package cel
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -342,28 +343,59 @@ func convertInput(t *Type, v any, depth int) (any, error) {
 			}
 			break
 		}
-		m := newMap(rv.Len())
-		iter := rv.MapRange()
-		for iter.Next() {
-			k, err := convertInput(t.key, iter.Key().Interface(), depth+1)
-			if err != nil {
-				return nil, fmt.Errorf("key %v: %v", iter.Key(), err)
-			}
-			if !isKey(k) {
-				return nil, fmt.Errorf("key %v: maps are keyed by bool, int, uint or string", iter.Key())
-			}
-			x, err := convertInput(t.elem, iter.Value().Interface(), depth+1)
-			if err != nil {
-				return nil, fmt.Errorf("[%v] %v", iter.Key(), err)
-			}
-			if !m.put(k, x) {
-				return nil, fmt.Errorf("key %v appears twice", iter.Key())
-			}
+		m, err := convertMap(t, rv, nil, depth)
+		if err != nil {
+			// Go maps iterate in random order, so the entry that failed
+			// first differs from run to run. Convert again in key order to
+			// name the same one every time; only failures pay for it.
+			keys := rv.MapKeys()
+			slices.SortFunc(keys, func(a, b reflect.Value) int {
+				return cmp.Compare(fmt.Sprintf("%T %v", a.Interface(), a.Interface()), fmt.Sprintf("%T %v", b.Interface(), b.Interface()))
+			})
+			_, err = convertMap(t, rv, keys, depth)
+			return nil, err
 		}
 		slices.SortFunc(m.keys, compareKeys)
 		return m, nil
 	}
 	return nil, fmt.Errorf("is %s, want %s", describeGo(v), t)
+}
+
+// convertMap converts the entries of the map rv for a variable of map type
+// t, in keys' order, or in iteration order when keys is nil.
+func convertMap(t *Type, rv reflect.Value, keys []reflect.Value, depth int) (*mapValue, error) {
+	m := newMap(rv.Len())
+	entry := func(key, val reflect.Value) error {
+		k, err := convertInput(t.key, key.Interface(), depth+1)
+		if err != nil {
+			return fmt.Errorf("key %v: %v", key, err)
+		}
+		if !isKey(k) {
+			return fmt.Errorf("key %v: maps are keyed by bool, int, uint or string", key)
+		}
+		x, err := convertInput(t.elem, val.Interface(), depth+1)
+		if err != nil {
+			return fmt.Errorf("[%v] %v", key, err)
+		}
+		if !m.put(k, x) {
+			return fmt.Errorf("key %v appears twice", key)
+		}
+		return nil
+	}
+	if keys == nil {
+		for iter := rv.MapRange(); iter.Next(); {
+			if err := entry(iter.Key(), iter.Value()); err != nil {
+				return nil, err
+			}
+		}
+		return m, nil
+	}
+	for _, k := range keys {
+		if err := entry(k, rv.MapIndex(k)); err != nil {
+			return nil, err
+		}
+	}
+	return m, nil
 }
 
 // maxInputDepth bounds the nesting of a variable's value.
