@@ -498,7 +498,12 @@ set are confirmed with their refresh tokens on a schedule, and end when the
 provider refuses or, by the `on_failure` policy, when it can't be asked.
 The tokens are sealed with the session ring and bound to their provider and
 subject; see
-[wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md#revalidation).
+[wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md#revalidation). Revalidation
+is what ends a disabled user's sessions: disabling a user in Keycloak sends
+no logout, and the interop workflow checks that the user's gateway sessions
+end at their next revalidation, within one interval and one 10 s scheduler
+tick, as `refresh_refused`
+([wicket/docs/DESIGN.md](../wicket/docs/DESIGN.md#logout-interop-with-keycloak)).
 
 **Back-channel logout** (#79). `POST /backchannel-logout/{provider}`
 accepts OpenID Connect Back-Channel Logout 1.0 logout tokens. The session

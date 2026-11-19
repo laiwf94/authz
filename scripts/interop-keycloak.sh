@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Interop with Keycloak (#79): OpenID Connect back-channel logout and SAML
-# single logout between `authz gateway` and a real Keycloak. It makes a
+# Interop with Keycloak (#79): OpenID Connect back-channel logout, SAML
+# single logout and revalidation of a disabled user between
+# `authz gateway` and a real Keycloak. It makes a
 # throwaway CA and one TLS certificate for localhost and 127.0.0.1 (Keycloak
 # serves on https://localhost:8443 and trusts the CA, so it can post logouts
 # to the gateway on 127.0.0.1), starts Keycloak with a random admin password,

@@ -9,5 +9,6 @@
 // client with a signing certificate and a single logout service, signs
 // browsers in through Keycloak's own login pages, ends sessions at Keycloak
 // and requires each matching gateway session to end within two seconds
-// while the others stay signed in.
+// while the others stay signed in. It also disables a user at Keycloak and
+// requires the user's gateway sessions to end at their next revalidation.
 package interop

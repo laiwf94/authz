@@ -24,12 +24,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/laiwf94/authz/cmd/authz/internal/gateway"
+	"github.com/laiwf94/authz/internal/authn/server"
 )
 
 // logoutWithin is how long a logout at Keycloak may take to end the
@@ -45,14 +47,23 @@ const (
 
 // world is one Keycloak realm and one gateway configured against it.
 type world struct {
-	t      *testing.T
-	kc     string // Keycloak base URL
-	realm  string
-	tr     *http.Transport
-	public string // the gateway's public URL
-	host   string // its host:port, also the app's host
-	dir    string
-	logs   *syncBuf
+	t        *testing.T
+	kc       string // Keycloak base URL
+	realm    string
+	tr       *http.Transport
+	public   string // the gateway's public URL
+	host     string // its host:port, also the app's host
+	adminURL string // its admin listener's base URL
+	dir      string
+	logs     *syncBuf
+	opts     options
+}
+
+// options adds to the realm and to the gateway's OpenID Connect provider
+// what a test needs beyond the common setup.
+type options struct {
+	realm map[string]any // more realm representation fields
+	corp  map[string]any // more fields of the "corp" provider
 }
 
 type syncBuf struct {
@@ -74,9 +85,11 @@ func mustEnv(t *testing.T, k string) string {
 
 // newWorld creates the realm (replacing one left over from an earlier run)
 // and starts a gateway for it on a free loopback port.
-func newWorld(t *testing.T, realm string) *world {
+func newWorld(t *testing.T, realm string) *world { return newWorldWith(t, realm, options{}) }
+
+func newWorldWith(t *testing.T, realm string, opts options) *world {
 	t.Helper()
-	w := &world{t: t, kc: strings.TrimSuffix(mustEnv(t, "KEYCLOAK_URL"), "/"), realm: realm, dir: t.TempDir(), logs: &syncBuf{}}
+	w := &world{t: t, kc: strings.TrimSuffix(mustEnv(t, "KEYCLOAK_URL"), "/"), realm: realm, dir: t.TempDir(), logs: &syncBuf{}, opts: opts}
 	caFile := mustEnv(t, "INTEROP_CA")
 	pemCA, err := os.ReadFile(caFile)
 	if err != nil {
@@ -96,6 +109,11 @@ func newWorld(t *testing.T, realm string) *world {
 	w.host = l.Addr().String()
 	l.Close()
 	w.public = "https://" + w.host
+	if l, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	w.adminURL = "https://" + l.Addr().String()
+	l.Close()
 
 	spCert := w.spKeys()
 	w.createRealm(spCert)
@@ -191,6 +209,9 @@ func (w *world) createRealm(spCert *x509.Certificate) {
 	rep := map[string]any{"realm": w.realm, "enabled": true, "sslRequired": "external",
 		"users":   []any{user("alice", "Alice", alicePass), user("bob", "Bob", bobPass)},
 		"clients": []any{oidcClient, samlClient}}
+	for k, v := range w.opts.realm {
+		rep[k] = v
+	}
 	if code, body := w.adminAt(http.MethodPost, w.kc+"/admin/realms", rep); code != http.StatusCreated {
 		w.t.Fatalf("creating realm %s: %d %s", w.realm, code, body)
 	}
@@ -200,12 +221,16 @@ func (w *world) createRealm(spCert *x509.Certificate) {
 // until the test ends.
 func (w *world) startGateway(caFile string) {
 	w.t.Helper()
+	corp := map[string]any{"id": "corp", "type": "oidc", "display_name": "Keycloak (OpenID Connect)",
+		"issuer": w.kc + "/realms/" + w.realm, "client_id": clientID, "client_secret_env": "INTEROP_CLIENT_SECRET",
+		"ca_file": caFile, "post_logout_redirect_url": w.public + "/logged-out"}
+	for k, v := range w.opts.corp {
+		corp[k] = v
+	}
 	cfg := map[string]any{
 		"public_url": w.public,
 		"providers": []any{
-			map[string]any{"id": "corp", "type": "oidc", "display_name": "Keycloak (OpenID Connect)",
-				"issuer": w.kc + "/realms/" + w.realm, "client_id": clientID, "client_secret_env": "INTEROP_CLIENT_SECRET",
-				"ca_file": caFile, "post_logout_redirect_url": w.public + "/logged-out"},
+			corp,
 			map[string]any{"id": "partner", "type": "saml", "display_name": "Keycloak (SAML)",
 				"idp_metadata_file": filepath.Join(w.dir, "idp.xml"), "sp_key_file": filepath.Join(w.dir, "sp-key.pem"),
 				"sp_cert_file": filepath.Join(w.dir, "sp.pem"), "sign_requests": true, "email_attribute": "email"},
@@ -220,7 +245,7 @@ func (w *world) startGateway(caFile string) {
 		"WICKET_CONFIG":         w.write("gateway.json", b),
 		"WICKET_COOKIE_KEYS":    hex.EncodeToString(key),
 		"WICKET_ADDR":           w.host,
-		"WICKET_ADMIN_ADDR":     "127.0.0.1:0",
+		"WICKET_ADMIN_ADDR":     strings.TrimPrefix(w.adminURL, "https://"),
 		"WICKET_TLS_CERT":       mustEnv(w.t, "INTEROP_TLS_CERT"),
 		"WICKET_TLS_KEY":        mustEnv(w.t, "INTEROP_TLS_KEY"),
 		"WICKET_LOGIN_RATE":     "1000",
@@ -723,4 +748,131 @@ func TestKeycloakSAMLSingleLogout(t *testing.T) {
 
 	// Signing in again works.
 	bob.signIn("partner", "bob", bobPass)
+}
+
+// metric reads one counter from the gateway's /metrics, 0 when it has not
+// been counted yet.
+func (w *world) metric(name, labels string) float64 {
+	w.t.Helper()
+	code, body := w.get(w.adminURL + "/metrics")
+	if code != http.StatusOK {
+		w.t.Fatalf("/metrics: %d %s", code, body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if v, ok := strings.CutPrefix(line, name+"{"+labels+"} "); ok {
+			f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+			if err != nil {
+				w.t.Fatalf("/metrics: %q: %v", line, err)
+			}
+			return f
+		}
+	}
+	return 0
+}
+
+// setEnabled enables or disables a Keycloak user as an administrator does
+// in the console. Keycloak sends no logout for it: the user's sessions stay
+// at Keycloak, and only its refresh grant stops working.
+func (w *world) setEnabled(name string, enabled bool) {
+	w.t.Helper()
+	if code, body := w.admin(http.MethodPut, "/users/"+w.userID(name), map[string]any{"enabled": enabled}); code != http.StatusNoContent {
+		w.t.Fatalf("setting %s enabled=%v: %d %s", name, enabled, code, body)
+	}
+}
+
+// revalidateInterval is the "corp" provider's revalidate interval in
+// TestKeycloakDisabledUser, the shortest the configuration allows.
+const revalidateInterval = 30 * time.Second
+
+// disabledWithin bounds how long a disabled user's gateway session lives
+// after the user was disabled: one interval since the session was last
+// confirmed, one tick of the revalidation scheduler, and the refresh
+// request itself.
+const disabledWithin = revalidateInterval + server.RevalidateEvery + 5*time.Second
+
+// waitRevalidated waits until the gateway has confirmed n more sessions
+// with Keycloak than it had at from.
+func (w *world) waitRevalidated(from float64, n int) float64 {
+	w.t.Helper()
+	deadline := time.Now().Add(disabledWithin)
+	for {
+		got := w.metric("wicket_revalidations_total", `provider="corp",result="confirmed"`)
+		if got >= from+float64(n) {
+			return got
+		}
+		if time.Now().After(deadline) {
+			w.t.Fatalf("%v confirmed revalidations after %v, want %v\n%s", got-from, disabledWithin, n, w.logs.String())
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// TestKeycloakDisabledUser: an administrator disables a user in Keycloak
+// and the user's gateway sessions end at their next revalidation, within
+// one interval and one scheduler tick, while another user's sessions are
+// confirmed again and again with Keycloak's rotating refresh tokens. The
+// provider has on_failure "grace", so the session ends because Keycloak
+// refuses the refresh (refresh_refused), not because a grace ran out.
+// Disabling a user sends no back-channel logout from Keycloak, so
+// revalidation is what ends these sessions.
+func TestKeycloakDisabledUser(t *testing.T) {
+	w := newWorldWith(t, "authz-interop-disable", options{
+		// Each refresh token is good once: a gateway that kept a rotated-out
+		// token would be refused at its next revalidation.
+		realm: map[string]any{"revokeRefreshToken": true, "refreshTokenMaxReuse": 0},
+		corp: map[string]any{"revalidate": map[string]any{
+			"interval": revalidateInterval.String(), "on_failure": "grace", "grace": "15m"}},
+	})
+	laptop, phone, bob := w.browser("alice's laptop"), w.browser("alice's phone"), w.browser("bob")
+	laptop.signIn("corp", "alice", alicePass)
+	phone.signIn("corp", "alice", alicePass)
+	bob.signIn("corp", "bob", bobPass)
+
+	// Every session is confirmed once with Keycloak before anything changes.
+	confirmed := w.waitRevalidated(0, 3)
+	laptop.wantSignedIn()
+	phone.wantSignedIn()
+	bob.wantSignedIn()
+	w.wantCount("session_ended", "", 0)
+
+	// An administrator disables alice. Her Keycloak sessions stay, so no
+	// logout reaches the gateway; her next revalidation is refused.
+	start := time.Now()
+	w.setEnabled("alice", false)
+	if s := w.sessions("alice"); len(s) != 2 {
+		t.Fatalf("alice has Keycloak sessions %v after being disabled, want her two", s)
+	}
+	for _, b := range []*browser{laptop, phone} {
+		for b.signedIn() {
+			if time.Since(start) > disabledWithin {
+				t.Fatalf("%s is still signed in %v after alice was disabled\n%s", b.name, disabledWithin, w.logs.String())
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		t.Logf("%s signed out %v after alice was disabled", b.name, time.Since(start).Round(time.Millisecond))
+	}
+	w.wantCount("session_ended", "refresh_refused", 2)
+	w.wantCount("session_ended", "backchannel_logout", 0)
+	if got := w.metric("wicket_revalidations_total", `provider="corp",result="refused"`); got != 2 {
+		t.Fatalf("%v refused revalidations, want 2", got)
+	}
+
+	// Bob is confirmed twice more, each time with the refresh token the
+	// last revalidation rotated in, and stays signed in.
+	w.waitRevalidated(confirmed, 1)
+	bob.wantSignedIn()
+	confirmed = w.waitRevalidated(confirmed, 2)
+	bob.wantSignedIn()
+	w.wantCount("session_ended", "", 2)
+	w.wantCount("logout_rejected", "", 0)
+	if got := w.metric("wicket_revalidations_total", `provider="corp",result="kept"`); got != 0 {
+		t.Fatalf("%v sessions kept inside the grace, want 0", got)
+	}
+
+	// Enabled again, alice signs in again and is confirmed like anyone.
+	w.setEnabled("alice", true)
+	laptop.signIn("corp", "alice", alicePass)
+	w.waitRevalidated(confirmed, 2) // bob and alice's laptop
+	laptop.wantSignedIn()
+	bob.wantSignedIn()
 }

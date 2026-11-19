@@ -8,7 +8,11 @@
 #   - SAML single logout: Keycloak's signed LogoutRequest on the back
 #     channel ends only the browser its SessionIndex names, within 2 s, and
 #     the gateway's signed LogoutRequest ends the Keycloak session, with
-#     Keycloak's signed LogoutResponse bringing the browser back.
+#     Keycloak's signed LogoutResponse bringing the browser back;
+#   - revalidation: a user disabled in Keycloak, which sends no logout, is
+#     signed out of the gateway at the next revalidation (30 s interval,
+#     within 45 s), refused even under on_failure "grace", while another
+#     user is confirmed on rotated single-use refresh tokens.
 # The tests are in cmd/authz/internal/interop, built with -tags interop.
 name: interop
 
@@ -32,5 +36,5 @@ jobs:
           go-version-file: go.mod
       - name: Vet (interop)
         run: go vet -tags interop ./cmd/authz/internal/interop
-      - name: Keycloak back-channel logout and SAML single logout
+      - name: Keycloak back-channel logout, SAML single logout and revalidation
         run: ./scripts/interop-keycloak.sh -race

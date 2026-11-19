@@ -181,7 +181,7 @@ details go only to the audit log.
 | Session log | Truncated at every byte offset: recovery yields exactly the complete records. Damage mid-file stops startup; write failures are injected and a failed repair blocks further writes. |
 | Parsers | Go fuzzing of the JWS parser, JWK sets, the cookie codec, the return-URL validator, SAML responses, metadata and logout messages. |
 | Concurrency | The whole suite runs under the race detector. Coverage is 93% of statements. |
-| Interop | Back-channel logout and SAML single logout (IdP- and SP-initiated) against a real Keycloak in `.github/workflows/interop.yml`: a logout at Keycloak ends the matching gateway session within 2 s and no other ([DESIGN](docs/DESIGN.md#logout-interop-with-keycloak), `scripts/interop-keycloak.sh`). |
+| Interop | Back-channel logout and SAML single logout (IdP- and SP-initiated) against a real Keycloak in `.github/workflows/interop.yml`: a logout at Keycloak ends the matching gateway session within 2 s and no other; a user disabled at Keycloak is signed out at the next revalidation ([DESIGN](docs/DESIGN.md#logout-interop-with-keycloak), `scripts/interop-keycloak.sh`). |
 
 Each attack in the suites must be rejected, with a specific reason.
 

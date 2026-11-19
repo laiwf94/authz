@@ -271,6 +271,14 @@ link the roadmap issue they come from.
   LogoutResponse). Each logout at Keycloak must end the matching gateway
   session within 2 s, and no other. The Keycloak client settings are listed
   in wicket/docs/DESIGN.md. No gateway behaviour changed.
+- **A user disabled in Keycloak is signed out of the gateway** ([#79](https://github.com/laiwf94/authz/issues/79)).
+  The interop workflow now also disables a user in Keycloak, which sends no
+  logout, and requires each of the user's gateway sessions to end at its
+  next revalidation (interval 30 s, so within 45 s; about 40 s in practice)
+  as `authn.session_ended` with reason `refresh_refused`, even with
+  `on_failure` `grace`, while another user is confirmed again on rotated,
+  single-use refresh tokens. The README shows the run. No gateway behaviour
+  changed.
 - **Users see and end their own sessions** ([#79](https://github.com/laiwf94/authz/issues/79)).
   `GET /sessions` lists the signed-in user's live sessions at their
   provider, most recently used first: a device label such as "Firefox on

@@ -200,10 +200,29 @@ IdP lists a SingleLogoutService gets SAML single logout at
 HTTP-Redirect and HTTP-POST bindings. Signed-in users see their own
 sessions at `<public_url>/sessions` (device, address, sign-in time and last
 use) and can end any of them, or all but the current one. Both logout
-protocols are tested against a real Keycloak on every push: a logout there
-ends the gateway session within 2 s (`.github/workflows/interop.yml`; the
-Keycloak client settings are in
+protocols and revalidation are tested against a real Keycloak on every
+push: a logout there ends the gateway session within 2 s, and disabling a
+user there ends their gateway sessions at the next revalidation, within one
+interval and 10 s (`.github/workflows/interop.yml`; the Keycloak client
+settings are in
 [wicket/docs/DESIGN.md](wicket/docs/DESIGN.md#logout-interop-with-keycloak)).
+
+Disabling a user at the provider, end to end, with the interop script
+(Keycloak in Docker, or `KEYCLOAK_HOME` for an unpacked distribution):
+
+```console
+$ ./scripts/interop-keycloak.sh -run TestKeycloakDisabledUser
+=== RUN   TestKeycloakDisabledUser
+    keycloak_test.go:852: alice's laptop signed out 39.946s after alice was disabled
+    keycloak_test.go:852: alice's phone signed out 39.947s after alice was disabled
+--- PASS: TestKeycloakDisabledUser (151.34s)
+```
+
+The gateway's provider there has `"revalidate": {"interval": "30s",
+"on_failure": "grace", "grace": "15m"}`: Keycloak answers the disabled
+user's refresh with `invalid_grant`, which ends the session at once
+(`authn.session_ended`, reason `refresh_refused`); the grace only covers a
+provider that can't be asked.
 
 The end-to-end responses are pinned byte for byte in golden transcripts
 recorded from wicket before the move, and CI replays them through

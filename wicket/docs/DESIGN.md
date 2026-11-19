@@ -413,8 +413,8 @@ LogoutRequest names and answers it, and builds IdP-initiated requests.
 
 ### Logout interop with Keycloak
 
-`.github/workflows/interop.yml` runs both logout protocols against a real
-Keycloak (26.4.2, pinned in `scripts/interop-keycloak.sh`) on every push and
+`.github/workflows/interop.yml` runs both logout protocols and revalidation
+against a real Keycloak (26.4.2, pinned in `scripts/interop-keycloak.sh`) on every push and
 pull request. The script makes a throwaway CA and one certificate for
 `localhost` and `127.0.0.1`, starts Keycloak on `https://localhost:8443`
 with an in-memory database, a random admin password and the CA in its
@@ -438,6 +438,25 @@ locally the slowest takes under 300 ms.
   signed LogoutRequest against the SP certificate registered on its client,
   ends its session, and answers with a signed LogoutResponse that brings
   the browser to `/logged-out` with status Success.
+- A disabled user (`TestKeycloakDisabledUser`): the provider has
+  `"revalidate": {"interval": "30s", "on_failure": "grace", "grace": "15m"}`
+  and the realm revokes each refresh token once it is used
+  (`revokeRefreshToken`, no reuse), so a gateway that kept a rotated-out
+  token would be refused. Alice (two browsers) and bob sign in and are each
+  confirmed once. An administrator then disables alice. Keycloak keeps her
+  two sessions and sends no back-channel logout, so nothing reaches the
+  gateway until her sessions are due; their refresh then gets
+  `invalid_grant`, and both end as `authn.session_ended` with reason
+  `refresh_refused`, despite the grace, which only covers a provider that
+  can't be asked. They must end within one interval plus one scheduler tick
+  (`RevalidateEvery`, 10 s) plus 5 s of the disable: 45 s; locally they end
+  after about 40 s. Bob is meanwhile confirmed twice more on the tokens each
+  revalidation rotated in and stays signed in, with no session kept inside
+  a grace. Enabled again, alice signs in and is confirmed like anyone. A
+  deployment that needs a disabled user out sooner sets a shorter interval
+  (each pass costs one refresh request per due session), or ends the
+  Keycloak sessions too, which the back-channel logout above turns into an
+  immediate sign-out.
 
 The Keycloak settings the tests use are the ones a deployment needs:
 
