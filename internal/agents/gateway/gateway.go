@@ -48,6 +48,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/agents/ratelimit"
 	"github.com/laiwf94/authz/internal/platform/audit"
+	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/logging"
 	"github.com/laiwf94/authz/internal/platform/metrics"
 	platformlimit "github.com/laiwf94/authz/internal/platform/ratelimit"
@@ -81,6 +82,10 @@ type Options struct {
 	Now            func() time.Time
 	// Transport carries upstream requests; nil uses a fresh http.Transport.
 	Transport http.RoundTripper
+	// StaticKeys is the static key set the admin API issues, rotates and
+	// revokes keys in, merged with the configured agents' keys; nil keeps
+	// one in memory, lost on restart.
+	StaticKeys *keys.StaticStore
 }
 
 // Gateway serves agents over MCP and administrators over the admin API.
@@ -97,6 +102,7 @@ type Gateway struct {
 	ups       map[string]*upstream
 	upNames   []string
 	server    *mcp.Server
+	static    *keys.StaticStore
 }
 
 type upstream struct {
@@ -160,7 +166,10 @@ func New(opt Options) (*Gateway, error) {
 			return nil, err
 		}
 	}
-	g := &Gateway{opt: opt, cfg: c, log: opt.Log, m: opt.Metrics, now: opt.Now,
+	if opt.StaticKeys == nil {
+		opt.StaticKeys, _ = keys.OpenStatic("") // in memory: can't fail
+	}
+	g := &Gateway{opt: opt, cfg: c, log: opt.Log, m: opt.Metrics, now: opt.Now, static: opt.StaticKeys,
 		limiter:   ratelimit.NewLimiter(opt.Now),
 		quota:     ratelimit.NewQuota(opt.Now),
 		approvals: approvals,
@@ -170,7 +179,7 @@ func New(opt Options) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	g.agents.Store(newAgentSet(c, opt.Auth))
+	g.agents.Store(g.newAgentSet(c, opt.Auth))
 	for _, uc := range c.Upstreams {
 		h := http.Header{}
 		switch {
@@ -237,13 +246,17 @@ func (g *Gateway) healthz(w http.ResponseWriter, r *http.Request) {
 // gateway runs: who the agents are, how they authenticate and their limits.
 // Each request reads it once.
 type agentSet struct {
-	auth     *identity.Authenticator
-	limits   map[string]Limits
-	defaults Limits
+	auth       *identity.Authenticator
+	limits     map[string]Limits
+	defaults   Limits
+	configKeys []keys.ConfigKey
 }
 
-func newAgentSet(c *Config, auth *identity.Authenticator) *agentSet {
-	s := &agentSet{auth: auth, limits: map[string]Limits{}, defaults: c.Limits}
+// newAgentSet is the agent set of c. Its authenticator also checks static
+// keys against the gateway's static key set, so keys issued and revoked
+// on the admin API apply under every configuration.
+func (g *Gateway) newAgentSet(c *Config, auth *identity.Authenticator) *agentSet {
+	s := &agentSet{auth: auth.WithStatic(staticAt{g.static, g.now}), limits: map[string]Limits{}, defaults: c.Limits, configKeys: configKeys(c)}
 	for _, a := range c.Agents {
 		if a.Limits != nil {
 			s.limits[a.ID] = *a.Limits
@@ -275,7 +288,7 @@ func (g *Gateway) SetAgents(c *Config, auth *identity.Authenticator) error {
 	if err != nil {
 		return err
 	}
-	g.agents.Store(newAgentSet(c, auth))
+	g.agents.Store(g.newAgentSet(c, auth))
 	g.server.SetResource(res)
 	return nil
 }

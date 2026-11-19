@@ -497,10 +497,11 @@ func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, 
 		return err
 	}
 	defer auditLog.Close()
-	pinPath, approvalPath := "", ""
+	pinPath, approvalPath, staticPath := "", "", ""
 	if cfg.stateDir != "" {
 		pinPath = filepath.Join(cfg.stateDir, "pins.json")
 		approvalPath = filepath.Join(cfg.stateDir, "approvals.wal")
+		staticPath = filepath.Join(cfg.stateDir, "static-keys.json")
 	} else if fm != nil {
 		log.Warn("$.mcp.state_dir not set; trusted tool definitions and approvals are kept in memory and reset on restart")
 	} else {
@@ -511,8 +512,13 @@ func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, 
 		return err
 	}
 	defer pinStore.Close()
+	// Static keys issued, rotated and revoked on the admin API.
+	staticKeys, err := keys.OpenStatic(staticPath)
+	if err != nil {
+		return err
+	}
 	gw, err := gateway.New(gateway.Options{Config: gc, Auth: auth, Policy: pol, Audit: auditLog, Pins: pinStore,
-		ApprovalLog: approvalPath, AuditKey: cfg.auditKey, AllowedOrigins: cfg.origins, Log: log, Metrics: h.Registry()})
+		ApprovalLog: approvalPath, StaticKeys: staticKeys, AuditKey: cfg.auditKey, AllowedOrigins: cfg.origins, Log: log, Metrics: h.Registry()})
 	if err != nil {
 		return err
 	}

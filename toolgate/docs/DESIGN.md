@@ -79,7 +79,8 @@ hold state that must survive a restart: the audit log, which only grows, and,
 in `TOOLGATE_STATE_DIR`, two wal streams (`internal/platform/storage/wal`, the
 platform's one append log): `pins.json`, the trusted hash of every tool
 definition seen, and `approvals.wal`, open approval requests, decisions and
-the use of each grant. Everything else lives in memory and starts empty after
+the use of each grant. Beside them `static-keys.json` holds the static key
+set the admin API changes (below). Everything else lives in memory and starts empty after
 a restart, which is the right default for each of them: rate-limit timestamps
 (one int64 per agent or agent+tool), daily quota counters, and legacy MCP
 sessions. An agent that loses a session gets a 404 and runs `initialize`, as
@@ -218,6 +219,26 @@ with every configured hash using `subtle.ConstantTimeCompare` and
 `ConstantTimeSelect`, so timing reveals neither which agent matched nor how
 much of a key was right. A fast hash is enough here because the keys are
 high-entropy; passwords would need a slow one.
+
+Static keys also change without a restart, on the admin API
+(`/admin/keys`), through the static key set of `internal/platform/keys`
+(`keys.StaticStore`). The set merges the configured keys, one per agent,
+with keys the API issued and with revocations, and lives in
+`static-keys.json` in the state directory (in memory without one). Issued
+keys are kept as digests with their agent and creation time; they
+authenticate as that agent, with its owner, scopes and limits, only while
+the configuration lists the agent, and the tool call records name them by
+`key_id`. A configured key is never copied into the file: its rotation or
+revocation is recorded by digest, so it holds across reloads and restarts
+until the operator lists another digest, and a digest once revoked or used
+is never issued again. A rotation issues a replacement and keeps the old key
+verifying for up to seven days. Every change carries the key set version it
+was computed against and is refused with 409 when another came first, is
+saved (a temporary file, synced, renamed over the old one, the directory
+synced) before it takes effect, and is audited as `static_key_created`,
+`static_key_rotated` or `static_key_revoked` with key ids, never keys. A
+file another process changed is refused rather than overwritten. Limits: 16
+issued keys per agent, 1024 issued keys and 1024 revocations per file.
 
 Signed tokens are compact JWS (RFC 7515) with HMAC-SHA256 and JWT claims
 (RFC 7519) [14]: `iss`, `aud`, `sub` (agent id), `owner`, `scope`, `iat`, `nbf`,

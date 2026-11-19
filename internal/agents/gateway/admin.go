@@ -48,6 +48,10 @@ func (g *Gateway) AdminHandler(adminToken string) http.Handler {
 	route("GET /admin/audit/checkpoint", g.auditCheckpoint)
 	route("POST /admin/audit/export", g.auditExport)
 	route("GET /admin/audit/proof", g.auditProof)
+	route("GET /admin/keys", g.listStaticKeys)
+	route("POST /admin/keys", g.createStaticKey)
+	route("POST /admin/keys/{id}/rotate", g.rotateStaticKey)
+	route("POST /admin/keys/{id}/revoke", g.revokeStaticKey)
 	mux.Handle("/", hs.Wrap("other", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "no such endpoint")
 	}))

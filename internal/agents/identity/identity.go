@@ -81,7 +81,7 @@ type Identity struct {
 	Scopes    []string
 	Method    string    // "static" or "signed"
 	Issuer    string    // signed tokens: the iss claim
-	KeyID     string    // signed tokens: the key that verified it
+	KeyID     string    // signed tokens: the key that verified it; static keys: an issued key's id
 	ExpiresAt time.Time // signed tokens only
 }
 
@@ -114,6 +114,23 @@ type Config struct {
 	MaxTTL   time.Duration // longest accepted exp - iat; default DefaultMaxTTL
 	Leeway   time.Duration // clock skew allowed; default DefaultLeeway
 	Now      func() time.Time
+	// Static, when set, is the persisted static key set (a
+	// keys.StaticStore at the gateway's clock): configured keys it revoked
+	// are refused, and the keys it issued authenticate as their agent,
+	// which Agents must list.
+	Static StaticSource
+}
+
+// StaticSource holds the static keys issued and revoked while the gateway
+// runs, read at the source's own clock: the one the keys' overlaps were
+// set by.
+type StaticSource interface {
+	// Issued returns the agent and key id of the issued key with digest
+	// sum, if it verifies now.
+	Issued(sum [sha256.Size]byte) (agent, id string, ok bool)
+	// ConfigActive reports whether the configured key with digest sum
+	// still verifies now.
+	ConfigActive(sum [sha256.Size]byte) bool
 }
 
 // Authenticator verifies credentials. It is safe for concurrent use.
@@ -237,11 +254,40 @@ func (a *Authenticator) Authenticate(token string) (Identity, error) {
 		eq := subtle.ConstantTimeCompare(sum[:], a.agents[i].TokenSHA256[:])
 		found = subtle.ConstantTimeSelect(eq, i, found)
 	}
-	if found < 0 {
+	if a.cfg.Static == nil {
+		if found < 0 {
+			return Identity{}, unauthenticated("unknown static key")
+		}
+		ag := a.agents[found]
+		return Identity{AgentID: ag.ID, Owner: ag.Owner, Scopes: ag.Scopes, Method: "static"}, nil
+	}
+	if found >= 0 {
+		if !a.cfg.Static.ConfigActive(sum) {
+			return Identity{}, unauthenticated("revoked static key")
+		}
+		ag := a.agents[found]
+		return Identity{AgentID: ag.ID, Owner: ag.Owner, Scopes: ag.Scopes, Method: "static"}, nil
+	}
+	// Issued keys are found by their digest. A map lookup on the SHA-256
+	// of a random key reveals nothing an attacker can steer towards it.
+	agent, kid, ok := a.cfg.Static.Issued(sum)
+	if !ok {
 		return Identity{}, unauthenticated("unknown static key")
 	}
-	ag := a.agents[found]
-	return Identity{AgentID: ag.ID, Owner: ag.Owner, Scopes: ag.Scopes, Method: "static"}, nil
+	i := slices.IndexFunc(a.agents, func(ag Agent) bool { return ag.ID == agent })
+	if i < 0 {
+		return Identity{}, unauthenticated("static key of agent %q, which the configuration no longer lists", agent)
+	}
+	ag := a.agents[i]
+	return Identity{AgentID: ag.ID, Owner: ag.Owner, Scopes: ag.Scopes, Method: "static", KeyID: kid}, nil
+}
+
+// WithStatic returns a copy of a that also checks static keys against src
+// (see Config.Static); nil checks only the configured digests.
+func (a *Authenticator) WithStatic(src StaticSource) *Authenticator {
+	b := *a
+	b.cfg.Static = src
+	return &b
 }
 
 // Claims are the claims of a signed token.

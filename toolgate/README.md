@@ -268,6 +268,10 @@ Administrators (`TOOLGATE_ADMIN_ADDR`, default `127.0.0.1:8081`), `Authorization
 | `GET /admin/audit/checkpoint` | The newest signed checkpoint of the audit log (`text/plain`, a signed note), with `AUTHZ_AUDIT_SIGNING_KEY` set; 404 without it. Check a log against it with `authz audit verify -key`. |
 | `POST /admin/audit/export` | The newest signed checkpoint, as `GET /admin/audit/checkpoint` serves it, recorded as exported beside the log: with `AUTHZ_AUDIT_RETAIN_BYTES` or `AUTHZ_AUDIT_RETAIN_AGE`, retention may then remove the rotated-out segments it covers. 404 without a signing key. |
 | `GET /admin/audit/proof` | An RFC 6962 proof over the audit log as JSON, with `AUTHZ_AUDIT_SIGNING_KEY` set: `?record=N` that record N is in the log, `?from=M` that the log extends its first M records; against the newest checkpoint, which it carries, or the first `size=S` records. 400 for bad parameters, 404 without a key or out of range. Check it with `authz audit prove -check`. |
+| `GET /admin/keys` | The static key set and its `version` (also the `ETag`): every configured agent key that still verifies and every key the API issued, by `id` (the first 16 hex characters of its SHA-256), with `agent`, `source` (`config` or `issued`), `created` and, inside a rotation overlap, `until`. |
+| `POST /admin/keys` | `{"agent":"alice-bot","version":N}` issues another static key for a configured agent and answers 201 with its `secret`, shown only here. |
+| `POST /admin/keys/{id}/rotate` | `{"version":N,"overlap_seconds":3600}` issues a replacement; the old key verifies for the overlap (0 to 604800 seconds; 0 ends it at once). |
+| `POST /admin/keys/{id}/revoke` | `{"version":N}` stops a configured or issued key at once. A revoked configured key stays revoked across restarts and reloads until the config lists another digest. |
 | `GET /metrics` | Prometheus metrics. |
 
 JSON-RPC errors from the gateway use codes outside the range JSON-RPC and MCP
@@ -281,7 +285,10 @@ or unknown tool. Clients in a 2025 session get every JSON-RPC error with
 HTTP 200, as those revisions expect, and still get `Retry-After`.
 
 Admin errors look like
-`{"error":{"code":"not_found","message":"...","request_id":"..."}}`.
+`{"error":{"code":"not_found","message":"...","request_id":"..."}}`. A key
+change against a version that is no longer current answers 409
+`version_conflict` with the current version in the `ETag`: read the key set
+again and retry.
 
 ## Tests and benchmarks
 

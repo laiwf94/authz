@@ -219,6 +219,36 @@ type PolicyRejected struct {
 	RequestID string `json:"request_id,omitempty"`
 }
 
+// StaticKeyCreated is an administrator issuing a static agent key. KeyID
+// is the key's id (keys.StaticKeyID), never the key.
+type StaticKeyCreated struct {
+	Agent     string `json:"agent"`
+	KeyID     string `json:"key_id"`
+	Version   uint64 `json:"version"` // of the key set after the change
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// StaticKeyRotated is an administrator replacing a static agent key: the
+// old key verifies until Until, the new one from now.
+type StaticKeyRotated struct {
+	Agent     string `json:"agent"`
+	KeyID     string `json:"key_id"`
+	Source    string `json:"source"` // of the old key: config or issued
+	NewKeyID  string `json:"new_key_id"`
+	Until     string `json:"until"`
+	Version   uint64 `json:"version"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// StaticKeyRevoked is an administrator revoking a static agent key.
+type StaticKeyRevoked struct {
+	Agent     string `json:"agent"`
+	KeyID     string `json:"key_id"`
+	Source    string `json:"source"`
+	Version   uint64 `json:"version"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
 // Event types.
 const (
 	EventSchemaWritten        = "authz.schema_written"
@@ -243,6 +273,9 @@ const (
 	EventToolQuarantined   = "tool_quarantined"
 	EventPolicyApplied     = "policy_applied"
 	EventPolicyRejected    = "policy_rejected"
+	EventStaticKeyCreated  = "static_key_created"
+	EventStaticKeyRotated  = "static_key_rotated"
+	EventStaticKeyRevoked  = "static_key_revoked"
 )
 
 func (SchemaWritten) AuditEvent() string        { return EventSchemaWritten }
@@ -265,6 +298,9 @@ func (ToolApproved) AuditEvent() string         { return EventToolApproved }
 func (ToolQuarantined) AuditEvent() string      { return EventToolQuarantined }
 func (PolicyApplied) AuditEvent() string        { return EventPolicyApplied }
 func (PolicyRejected) AuditEvent() string       { return EventPolicyRejected }
+func (StaticKeyCreated) AuditEvent() string     { return EventStaticKeyCreated }
+func (StaticKeyRotated) AuditEvent() string     { return EventStaticKeyRotated }
+func (StaticKeyRevoked) AuditEvent() string     { return EventStaticKeyRevoked }
 
 // Defs are the definitions Default registers, in track order.
 func Defs() []Def {
@@ -292,6 +328,9 @@ func Defs() []Def {
 		{TrackAgents, ToolQuarantined{}, 0},
 		{TrackAgents, PolicyApplied{}, 0},
 		{TrackAgents, PolicyRejected{}, 0},
+		{TrackAgents, StaticKeyCreated{}, 0},
+		{TrackAgents, StaticKeyRotated{}, 0},
+		{TrackAgents, StaticKeyRevoked{}, 0},
 
 		// The log's own records (rotate.go).
 		{TrackAudit, SegmentStarted{}, NeedAction},
