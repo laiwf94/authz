@@ -3,6 +3,7 @@ package check
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/laiwf94/authz/internal/authz/schema"
@@ -27,6 +28,11 @@ type LookupSubjectsRequest struct {
 	// Limit is the page size: DefaultLookupLimit when <= 0, never more
 	// than MaxLookupLimit.
 	Limit int
+	// Context holds caveat parameters, as in CheckResult: merged under
+	// each caveated relationship's stored context (stored values win). A
+	// subject whose answer depends on a parameter neither supplies is
+	// found as conditional.
+	Context map[string]any
 }
 
 // Validate checks the request against the schema.
@@ -57,12 +63,21 @@ func (q LookupSubjectsRequest) Validate(sc *schema.Schema) error {
 	return nil
 }
 
-// FoundSubject is one subject that holds the permission. ID is Wildcard
-// when every object of the subject type holds it except those in Excluded
-// (sorted); Excluded is empty for any other ID.
+// FoundSubject is one subject that holds the permission, or may.
+//
+// ID is Wildcard for every object of the subject type except those in
+// Excluded (sorted), whose answers differ from the wildcard's: each of
+// them is either found as a subject of its own, with its own answer, or
+// does not hold the permission. Excluded is empty for any other ID.
+//
+// Conditional marks a subject that holds the permission only if the
+// caveat parameters Missing names (sorted) allow it; other found subjects
+// hold it whatever they are.
 type FoundSubject struct {
-	ID       string
-	Excluded []string
+	ID          string
+	Excluded    []string
+	Conditional bool
+	Missing     []string
 }
 
 // LookupSubjectsResult is one page of a subject lookup.
@@ -79,12 +94,21 @@ type LookupSubjectsResult struct {
 // It walks the rewrite rules from the resource down to the stored
 // relationships and back up as sets of subjects: a relation is the union
 // of its stored subjects and of the usersets and arrow targets it names,
-// and union, intersection and exclusion combine their operands' sets. A
-// set is either a list of IDs or the wildcard minus a list of IDs, so
-// "user:* - banned" and "(user:* - banned) & editors" are answered
-// exactly. A subject is in the result exactly when Check would grant it
-// the permission, including an ID that no relationship names when a
-// wildcard grants it.
+// and union, intersection and exclusion combine their operands' sets.
+// A set gives every subject ID an answer, allowed, denied or conditional,
+// as Check would: one answer for every ID it does not list (the wildcard's)
+// and one for each ID it lists. So "user:* - banned" and
+// "(user:* - banned) & editors" are answered exactly, and a subject is
+// found exactly when CheckResult with the same context would not deny it,
+// including an ID that no relationship names when a wildcard grants it.
+//
+// A caveated relationship contributes its subjects with its caveat's
+// answer: evaluated with its stored context over q.Context, it either
+// holds (the relationship counts as if it had no caveat), fails (the
+// relationship counts for nothing) or is unknown, and then everything it
+// contributes is conditional on the parameters it lacks. The operators
+// combine answers subject by subject as CheckResult combines them, so a
+// conditional exclusion leaves its subjects conditional, never allowed.
 //
 // A cycle in the data (a group inside itself, a folder its own ancestor)
 // is solved as a least fixpoint: a node met again on its own path reads
@@ -93,13 +117,18 @@ type LookupSubjectsResult struct {
 // cycle keep their value between rounds. Every node evaluation in every
 // round counts against MaxDispatchesPerCheck, so a cycle through the
 // subtracted side of an exclusion, which has no least fixpoint, ends in
-// ErrTooMuchWork instead of running forever.
+// ErrTooMuchWork instead of running forever. The caveats evaluated share
+// MaxCaveatCostPerCheck.
 //
 // Each page walks the whole graph again at the same revision, so pages at
 // one revision are consistent with each other; the work per page is that
 // of one walk.
 func (e *Engine) LookupSubjects(ctx context.Context, sc *schema.Schema, rev store.Revision, q LookupSubjectsRequest) (LookupSubjectsResult, Stats, error) {
 	if err := q.Validate(sc); err != nil {
+		return LookupSubjectsResult{}, Stats{}, err
+	}
+	rc, err := newRequestContext(q.Context)
+	if err != nil {
 		return LookupSubjectsResult{}, Stats{}, err
 	}
 	limit := q.Limit
@@ -109,7 +138,7 @@ func (e *Engine) LookupSubjects(ctx context.Context, sc *schema.Schema, rev stor
 	if limit > MaxLookupLimit {
 		limit = MaxLookupLimit
 	}
-	w := &subjectWalker{e: e, ctx: ctx, sc: sc, rev: rev, typ: q.SubjectType, rel: q.SubjectRelation,
+	w := &subjectWalker{e: e, ctx: ctx, sc: sc, rev: rev, typ: q.SubjectType, rel: q.SubjectRelation, reqCtx: rc,
 		stable: map[string]subjectSet{}, approx: map[string]subjectSet{}, active: map[string]bool{}}
 	var set subjectSet
 	for {
@@ -127,21 +156,73 @@ func (e *Engine) LookupSubjects(ctx context.Context, sc *schema.Schema, rev stor
 	return set.page(q.After, limit), w.stats, nil
 }
 
-// subjectSet is a set of subject IDs of one type: the IDs in ids or, when
-// all is set, every ID except those in ids. The zero value is empty. Sets
-// are never changed once built; the operations return new ones.
-type subjectSet struct {
-	all bool
-	ids map[string]struct{}
+// sameResult reports whether two answers are equal, missing names included.
+func sameResult(a, b Result) bool {
+	return a.Permissionship == b.Permissionship && slices.Equal(a.Missing, b.Missing)
 }
 
-func (s subjectSet) has(id string) bool {
-	_, in := s.ids[id]
-	return in != s.all
+// subjectSet gives every subject ID of one type an answer: def for every
+// ID it does not list; flip(def) for the IDs in ids; *other[id] for the
+// IDs in other. An ID is in at most one of them, and listed answers always
+// differ from def, so a set has one form. The zero value denies everyone.
+// Sets are never changed once built; the operations return new ones.
+//
+// A set of definite answers, the common case, has no other: it is the IDs
+// in ids, or every ID but those, and is combined as a plain ID set as it
+// was before caveats, at the cost of a map key per ID. Conditional answers
+// (and, when def is conditional, allowed ones) are in other.
+type subjectSet struct {
+	def   Result
+	ids   map[string]struct{}
+	other map[string]*Result
+}
+
+var (
+	allowedRef = &Result{Permissionship: Allowed}
+	deniedRef  = &Result{Permissionship: Denied}
+)
+
+// flip is the answer a set gives the IDs in ids: the opposite of a definite
+// default, and denied when the default is conditional.
+func flip(def Result) Result {
+	if def.Permissionship == Denied {
+		return allowed
+	}
+	return denied
+}
+
+// definiteSet is every ID but ids when all is set, else the IDs in ids.
+func definiteSet(all bool, ids map[string]struct{}) subjectSet {
+	if len(ids) == 0 {
+		ids = nil
+	}
+	if all {
+		return subjectSet{def: allowed, ids: ids}
+	}
+	return subjectSet{ids: ids}
+}
+
+// cond reports that some answer of the set is conditional.
+func (s subjectSet) cond() bool { return s.def.Permissionship == Conditional || len(s.other) > 0 }
+
+func (s subjectSet) get(id string) Result {
+	if _, ok := s.ids[id]; ok {
+		return flip(s.def)
+	}
+	if r, ok := s.other[id]; ok {
+		return *r
+	}
+	return s.def
+}
+
+func (s subjectSet) allows(id string) bool { return s.get(id).Permissionship == Allowed }
+
+func (s subjectSet) empty() bool {
+	return s.def.Permissionship == Denied && len(s.ids) == 0 && len(s.other) == 0
 }
 
 func (s subjectSet) equal(t subjectSet) bool {
-	if s.all != t.all || len(s.ids) != len(t.ids) {
+	if !sameResult(s.def, t.def) || len(s.ids) != len(t.ids) || len(s.other) != len(t.other) {
 		return false
 	}
 	for id := range s.ids {
@@ -149,14 +230,140 @@ func (s subjectSet) equal(t subjectSet) bool {
 			return false
 		}
 	}
+	for id, r := range s.other {
+		if u, ok := t.other[id]; !ok || !sameResult(*r, *u) {
+			return false
+		}
+	}
 	return true
 }
 
-func setOf(all bool, ids map[string]struct{}) subjectSet {
-	if len(ids) == 0 {
-		ids = nil
+// with returns s with id answered r, for building sets: r must differ
+// from s.def and id must not be listed yet.
+func (s *subjectSet) with(id string, r Result, size int) {
+	if f := flip(s.def); r.Permissionship == f.Permissionship && f.Permissionship != Conditional {
+		if s.ids == nil {
+			s.ids = make(map[string]struct{}, size)
+		}
+		s.ids[id] = struct{}{}
+		return
 	}
-	return subjectSet{all: all, ids: ids}
+	if s.other == nil {
+		s.other = map[string]*Result{}
+	}
+	switch r.Permissionship {
+	case Allowed:
+		s.other[id] = allowedRef
+	case Denied:
+		s.other[id] = deniedRef
+	default:
+		p := new(Result)
+		*p = r
+		s.other[id] = p
+	}
+}
+
+// pointwise combines two sets subject by subject.
+func pointwise(a, b subjectSet, op func(x, y Result) Result) subjectSet {
+	out := subjectSet{def: op(a.def, b.def)}
+	size := len(a.ids) + len(b.ids)
+	add := func(id string) {
+		if r := op(a.get(id), b.get(id)); !sameResult(r, out.def) {
+			out.with(id, r, size)
+		}
+	}
+	listed := func(s subjectSet, id string) bool {
+		if _, ok := s.ids[id]; ok {
+			return true
+		}
+		_, ok := s.other[id]
+		return ok
+	}
+	for id := range a.ids {
+		add(id)
+	}
+	for id := range a.other {
+		add(id)
+	}
+	for id := range b.ids {
+		if !listed(a, id) {
+			add(id)
+		}
+	}
+	for id := range b.other {
+		if !listed(a, id) {
+			add(id)
+		}
+	}
+	return out
+}
+
+func union(a, b subjectSet) subjectSet {
+	switch {
+	case b.empty():
+		return a
+	case a.empty():
+		return b
+	case a.cond() || b.cond():
+		return pointwise(a, b, or)
+	}
+	aAll, bAll := a.def.Allowed(), b.def.Allowed()
+	switch {
+	case aAll && bAll: // everyone but those both exclude
+		return definiteSet(true, keep(a.ids, func(id string) bool { _, in := b.ids[id]; return in }))
+	case aAll:
+		return definiteSet(true, keep(a.ids, func(id string) bool { _, in := b.ids[id]; return !in }))
+	case bAll:
+		return definiteSet(true, keep(b.ids, func(id string) bool { _, in := a.ids[id]; return !in }))
+	}
+	return definiteSet(false, merge(a.ids, b.ids))
+}
+
+func intersect(a, b subjectSet) subjectSet {
+	switch {
+	case a.empty() || b.empty():
+		return subjectSet{}
+	case a.cond() || b.cond():
+		return pointwise(a, b, and)
+	}
+	aAll, bAll := a.def.Allowed(), b.def.Allowed()
+	switch {
+	case aAll && bAll:
+		return definiteSet(true, merge(a.ids, b.ids))
+	case aAll:
+		return definiteSet(false, keep(b.ids, a.allows))
+	}
+	return definiteSet(false, keep(a.ids, b.allows))
+}
+
+func andNot(a, b Result) Result { return and(a, not(b)) }
+
+func subtract(a, b subjectSet) subjectSet {
+	switch {
+	case a.empty() || b.empty():
+		return a
+	case a.cond() || b.cond():
+		return pointwise(a, b, andNot)
+	}
+	aAll, bAll := a.def.Allowed(), b.def.Allowed()
+	switch {
+	case aAll && bAll: // those b excludes and a does not
+		return definiteSet(false, keep(b.ids, a.allows))
+	case aAll:
+		return definiteSet(true, merge(a.ids, b.ids))
+	}
+	return definiteSet(false, keep(a.ids, func(id string) bool { return !b.allows(id) }))
+}
+
+// scale is s where c holds: every answer and-ed with c.
+func scale(c Result, s subjectSet) subjectSet {
+	switch c.Permissionship {
+	case Allowed:
+		return s
+	case Denied:
+		return subjectSet{}
+	}
+	return pointwise(subjectSet{def: c}, s, and)
 }
 
 // keep returns the IDs of a for which keepIt is true.
@@ -181,71 +388,56 @@ func merge(a, b map[string]struct{}) map[string]struct{} {
 	return out
 }
 
-func union(a, b subjectSet) subjectSet {
-	switch {
-	case len(b.ids) == 0 && !b.all:
-		return a
-	case len(a.ids) == 0 && !a.all:
-		return b
-	case a.all && b.all: // everyone but those both exclude
-		return setOf(true, keep(a.ids, func(id string) bool { _, in := b.ids[id]; return in }))
-	case a.all:
-		return setOf(true, keep(a.ids, func(id string) bool { _, in := b.ids[id]; return !in }))
-	case b.all:
-		return setOf(true, keep(b.ids, func(id string) bool { _, in := a.ids[id]; return !in }))
-	}
-	return setOf(false, merge(a.ids, b.ids))
-}
-
-func intersect(a, b subjectSet) subjectSet {
-	switch {
-	case a.all && b.all:
-		return setOf(true, merge(a.ids, b.ids))
-	case a.all:
-		return setOf(false, keep(b.ids, a.has))
-	}
-	return setOf(false, keep(a.ids, b.has))
-}
-
-func subtract(a, b subjectSet) subjectSet {
-	switch {
-	case a.all && b.all: // those b excludes and a does not
-		return setOf(false, keep(b.ids, a.has))
-	case a.all:
-		return setOf(true, merge(a.ids, b.ids))
-	}
-	return setOf(false, keep(a.ids, func(id string) bool { return !b.has(id) }))
-}
-
-// page lists the set in ID order, the wildcard first, after cursor.
+// page lists the subjects the set does not deny in ID order, the wildcard
+// first, after cursor.
 func (s subjectSet) page(after string, limit int) LookupSubjectsResult {
 	var out LookupSubjectsResult
-	if s.all {
-		if after == "" {
-			ex := make([]string, 0, len(s.ids))
-			for id := range s.ids {
-				ex = append(ex, id)
-			}
-			sort.Strings(ex)
-			out.Subjects = append(out.Subjects, FoundSubject{ID: Wildcard, Excluded: ex})
+	if s.def.Permissionship != Denied && after == "" {
+		ex := make([]string, 0, len(s.ids)+len(s.other))
+		for id := range s.ids {
+			ex = append(ex, id)
 		}
-		return out
+		for id := range s.other {
+			ex = append(ex, id)
+		}
+		sort.Strings(ex)
+		out.Subjects = append(out.Subjects, found(Wildcard, s.def, ex))
 	}
-	ids := make([]string, 0, len(s.ids))
-	for id := range s.ids {
-		if after == "" || after == Wildcard || id > after {
+	ids := make([]string, 0, len(s.ids)+len(s.other))
+	keepID := func(id string) bool { return after == "" || after == Wildcard || id > after }
+	if s.def.Permissionship == Denied {
+		for id := range s.ids {
+			if keepID(id) {
+				ids = append(ids, id)
+			}
+		}
+	}
+	for id, r := range s.other {
+		if r.Permissionship != Denied && keepID(id) {
 			ids = append(ids, id)
 		}
 	}
 	sort.Strings(ids)
-	if len(ids) > limit {
-		ids = ids[:limit]
-		out.Next = ids[limit-1]
+	if n := len(out.Subjects) + len(ids); n > limit {
+		ids = ids[:limit-len(out.Subjects)]
+		if len(ids) > 0 {
+			out.Next = ids[len(ids)-1]
+		} else {
+			out.Next = Wildcard
+		}
 	}
 	for _, id := range ids {
-		out.Subjects = append(out.Subjects, FoundSubject{ID: id})
+		out.Subjects = append(out.Subjects, found(id, s.get(id), nil))
 	}
 	return out
+}
+
+func found(id string, r Result, excluded []string) FoundSubject {
+	f := FoundSubject{ID: id, Excluded: excluded}
+	if r.Permissionship == Conditional {
+		f.Conditional, f.Missing = true, r.Missing
+	}
+	return f
 }
 
 // subjectWalker is the per-request state of LookupSubjects.
@@ -255,12 +447,39 @@ type subjectWalker struct {
 	sc       *schema.Schema
 	rev      store.Revision
 	typ, rel string // the subjects looked up
+	reqCtx   requestContext
 	// stable holds nodes whose value did not depend on a cycle; approx the
 	// previous round's values of those that did, and round this round's.
 	stable, approx, round map[string]subjectSet
 	active                map[string]bool // on the current path
 	changed               bool            // a round value differs from approx
-	stats                 Stats
+	// caveats holds the answer of each stored caveat evaluated, so a
+	// relationship read again in a later fixpoint round is not
+	// evaluated (and charged) again. A stored caveat is shared by the
+	// store and never changes, so its pointer identifies it.
+	caveats map[*store.Caveat]Result
+	stats   Stats
+}
+
+// caveat is the answer of the caveat r carries, as Check evaluates it.
+func (w *subjectWalker) caveat(rel *schema.Relation, r store.Caveated) (Result, error) {
+	if r.Caveat == nil {
+		return allowed, nil
+	}
+	if res, ok := w.caveats[r.Caveat]; ok && allowsCaveat(w.sc, rel, r) {
+		return res, nil
+	}
+	res, evaluated, err := evalCaveat(w.sc, w.reqCtx, rel, r, &w.stats)
+	if err != nil {
+		return denied, err
+	}
+	if evaluated {
+		if w.caveats == nil {
+			w.caveats = map[*store.Caveat]Result{}
+		}
+		w.caveats[r.Caveat] = res
+	}
+	return res, nil
 }
 
 // node returns the subjects that hold typ:id#rel. tainted reports that the
@@ -291,15 +510,15 @@ func (w *subjectWalker) node(typ, id, rel string, depth int) (set subjectSet, ta
 	if d.IsPermission(rel) {
 		set, tainted, err = w.expr(typ, id, d.Permissions[rel].Expr, depth)
 	} else {
-		set, tainted, err = w.direct(typ, id, rel, depth)
+		set, tainted, err = w.direct(typ, id, d.Relations[rel], depth)
 	}
 	delete(w.active, k)
 	if err != nil {
 		return subjectSet{}, false, err
 	}
 	// A userset always holds itself, as in Check.
-	if w.rel != "" && typ == w.typ && rel == w.rel && !set.has(id) {
-		set = union(set, setOf(false, map[string]struct{}{id: {}}))
+	if w.rel != "" && typ == w.typ && rel == w.rel && !set.allows(id) {
+		set = union(set, definiteSet(false, map[string]struct{}{id: {}}))
 	}
 	if !tainted {
 		w.stable[k] = set
@@ -314,44 +533,74 @@ func (w *subjectWalker) node(typ, id, rel string, depth int) (set subjectSet, ta
 
 // direct gathers a stored relation's matching subjects and wildcard, and
 // the members of every userset it names that the current schema still
-// has, exactly as Check follows them.
-func (w *subjectWalker) direct(typ, id, rel string, depth int) (subjectSet, bool, error) {
-	if err := refuseCaveated(w.sc, typ, rel); err != nil {
-		return subjectSet{}, false, err
-	}
-	rels, err := w.e.r.ReadDirect(w.rev, typ, id, rel)
-	if err != nil {
-		return subjectSet{}, false, err
-	}
+// has, exactly as Check follows them, each where its relationship's
+// caveat holds.
+func (w *subjectWalker) direct(typ, id string, rel *schema.Relation, depth int) (subjectSet, bool, error) {
+	// own holds the plain subjects granted outright, condOwn those granted
+	// on a caveat left open; a subject in both is granted outright.
 	var own map[string]struct{}
-	all, out, tainted := false, subjectSet{}, false
-	for _, r := range rels {
+	var condOwn map[string]Result
+	wild, out, tainted := denied, subjectSet{}, false
+	err := w.e.eachDirect(w.sc, w.rev, typ, id, rel.Name, func(r store.Caveated) error {
 		if r.SubjectRelation == "" {
-			if r.SubjectType == w.typ && w.rel == "" {
-				if r.SubjectID == Wildcard {
-					all = true
-				} else {
-					if own == nil {
-						own = map[string]struct{}{}
-					}
-					own[r.SubjectID] = struct{}{}
-				}
+			if r.SubjectType != w.typ || w.rel != "" {
+				return nil
 			}
-			continue
+		} else if d, known := w.sc.Defs[r.SubjectType]; !known || !d.Has(r.SubjectRelation) {
+			return nil
 		}
-		if d, known := w.sc.Defs[r.SubjectType]; !known || !d.Has(r.SubjectRelation) {
-			continue
+		c, err := w.caveat(rel, r)
+		if err != nil || c.Permissionship == Denied {
+			return err
+		}
+		if r.SubjectRelation == "" {
+			switch {
+			case r.SubjectID == Wildcard:
+				wild = or(wild, c)
+			case c.Permissionship == Allowed:
+				if own == nil {
+					own = map[string]struct{}{}
+				}
+				own[r.SubjectID] = struct{}{}
+			default:
+				if condOwn == nil {
+					condOwn = map[string]Result{}
+				}
+				if prev, ok := condOwn[r.SubjectID]; ok {
+					c = or(prev, c)
+				}
+				condOwn[r.SubjectID] = c
+			}
+			return nil
 		}
 		s, t, err := w.node(r.SubjectType, r.SubjectID, r.SubjectRelation, depth+1)
 		if err != nil {
-			return subjectSet{}, false, err
+			return err
 		}
-		out, tainted = union(out, s), tainted || t
+		out, tainted = union(out, scale(c, s)), tainted || t
+		return nil
+	})
+	if err != nil {
+		return subjectSet{}, false, err
 	}
-	if all { // the wildcard holds everyone the usersets add
-		return subjectSet{all: true}, tainted, nil
+	if wild.Permissionship == Allowed { // the wildcard holds everyone the rest adds
+		return subjectSet{def: allowed}, tainted, nil
 	}
-	return union(out, setOf(false, own)), tainted, nil
+	if wild.Permissionship == Denied && len(condOwn) == 0 {
+		return union(out, definiteSet(false, own)), tainted, nil
+	}
+	mine := subjectSet{def: wild}
+	for sid := range own {
+		mine.with(sid, allowed, len(own))
+	}
+	for sid, c := range condOwn {
+		if _, outright := own[sid]; !outright {
+			if c = or(wild, c); !sameResult(c, wild) {
+				mine.with(sid, c, len(condOwn))
+			}
+		}
+	}
+	return union(out, mine), tainted, nil
 }
 
 func (w *subjectWalker) expr(typ, id string, e schema.Expr, depth int) (subjectSet, bool, error) {
@@ -359,23 +608,28 @@ func (w *subjectWalker) expr(typ, id string, e schema.Expr, depth int) (subjectS
 	case *schema.Ref:
 		return w.node(typ, id, e.Name, depth)
 	case *schema.Arrow:
-		if err := refuseCaveated(w.sc, typ, e.Tupleset); err != nil {
-			return subjectSet{}, false, err
-		}
-		rels, err := w.e.r.ReadDirect(w.rev, typ, id, e.Tupleset)
-		if err != nil {
-			return subjectSet{}, false, err
+		var ts *schema.Relation
+		if d, ok := w.sc.Defs[typ]; ok {
+			ts = d.Relations[e.Tupleset]
 		}
 		out, tainted := subjectSet{}, false
-		for _, r := range rels {
+		err := w.e.eachDirect(w.sc, w.rev, typ, id, e.Tupleset, func(r store.Caveated) error {
 			if d, ok := w.sc.Defs[r.SubjectType]; !ok || !d.Has(e.Computed) || r.SubjectID == Wildcard {
-				continue // as in Check
+				return nil // as in Check
+			}
+			c, err := w.caveat(ts, r)
+			if err != nil || c.Permissionship == Denied {
+				return err
 			}
 			s, t, err := w.node(r.SubjectType, r.SubjectID, e.Computed, depth+1)
 			if err != nil {
-				return subjectSet{}, false, err
+				return err
 			}
-			out, tainted = union(out, s), tainted || t
+			out, tainted = union(out, scale(c, s)), tainted || t
+			return nil
+		})
+		if err != nil {
+			return subjectSet{}, false, err
 		}
 		return out, tainted, nil
 	case *schema.Union:

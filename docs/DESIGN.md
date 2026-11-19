@@ -1818,12 +1818,6 @@ schema declares caveats, so a schema without caveats does exactly the
 lookups it did. The per-check memo packs each result in a byte, with the
 missing names of conditional ones on the side.
 
-Expand and LookupSubjects follow only relationships without a caveat. Rather
-than leave out subjects a caveat might grant, or keep subjects a caveated
-exclusion might remove, they refuse with `ErrCaveatedRelation` when they
-reach a relation that lists a subject type with a caveat; relations without
-caveated subject types work as before.
-
 Measured on a 4-core 2.1 GHz Xeon, a check through a caveated group
 membership and a caveated direct relationship takes about 6.8 µs
 uncached with both caveats evaluated, 3.3 µs when the answer is
@@ -1850,14 +1844,63 @@ caveat. A decided answer is `{"allowed": true|false, ...}` as before; a
 conditional one adds `"conditional": true, "missing": [...]`, so clients
 that read only `allowed` keep failing closed and grantd's recorded
 transcripts are unchanged. A caveat that fails at check time is a 400
-`invalid_argument` (in a bulk check, that item's `error`), as is
-`ErrCaveatedRelation` from expand and lookup subjects. A write update takes
+`invalid_argument` (in a bulk check, that item's `error`). A write update takes
 `expires_at` (RFC 3339) and `"caveat": {"name": ..., "context": {...}}`;
 watch reports both on the touch that set them. With check auditing, a
 conditional answer is an `authz.check_decided` deny with `conditional` and
 `missing` in its payload. `grantd_check_caveats_total` counts caveat
 evaluations; it is registered at the first one, so a server without
 caveats exposes exactly grantd's metrics.
+
+### Caveats in lookups, expand and read
+
+Subject lookups, resource lookups, Expand and reads all see caveated and
+expiring relationships (week 4, #83).
+
+**LookupSubjects** takes a caveat context and gives every subject the
+answer CheckResult would. Its sets of subjects became sets of answers: one
+answer (allowed, denied or conditional, with its missing names) for every
+ID the set does not list, the wildcard's, and one for each ID it lists.
+The definite sets of before are the special case "the listed IDs are
+allowed" or "every ID but the listed ones is allowed", and they keep their
+old representation and algorithms, a zero-size map value per ID; only a
+set with a conditional answer is combined answer by answer, with the
+Kleene `or`, `and` and `and not` that checks use. A caveated relationship
+contributes its subjects scaled by its caveat's answer: everything, nothing,
+or everything made conditional on the parameters it lacks. Each caveat is
+evaluated once per walk, however many rounds a cycle's fixpoint takes, and
+the caveats share the per-check cost budget. A found subject carries
+`Conditional` and `Missing`; a conditional wildcard is listed with every
+ID whose answer differs from it in `Excluded`, and those that may still
+hold the permission are listed after it with their own answers. Over HTTP
+a subject is `{"subject": ..., "conditional": true, "missing": [...]}`.
+
+**LookupResources** takes a context too and returns the conditional objects
+apart, in `Conditional` (over HTTP `"conditional": [{"id", "missing"}]`,
+absent when empty), so callers that read the IDs keep failing closed. A
+page's limit counts both kinds. The context is validated and hashed once
+per page instead of once per candidate.
+
+**Expand** does not evaluate caveats. A node reached through a caveated
+relationship, the subject leaf or with `recursive` the userset or arrow
+target, names the caveat and its stored context (over HTTP
+`"caveat": {"name", "context"}`). A relationship whose caveat the current
+schema no longer allows on its relation (only at a snapshot older than a
+schema change) is left out, as checks leave it out.
+
+**ReadRelationships** reads `store.ReadStored`. `engine.ReadResult` gains
+`Caveats` and `ExpiresAt`, each parallel to `Relationships` and nil when
+no relationship on the page has one. Over HTTP `relationships` stays a
+list of strings; `caveats` and `expires_at` map each relationship string
+that has one to its caveat or expiry, and are absent otherwise, so a
+store without caveats or expiry answers byte for byte as grantd did.
+
+A schema that declares no caveats reads through `ReadDirect` as before, so
+those lookups do not pay for the caveat pointers. Measured on a 4-core
+2.1 GHz Xeon, `BenchmarkLookupSubjectsDeepFolders` at depth 40 takes about
+1.43 ms and 1.07 MB against 1.25 ms and 1.00 MB before (allocations 817
+against 821), the larger set values; a 200-member group behind a caveated
+userset, half its members caveated, takes about 290 µs.
 
 ## One clock (internal/platform/clock)
 

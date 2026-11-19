@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -182,6 +183,14 @@ func TestLookupSubjectsDispatchesOncePerNode(t *testing.T) {
 	}
 }
 
+// setOf is the definite set of ids or, when all is set, of every ID but
+// ids.
+func setOf(all bool, ids map[string]struct{}) subjectSet {
+	return definiteSet(all, ids)
+}
+
+func (s subjectSet) has(id string) bool { return s.get(id).Allowed() }
+
 func TestSubjectSetOperations(t *testing.T) {
 	ids := func(s ...string) map[string]struct{} {
 		m := map[string]struct{}{}
@@ -195,8 +204,11 @@ func TestSubjectSetOperations(t *testing.T) {
 		for id := range s.ids {
 			xs = append(xs, id)
 		}
+		for id := range s.other {
+			xs = append(xs, id)
+		}
 		sort.Strings(xs)
-		if s.all {
+		if s.def.Allowed() {
 			return "*-" + strings.Join(xs, ",")
 		}
 		return strings.Join(xs, ",")
@@ -251,6 +263,107 @@ func TestSubjectSetOperations(t *testing.T) {
 	}
 	if ab.equal(bc) || ab.equal(setOf(true, ids("a", "b"))) || ab.equal(setOf(false, ids("a"))) {
 		t.Fatal("unequal sets compare equal")
+	}
+}
+
+// With conditional answers every operation is the pointwise Kleene
+// operation CheckResult uses, on every ID including those no set lists,
+// and sets stay in their one form.
+func TestSubjectSetOperationsThreeValued(t *testing.T) {
+	cx := Result{Permissionship: Conditional, Missing: []string{"x"}}
+	cy := Result{Permissionship: Conditional, Missing: []string{"y"}}
+	answers := []Result{allowed, denied, cx, cy}
+	universe := []string{"a", "b", "c"}
+	// Every set over the universe whose unlisted answer is any of the four:
+	// 4 defaults x 4^3 assignments, built through the normalising
+	// constructor below.
+	var sets []subjectSet
+	for _, def := range answers {
+		for n := 0; n < 64; n++ {
+			s := subjectSet{def: def}
+			for i, id := range universe {
+				if r := answers[(n>>(2*i))&3]; !sameResult(r, def) {
+					s.with(id, r, 0)
+				}
+			}
+			sets = append(sets, s)
+		}
+	}
+	rng := rand.New(rand.NewSource(7))
+	for range 4000 {
+		x, y := sets[rng.Intn(len(sets))], sets[rng.Intn(len(sets))]
+		c := answers[rng.Intn(len(answers))]
+		for _, id := range append(universe, "unlisted") {
+			for _, k := range []struct {
+				name      string
+				got, want Result
+			}{
+				{"union", union(x, y).get(id), or(x.get(id), y.get(id))},
+				{"intersect", intersect(x, y).get(id), and(x.get(id), y.get(id))},
+				{"subtract", subtract(x, y).get(id), and(x.get(id), not(y.get(id)))},
+				{"scale", scale(c, x).get(id), and(c, x.get(id))},
+			} {
+				if !sameResult(k.got, k.want) {
+					t.Fatalf("%s on %s: %v, want %v", k.name, id, k.got, k.want)
+				}
+			}
+		}
+		for _, s := range []subjectSet{union(x, y), intersect(x, y), subtract(x, y), scale(c, x)} {
+			// Every listed answer differs from the default, flipped answers
+			// are only in ids, and an ID is listed once.
+			for id := range s.ids {
+				if _, twice := s.other[id]; twice {
+					t.Fatalf("%s in ids of a set defaulting to %v", id, s.def)
+				}
+			}
+			for id, r := range s.other {
+				if sameResult(*r, s.def) || (r.Permissionship == flip(s.def).Permissionship && s.def.Permissionship != Conditional) {
+					t.Fatalf("%s listed in other as %v with default %v", id, *r, s.def)
+				}
+			}
+		}
+	}
+}
+
+// A page lists the wildcard with its answer and every ID that answers
+// otherwise, then each listed ID that is not denied, and pages on.
+func TestSubjectSetPageThreeValued(t *testing.T) {
+	cx := Result{Permissionship: Conditional, Missing: []string{"x"}}
+	s := subjectSet{def: cx}
+	s.with("a", allowed, 0)
+	s.with("b", denied, 0)
+	s.with("c", Result{Permissionship: Conditional, Missing: []string{"x", "y"}}, 0)
+	if len(s.ids) != 1 || len(s.other) != 2 {
+		t.Fatalf("set %+v", s)
+	}
+	got := s.page("", 10)
+	want := LookupSubjectsResult{Subjects: []FoundSubject{
+		{ID: Wildcard, Excluded: []string{"a", "b", "c"}, Conditional: true, Missing: []string{"x"}},
+		{ID: "a"},
+		{ID: "c", Conditional: true, Missing: []string{"x", "y"}},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("page = %+v", got)
+	}
+	// One at a time: the wildcard, then each ID, the cursor naming the last.
+	var all []FoundSubject
+	after := ""
+	for i := 0; ; i++ {
+		p := s.page(after, 1)
+		all = append(all, p.Subjects...)
+		if p.Next == "" {
+			break
+		}
+		if i > 5 {
+			t.Fatal("paging does not end")
+		}
+		after = p.Next
+	}
+	if !reflect.DeepEqual(all, want.Subjects) {
+		t.Fatalf("pages = %+v", all)
+	}
+	if p := s.page("", 1); p.Next != Wildcard {
+		t.Fatalf("first page of one: %+v", p)
 	}
 }
 

@@ -30,8 +30,9 @@ var (
 )
 
 // Reader is the part of the store the engine needs. ReadDirect returns the
-// relationships without a caveat, which Expand and LookupSubjects follow;
-// ReadDirectCaveated returns every relationship with its caveat, for Check.
+// relationships without a caveat, which is all of them when the schema
+// declares no caveats, and Expand and LookupSubjects then read through it;
+// ReadDirectCaveated returns every relationship with its caveat.
 type Reader interface {
 	ReadDirect(rev store.Revision, resourceType, resourceID, relation string) ([]store.Relationship, error)
 	ReadDirectCaveated(rev store.Revision, resourceType, resourceID, relation string) ([]store.Caveated, error)
@@ -109,10 +110,21 @@ func (e *Engine) Check(ctx context.Context, sc *schema.Schema, rev store.Revisio
 // each caveated relationship (stored values win); a parameter neither
 // supplies makes the answer conditional when the answer depends on it.
 func (e *Engine) CheckResult(ctx context.Context, sc *schema.Schema, rev store.Revision, q Request, caveatCtx map[string]any) (Result, Stats, error) {
-	var st state // on the stack: one check allocates only its maps
-	if err := e.initState(&st, ctx, sc, rev, q, caveatCtx, nil); err != nil {
+	if err := q.Validate(sc); err != nil {
 		return denied, Stats{}, err
 	}
+	rc, err := newRequestContext(caveatCtx)
+	if err != nil {
+		return denied, Stats{}, err
+	}
+	return e.checkValid(ctx, sc, rev, q, rc)
+}
+
+// checkValid is CheckResult for a validated request and context.
+func (e *Engine) checkValid(ctx context.Context, sc *schema.Schema, rev store.Revision, q Request, rc requestContext) (Result, Stats, error) {
+	// On the stack: one check allocates only its maps.
+	st := state{e: e, ctx: ctx, sc: sc, rev: rev, target: q.Subject, reqCtx: rc,
+		memo: map[string]uint8{}, active: map[string]bool{}}
 	r, _, err := st.check(q.ResourceType, q.ResourceID, q.Permission, 0)
 	if err != nil {
 		return denied, st.stats, err

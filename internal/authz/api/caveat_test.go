@@ -142,7 +142,9 @@ func TestCaveatRequestErrors(t *testing.T) {
 		{"bad stored context", "/v1/relationships/write", map[string]any{"updates": []map[string]any{{"op": "touch",
 			"relationship": "doc:plan#viewer@user:alice", "caveat": map[string]any{"name": "ip_allowed", "context": map[string]any{"allowed": 5}}}}}, 400, "allowed"},
 		{"bad expires_at", "/v1/relationships/write", `{"updates":[{"op":"touch","relationship":"doc:plan#viewer@user:alice","expires_at":"tomorrow"}]}`, 400, "invalid JSON body"},
-		{"expand over a caveated relation", "/v1/expand", map[string]any{"resource": "doc:plan", "permission": "view"}, 400, "caveated"},
+		{"lookup resources context not an object", "/v1/lookup/resources", `{"resource_type":"doc","permission":"view","subject":"user:alice","context":"x"}`, 400, "context must be a JSON object"},
+		{"lookup subjects context too large", "/v1/lookup/subjects", map[string]any{"resource": "doc:plan", "permission": "view", "subject_type": "user",
+			"context": map[string]any{"pad": strings.Repeat("x", 17<<10)}}, 400, "context is"},
 	} {
 		code, out := h.call("POST", c.path, c.body)
 		if code != c.code {

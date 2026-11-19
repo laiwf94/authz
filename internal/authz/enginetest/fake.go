@@ -324,6 +324,9 @@ func (f *Fake) LookupResources(ctx context.Context, req engine.LookupResourcesRe
 	if err := probe.Validate(f.sc); err != nil {
 		return engine.LookupResourcesResult{}, err
 	}
+	if err := check.ValidateContext(req.Context); err != nil {
+		return engine.LookupResourcesResult{}, err
+	}
 	if err := f.checkRev(rev); err != nil {
 		return engine.LookupResourcesResult{}, err
 	}
@@ -395,6 +398,9 @@ func (f *Fake) LookupSubjects(ctx context.Context, req engine.LookupSubjectsRequ
 	q := check.LookupSubjectsRequest{ResourceType: req.ResourceType, ResourceID: req.ResourceID, Permission: req.Permission,
 		SubjectType: req.SubjectType, SubjectRelation: req.SubjectRelation, After: req.Cursor, Limit: req.Limit}
 	if err := q.Validate(f.sc); err != nil {
+		return engine.LookupSubjectsResult{}, err
+	}
+	if err := check.ValidateContext(req.Context); err != nil {
 		return engine.LookupSubjectsResult{}, err
 	}
 	if err := f.checkRev(rev); err != nil {

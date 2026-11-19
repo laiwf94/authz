@@ -24,19 +24,41 @@ const (
 
 // LookupResult is one page of a lookup.
 type LookupResult struct {
+	// IDs are the objects on which the subject has the permission.
 	IDs []string
+	// Conditional are the objects on which it has the permission only if
+	// the caveat parameters each names allow it, in ID order. A page's
+	// limit counts them with IDs.
+	Conditional []ConditionalID
 	// Next is the cursor to continue from, or "" when the scan is complete.
 	Next string
 }
 
+// ConditionalID is an object a conditional answer was found for, with the
+// caveat parameters it depends on (sorted).
+type ConditionalID struct {
+	ID      string
+	Missing []string
+}
+
 // LookupResources returns the IDs of resourceType objects on which subject
-// has permission, in ID order, after cursor after.
+// has permission, in ID order, after cursor after. It is
+// LookupResourcesContext with no caveat context.
+func (e *Engine) LookupResources(ctx context.Context, sc *schema.Schema, l Lister, rev store.Revision,
+	resourceType, permission string, subject store.Subject, after string, limit int) (LookupResult, error) {
+	return e.LookupResourcesContext(ctx, sc, l, rev, resourceType, permission, subject, after, limit, nil)
+}
+
+// LookupResourcesContext returns the IDs of resourceType objects on which
+// subject has permission, in ID order, after cursor after: in IDs those
+// that CheckResult with caveatCtx allows, in Conditional those it answers
+// conditional, with their missing parameters.
 //
 // It checks each candidate object. That is simple and exactly as correct as
 // Check; the cost is linear in the number of objects of the type, which is
 // bounded per call by MaxLookupEvaluations and continued through the cursor.
-func (e *Engine) LookupResources(ctx context.Context, sc *schema.Schema, l Lister, rev store.Revision,
-	resourceType, permission string, subject store.Subject, after string, limit int) (LookupResult, error) {
+func (e *Engine) LookupResourcesContext(ctx context.Context, sc *schema.Schema, l Lister, rev store.Revision,
+	resourceType, permission string, subject store.Subject, after string, limit int, caveatCtx map[string]any) (LookupResult, error) {
 	if limit <= 0 {
 		limit = DefaultLookupLimit
 	}
@@ -45,6 +67,10 @@ func (e *Engine) LookupResources(ctx context.Context, sc *schema.Schema, l Liste
 	}
 	probe := Request{ResourceType: resourceType, ResourceID: "probe", Permission: permission, Subject: subject}
 	if err := probe.Validate(sc); err != nil {
+		return LookupResult{}, err
+	}
+	rc, err := newRequestContext(caveatCtx)
+	if err != nil {
 		return LookupResult{}, err
 	}
 	ids, err := l.ObjectIDs(rev, resourceType)
@@ -56,22 +82,27 @@ func (e *Engine) LookupResources(ctx context.Context, sc *schema.Schema, l Liste
 		start++
 	}
 	var out LookupResult
-	evaluated := 0
+	evaluated, found := 0, 0
 	for i := start; i < len(ids); i++ {
 		if evaluated == MaxLookupEvaluations {
 			out.Next = ids[i-1]
 			return out, nil
 		}
 		evaluated++
-		ok, _, err := e.Check(ctx, sc, rev, Request{ResourceType: resourceType, ResourceID: ids[i], Permission: permission, Subject: subject})
+		probe.ResourceID = ids[i]
+		r, _, err := e.checkValid(ctx, sc, rev, probe, rc)
 		if err != nil {
 			return LookupResult{}, fmt.Errorf("checking %s:%s: %w", resourceType, ids[i], err)
 		}
-		if !ok {
+		switch r.Permissionship {
+		case Denied:
 			continue
+		case Allowed:
+			out.IDs = append(out.IDs, ids[i])
+		case Conditional:
+			out.Conditional = append(out.Conditional, ConditionalID{ID: ids[i], Missing: r.Missing})
 		}
-		out.IDs = append(out.IDs, ids[i])
-		if len(out.IDs) == limit {
+		if found++; found == limit {
 			if i+1 < len(ids) {
 				out.Next = ids[i]
 			}

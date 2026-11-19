@@ -53,7 +53,12 @@ type TraceNode struct {
 	// Result is the caveat's: a caveated subject node that is false
 	// matched but its caveat did not hold.
 	Caveat string `json:"caveat,omitempty"`
-	Result bool   `json:"result"`
+	// CaveatContext is the context stored with that caveat, in Expand
+	// trees, where Caveat also marks a userset or arrow target reached
+	// through a caveated relationship. Shared with the store: not to be
+	// modified.
+	CaveatContext map[string]any `json:"caveat_context,omitempty"`
+	Result        bool           `json:"result"`
 	// Conditional marks a result that depends on the caveat parameters
 	// Missing names; Result is then false.
 	Conditional bool     `json:"conditional,omitempty"`

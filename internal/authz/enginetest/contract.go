@@ -293,6 +293,45 @@ func (c *contract) check(t *testing.T) {
 	if r := res.Results[1]; r.Err != nil || !r.Allowed || r.Permissionship != check.Allowed {
 		t.Errorf("bulk check with a context: %+v", r)
 	}
+
+	// Lookups take a context the same way: it changes nothing where no
+	// caveat is stored, nothing is conditional, and one too large is
+	// refused.
+	ctxs := []map[string]any{nil, {"client_ip": "10.0.0.1", "n": 3}}
+	var lookups [2]engine.LookupResourcesResult
+	var subjects [2]engine.LookupSubjectsResult
+	for i, c := range ctxs {
+		lookups[i], err = e.LookupResources(bg, engine.LookupResourcesRequest{ResourceType: "doc", Permission: "view",
+			Subject: subject(t, "user:alice"), Consistency: cons, Context: c})
+		ok(t, err)
+		subjects[i], err = e.LookupSubjects(bg, engine.LookupSubjectsRequest{ResourceType: "doc", ResourceID: "plan", Permission: "view",
+			SubjectType: "user", Consistency: cons, Context: c})
+		ok(t, err)
+	}
+	if !reflect.DeepEqual(lookups[0], lookups[1]) || lookups[0].Conditional != nil || len(lookups[0].ResourceIDs) == 0 {
+		t.Errorf("lookup resources: %+v without a context, %+v with one", lookups[0], lookups[1])
+	}
+	if !reflect.DeepEqual(subjects[0], subjects[1]) || len(subjects[0].Subjects) == 0 {
+		t.Errorf("lookup subjects: %+v without a context, %+v with one", subjects[0], subjects[1])
+	}
+	for _, f := range subjects[0].Subjects {
+		if f.Conditional || f.Missing != nil {
+			t.Errorf("lookup subjects without caveats found %+v", f)
+		}
+	}
+	_, err = e.LookupResources(bg, engine.LookupResourcesRequest{ResourceType: "doc", Permission: "view",
+		Subject: subject(t, "user:alice"), Consistency: cons, Context: big})
+	wantErr(t, "an oversized context in lookup resources", err, store.ErrInvalid)
+	_, err = e.LookupSubjects(bg, engine.LookupSubjectsRequest{ResourceType: "doc", ResourceID: "plan", Permission: "view",
+		SubjectType: "user", Consistency: cons, Context: big})
+	wantErr(t, "an oversized context in lookup subjects", err, store.ErrInvalid)
+	// Nothing in the contract's data has a caveat or an expiry, so reads
+	// carry neither.
+	rd, err := e.ReadRelationships(bg, engine.ReadRequest{Filter: store.Filter{ResourceType: "doc"}, Consistency: cons})
+	ok(t, err)
+	if len(rd.Relationships) == 0 || rd.Caveats != nil || rd.ExpiresAt != nil {
+		t.Errorf("read: %+v", rd)
+	}
 }
 
 func (c *contract) checkBulk(t *testing.T) {

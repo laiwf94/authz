@@ -53,8 +53,8 @@ var (
 // Limits on caveats in one check.
 const (
 	// MaxCaveatCostPerCheck bounds the total CEL cost of the caveats one
-	// check evaluates. Each evaluation is also bounded by the caveat's own
-	// limit (cel.DefaultMaxCost).
+	// check, or one page of a subject lookup, evaluates. Each evaluation is
+	// also bounded by the caveat's own limit (cel.DefaultMaxCost).
 	MaxCaveatCostPerCheck = 1_000_000
 	// MaxContextSize bounds a check's context, in bytes of its JSON
 	// encoding.
@@ -66,34 +66,44 @@ const (
 // such as a missing map key.
 var ErrCaveat = errors.New("caveat evaluation failed")
 
-// ErrCaveatedRelation is returned by Expand and LookupSubjects when they
-// reach a relation whose subject types carry a caveat. They follow only
-// relationships without one (Reader.ReadDirect), so rather than leave out
-// subjects a caveat might grant, or keep subjects a caveated exclusion
-// might remove, they refuse. Check, CheckResult, Explain and
-// LookupResources evaluate caveats.
-var ErrCaveatedRelation = errors.New("relation allows caveated relationships, which expand and lookup subjects do not evaluate")
-
-// refuseCaveated returns ErrCaveatedRelation when typ#rel is a relation
-// listing a subject type with a caveat. Relationships are only stored
-// with a caveat the relation lists, so a relation that lists none holds
-// none under the current schema; one stored before a schema change
-// grants nothing in Check either.
-func refuseCaveated(sc *schema.Schema, typ, rel string) error {
-	d, ok := sc.Defs[typ]
-	if !ok {
+// eachDirect calls fn for each relationship stored on typ:id#rel at rev,
+// with its caveat (nil for none). A schema that declares no caveats can
+// hold no caveated relationship, so it reads through ReadDirect, which
+// does not carry the caveat pointers.
+func (e *Engine) eachDirect(sc *schema.Schema, rev store.Revision, typ, id, rel string, fn func(store.Caveated) error) error {
+	if len(sc.Caveats) == 0 {
+		rels, err := e.r.ReadDirect(rev, typ, id, rel)
+		if err != nil {
+			return err
+		}
+		for _, r := range rels {
+			if err := fn(store.Caveated{Relationship: r}); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
-	r, ok := d.Relations[rel]
-	if !ok {
-		return nil
+	rels, err := e.r.ReadDirectCaveated(rev, typ, id, rel)
+	if err != nil {
+		return err
 	}
-	for _, a := range r.Allowed {
-		if a.Caveat != "" {
-			return fmt.Errorf("%w: %s#%s allows %s", ErrCaveatedRelation, typ, rel, a)
+	for _, r := range rels {
+		if err := fn(r); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// allowsCaveat reports whether the current schema lets rel hold r with
+// the caveat it carries. One that it does not (only possible at a
+// snapshot older than a schema change) grants nothing.
+func allowsCaveat(sc *schema.Schema, rel *schema.Relation, r store.Caveated) bool {
+	if r.Caveat == nil {
+		return true
+	}
+	_, known := sc.Caveats[r.Caveat.Name]
+	return known && rel != nil && rel.AllowsCaveat(r.SubjectType, r.SubjectID, r.SubjectRelation, r.Caveat.Name)
 }
 
 // or is the union of two answers: allowed if either is, conditional if
@@ -211,26 +221,35 @@ func newRequestContext(ctx map[string]any) (requestContext, error) {
 	return requestContext{vals: vals, hash: base64.RawStdEncoding.EncodeToString(sum[:16])}, nil
 }
 
-// caveat evaluates the caveat r carries, with its stored context over the
-// check's. A relationship the current schema does not let rel hold with
-// that caveat (only possible at a snapshot older than a schema change)
-// grants nothing, as in Expand and LookupSubjects, which do not read
-// caveated relationships.
+// caveat evaluates the caveat r carries for a check, counting it so the
+// node knows its result depended on the context.
 func (s *state) caveat(rel *schema.Relation, r store.Caveated) (Result, error) {
+	res, evaluated, err := evalCaveat(s.sc, s.reqCtx, rel, r, &s.stats)
+	if evaluated {
+		s.caveats++
+	}
+	return res, err
+}
+
+// evalCaveat evaluates the caveat r carries, with its stored context over
+// the request's, and counts it in st. A relationship without a caveat is
+// allowed without evaluating anything; one the current schema does not let
+// rel hold with that caveat (see allowsCaveat) is denied. evaluated
+// reports that the caveat's expression ran.
+func evalCaveat(sc *schema.Schema, reqCtx requestContext, rel *schema.Relation, r store.Caveated, st *Stats) (res Result, evaluated bool, err error) {
 	c := r.Caveat
 	if c == nil {
-		return allowed, nil
+		return allowed, false, nil
 	}
-	cv, known := s.sc.Caveats[c.Name]
-	if !known || rel == nil || !rel.AllowsCaveat(r.SubjectType, r.SubjectID, r.SubjectRelation, c.Name) {
-		return denied, nil
+	if !allowsCaveat(sc, rel, r) {
+		return denied, false, nil
 	}
-	s.caveats++
-	s.stats.Caveats++
-	vars := s.reqCtx.vals
+	cv := sc.Caveats[c.Name]
+	st.Caveats++
+	vars := reqCtx.vals
 	if len(c.Context) > 0 {
-		vars = make(map[string]any, len(c.Context)+len(s.reqCtx.vals))
-		for k, v := range s.reqCtx.vals {
+		vars = make(map[string]any, len(c.Context)+len(reqCtx.vals))
+		for k, v := range reqCtx.vals {
 			vars[k] = v
 		}
 		for k, v := range c.Context {
@@ -238,22 +257,22 @@ func (s *state) caveat(rel *schema.Relation, r store.Caveated) (Result, error) {
 		}
 	}
 	out, err := cv.Program.Eval(vars)
-	s.stats.CaveatCost += int(out.Cost)
+	st.CaveatCost += int(out.Cost)
 	if err != nil {
-		return denied, fmt.Errorf("%w: %s on %s: %v", ErrCaveat, c.Name, r.Relationship, err)
+		return denied, true, fmt.Errorf("%w: %s on %s: %v", ErrCaveat, c.Name, r.Relationship, err)
 	}
-	if s.stats.CaveatCost > MaxCaveatCostPerCheck {
-		return denied, ErrTooMuchWork
+	if st.CaveatCost > MaxCaveatCostPerCheck {
+		return denied, true, ErrTooMuchWork
 	}
 	if !out.Known() {
-		return Result{Permissionship: Conditional, Missing: slices.Clip(out.Missing)}, nil
+		return Result{Permissionship: Conditional, Missing: slices.Clip(out.Missing)}, true, nil
 	}
 	b, isBool := out.Value.(bool)
 	if !isBool {
-		return denied, fmt.Errorf("%w: %s on %s gave %T, not bool", ErrCaveat, c.Name, r.Relationship, out.Value)
+		return denied, true, fmt.Errorf("%w: %s on %s gave %T, not bool", ErrCaveat, c.Name, r.Relationship, out.Value)
 	}
 	if b {
-		return allowed, nil
+		return allowed, true, nil
 	}
-	return denied, nil
+	return denied, true, nil
 }

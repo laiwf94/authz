@@ -402,37 +402,6 @@ func dump(n *TraceNode) string {
 	return strings.ReplaceAll(b.String(), "  ", " ")
 }
 
-func TestExpandAndLookupSubjectsRefuseCaveatedRelations(t *testing.T) {
-	f := newCaveatFixture(t, nil)
-	f.write("doc:d#viewer@user:a", "")
-	f.write("folder:f#viewer@user:a", "")
-	bg := context.Background()
-	for _, q := range []struct{ typ, rel string }{{"doc", "viewer"}, {"doc", "view"}, {"folder", "view"}} {
-		_, _, err := f.eng.Expand(bg, f.sc, f.st.Head(), ExpandRequest{ResourceType: q.typ, ResourceID: "d", Permission: q.rel})
-		_, _, err2 := f.eng.LookupSubjects(bg, f.sc, f.st.Head(), LookupSubjectsRequest{ResourceType: q.typ, ResourceID: "d", Permission: q.rel, SubjectType: "user"})
-		for _, e := range []error{err, err2} {
-			if !errors.Is(e, ErrCaveatedRelation) {
-				t.Errorf("%s#%s: %v", q.typ, q.rel, e)
-			}
-		}
-	}
-	// doc#parent lists folder with flag: the arrow is refused even when
-	// the relation it reads first has no caveat.
-	if err := refuseCaveated(f.sc, "doc", "parent"); !errors.Is(err, ErrCaveatedRelation) || !strings.Contains(err.Error(), "doc#parent allows folder with flag") {
-		t.Fatal(err)
-	}
-	for _, q := range [][2]string{{"user", "x"}, {"doc", "view"}, {"nope", "x"}} {
-		if err := refuseCaveated(f.sc, q[0], q[1]); err != nil {
-			t.Errorf("%v: %v", q, err)
-		}
-	}
-	// A schema without caveats expands as before.
-	ff := newFixture(t, nil, "doc:a#viewer@user:x")
-	if _, _, err := ff.eng.Expand(bg, mustSchema(t, ff.st), ff.st.Head(), ExpandRequest{ResourceType: "doc", ResourceID: "a", Permission: "view"}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func mustSchema(t testing.TB, st *store.Store) *schema.Schema {
 	t.Helper()
 	sc, _ := st.Schema()
@@ -442,8 +411,8 @@ func mustSchema(t testing.TB, st *store.Store) *schema.Schema {
 	return sc
 }
 
-// LookupResources lists only the objects the subject definitely has the
-// permission on.
+// LookupResources lists in IDs only the objects the subject definitely has
+// the permission on, and the conditional ones apart.
 func TestLookupResourcesSkipsConditional(t *testing.T) {
 	f := newCaveatFixture(t, nil)
 	f.write("doc:a#viewer@user:u", "")
@@ -452,6 +421,9 @@ func TestLookupResourcesSkipsConditional(t *testing.T) {
 	got, err := f.eng.LookupResources(context.Background(), f.sc, f.st, f.st.Head(), "doc", "view", store.Subject{Type: "user", ID: "u"}, "", 0)
 	if err != nil || strings.Join(got.IDs, ",") != "a,c" {
 		t.Fatalf("lookup = %v, %v", got.IDs, err)
+	}
+	if want := []ConditionalID{{ID: "b", Missing: []string{"allowed", "client_ip"}}}; !reflect.DeepEqual(got.Conditional, want) {
+		t.Fatalf("conditional = %+v", got.Conditional)
 	}
 }
 

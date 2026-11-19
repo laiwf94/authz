@@ -58,6 +58,16 @@ func (q ExpandRequest) Validate(sc *schema.Schema) error {
 //     names: a KindSubject leaf "folder:f1#view" or, with Recursive, that
 //     object's view node expanded.
 //
+// A relationship with a caveat holds only where its caveat does, so its
+// node (the subject leaf, or with Recursive the userset or arrow target
+// it leads to) names the caveat in Caveat and carries the relationship's
+// stored context in CaveatContext. Expand does not evaluate caveats: the
+// tree shows every relationship that may grant, and CheckResult or
+// LookupSubjects with a context answers for one. A relationship whose
+// caveat the current schema no longer allows on its relation (only
+// possible at a snapshot older than a schema change) grants nothing and
+// is left out, as Check leaves it out.
+//
 // Every object#relation is expanded once per tree. A later occurrence is a
 // node with Memo set and no children, and one met again inside its own
 // expansion (a cycle in the data) is a node with Cut set. Read the tree as
@@ -82,7 +92,7 @@ func (e *Engine) Expand(ctx context.Context, sc *schema.Schema, rev store.Revisi
 	x := &expander{e: e, ctx: ctx, sc: sc, rev: rev, recursive: q.Recursive,
 		tr: &tracer{max: max}, done: map[string]bool{}, active: map[string]bool{}}
 	x.tr.cur = &x.tr.top
-	if err := x.node(q.ResourceType, q.ResourceID, q.Permission, 0); err != nil {
+	if err := x.node(q.ResourceType, q.ResourceID, q.Permission, nil, 0); err != nil {
 		return nil, x.stats, err
 	}
 	return &Trace{Root: x.tr.top.Children[0], Nodes: x.tr.n, Truncated: x.tr.truncated}, x.stats, nil
@@ -107,8 +117,9 @@ func (x *expander) kind(typ, rel string) TraceKind {
 	return KindRelation
 }
 
-// node records typ:id#rel and, the first time it is met, its expansion.
-func (x *expander) node(typ, id, rel string, depth int) error {
+// node records typ:id#rel, reached through a relationship with caveat c
+// (nil for none), and the first time it is met its expansion.
+func (x *expander) node(typ, id, rel string, c *store.Caveat, depth int) error {
 	if err := x.ctx.Err(); err != nil {
 		return err
 	}
@@ -116,6 +127,7 @@ func (x *expander) node(typ, id, rel string, depth int) error {
 		return ErrDepthExceeded
 	}
 	n := TraceNode{Kind: x.kind(typ, rel), Object: typ + ":" + id, Relation: rel}
+	setCaveat(&n, c)
 	k := typ + ":" + id + "#" + rel
 	switch {
 	case x.active[k]:
@@ -142,39 +154,41 @@ func (x *expander) node(typ, id, rel string, depth int) error {
 	if d.IsPermission(rel) {
 		err = x.expr(typ, id, d.Permissions[rel].Expr, depth)
 	} else {
-		err = x.direct(typ, id, rel, depth)
+		err = x.direct(typ, id, d.Relations[rel], depth)
 	}
 	delete(x.active, k)
 	x.tr.close(node, parent, denied, false)
 	return err
 }
 
+// setCaveat records the caveat a node was reached through.
+func setCaveat(n *TraceNode, c *store.Caveat) {
+	if c != nil {
+		n.Caveat, n.CaveatContext = c.Name, c.Context
+	}
+}
+
 // direct lists a stored relation's subjects, skipping those the current
 // schema no longer allows (only possible at a snapshot older than a schema
 // change), exactly as Check does.
-func (x *expander) direct(typ, id, rel string, depth int) error {
-	if err := refuseCaveated(x.sc, typ, rel); err != nil {
-		return err
-	}
-	rels, err := x.e.r.ReadDirect(x.rev, typ, id, rel)
-	if err != nil {
-		return err
-	}
-	for _, r := range rels {
+func (x *expander) direct(typ, id string, rel *schema.Relation, depth int) error {
+	return x.e.eachDirect(x.sc, x.rev, typ, id, rel.Name, func(r store.Caveated) error {
+		if !allowsCaveat(x.sc, rel, r) {
+			return nil
+		}
 		if r.SubjectRelation != "" {
 			if d, known := x.sc.Defs[r.SubjectType]; !known || !d.Has(r.SubjectRelation) {
-				continue
+				return nil
 			}
 			if x.recursive {
-				if err := x.node(r.SubjectType, r.SubjectID, r.SubjectRelation, depth+1); err != nil {
-					return err
-				}
-				continue
+				return x.node(r.SubjectType, r.SubjectID, r.SubjectRelation, r.Caveat, depth+1)
 			}
 		}
-		x.tr.leaf(TraceNode{Kind: KindSubject, Object: typ + ":" + id, Relation: rel, Subject: subjectString(r)})
-	}
-	return nil
+		n := TraceNode{Kind: KindSubject, Object: typ + ":" + id, Relation: rel.Name, Subject: subjectString(r.Relationship)}
+		setCaveat(&n, r.Caveat)
+		x.tr.leaf(n)
+		return nil
+	})
 }
 
 func (x *expander) expr(typ, id string, e schema.Expr, depth int) error {
@@ -182,7 +196,7 @@ func (x *expander) expr(typ, id string, e schema.Expr, depth int) error {
 	var l, r schema.Expr
 	switch e := e.(type) {
 	case *schema.Ref:
-		return x.node(typ, id, e.Name, depth)
+		return x.node(typ, id, e.Name, nil, depth)
 	case *schema.Arrow:
 		node, parent := x.tr.open(TraceNode{Kind: KindArrow, Object: typ + ":" + id, Expr: exprString(e)})
 		var err error
@@ -214,25 +228,21 @@ func (x *expander) expr(typ, id string, e schema.Expr, depth int) error {
 // arrow lists the objects the tupleset names, each with the computed
 // relation, skipping the ones Check skips.
 func (x *expander) arrow(typ, id string, e *schema.Arrow, depth int) error {
-	if err := refuseCaveated(x.sc, typ, e.Tupleset); err != nil {
-		return err
+	var ts *schema.Relation
+	if d, ok := x.sc.Defs[typ]; ok {
+		ts = d.Relations[e.Tupleset]
 	}
-	rels, err := x.e.r.ReadDirect(x.rev, typ, id, e.Tupleset)
-	if err != nil {
-		return err
-	}
-	for _, r := range rels {
-		if d, ok := x.sc.Defs[r.SubjectType]; !ok || !d.Has(e.Computed) || r.SubjectID == "*" {
-			continue
+	return x.e.eachDirect(x.sc, x.rev, typ, id, e.Tupleset, func(r store.Caveated) error {
+		if d, ok := x.sc.Defs[r.SubjectType]; !ok || !d.Has(e.Computed) || r.SubjectID == "*" || !allowsCaveat(x.sc, ts, r) {
+			return nil
 		}
 		if x.recursive {
-			if err := x.node(r.SubjectType, r.SubjectID, e.Computed, depth+1); err != nil {
-				return err
-			}
-			continue
+			return x.node(r.SubjectType, r.SubjectID, e.Computed, r.Caveat, depth+1)
 		}
-		x.tr.leaf(TraceNode{Kind: KindSubject, Object: typ + ":" + id, Relation: e.Tupleset,
-			Subject: r.SubjectType + ":" + r.SubjectID + "#" + e.Computed})
-	}
-	return nil
+		n := TraceNode{Kind: KindSubject, Object: typ + ":" + id, Relation: e.Tupleset,
+			Subject: r.SubjectType + ":" + r.SubjectID + "#" + e.Computed}
+		setCaveat(&n, r.Caveat)
+		x.tr.leaf(n)
+		return nil
+	})
 }

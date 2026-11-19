@@ -464,7 +464,7 @@ func TestLookupSubjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(res.Subjects) != "[{bob []} {carl []}]" || res.Cursor != "carl" || res.At.Revision < w.Revision {
+	if fmt.Sprint(res.Subjects) != "[{bob [] false []} {carl [] false []}]" || res.Cursor != "carl" || res.At.Revision < w.Revision {
 		t.Fatalf("first page = %+v", res)
 	}
 	if after := f.m.Counter("grantd_check_dispatches_total", "", "").Value(); after-before != 5 {
@@ -473,13 +473,13 @@ func TestLookupSubjects(t *testing.T) {
 	// The next page at the same snapshot, then a wildcard written later.
 	next, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
 		SubjectType: "user", Consistency: Consistency{Mode: AtExactSnapshot, Token: res.At.Token}, Cursor: res.Cursor, Limit: 2})
-	if err != nil || fmt.Sprint(next.Subjects) != "[{olga []}]" || next.Cursor != "" || next.At != res.At {
+	if err != nil || fmt.Sprint(next.Subjects) != "[{olga [] false []}]" || next.Cursor != "" || next.At != res.At {
 		t.Fatalf("second page = %+v %v", next, err)
 	}
 	pub := f.write(t, "touch doc:d#viewer@user:*")
 	all, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
 		SubjectType: "user", Consistency: Consistency{Mode: AtLeastAsFresh, Token: pub.Token}})
-	if err != nil || fmt.Sprint(all.Subjects) != "[{* [alice]}]" || all.Cursor != "" {
+	if err != nil || fmt.Sprint(all.Subjects) != "[{* [alice] false []}]" || all.Cursor != "" {
 		t.Fatalf("wildcard = %+v %v", all, err)
 	}
 	if after, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
@@ -488,7 +488,7 @@ func TestLookupSubjects(t *testing.T) {
 	}
 	groups, err := f.e.LookupSubjects(context.Background(), LookupSubjectsRequest{ResourceType: "doc", ResourceID: "d", Permission: "view",
 		SubjectType: "group", SubjectRelation: "member", Consistency: Consistency{Mode: FullyConsistent}})
-	if err != nil || fmt.Sprint(groups.Subjects) != "[{eng []}]" {
+	if err != nil || fmt.Sprint(groups.Subjects) != "[{eng [] false []}]" {
 		t.Fatalf("usersets = %+v %v", groups, err)
 	}
 	for _, req := range []LookupSubjectsRequest{

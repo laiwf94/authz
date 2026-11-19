@@ -415,7 +415,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.As(err, &mbe):
 		writeError(w, r, http.StatusRequestEntityTooLarge, "invalid_argument", fmt.Sprintf("request body is larger than %d bytes", MaxBodyBytes))
 	case errors.Is(err, engine.ErrInvalidArgument), errors.Is(err, store.ErrInvalid), errors.Is(err, check.ErrUnknownType), errors.Is(err, check.ErrUnknownName),
-		errors.Is(err, token.ErrInvalid), errors.Is(err, check.ErrCaveat), errors.Is(err, check.ErrCaveatedRelation):
+		errors.Is(err, token.ErrInvalid), errors.Is(err, check.ErrCaveat):
 		writeError(w, r, http.StatusBadRequest, "invalid_argument", err.Error())
 	case errors.Is(err, store.ErrNoSchema):
 		writeError(w, r, http.StatusFailedDependency, "no_schema", "write a schema first (PUT /v1/schema)")
@@ -706,7 +706,28 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request) error {
 	for i, rel := range res.Relationships {
 		out[i] = rel.String()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"relationships": out, "cursor": res.Cursor, "read_at": res.At.Token})
+	resp := map[string]any{"relationships": out, "cursor": res.Cursor, "read_at": res.At.Token}
+	// The caveat and expiry of each relationship that has one, keyed by
+	// the relationship as listed; absent when none on the page has one.
+	if res.Caveats != nil {
+		caveats := map[string]*store.Caveat{}
+		for i, c := range res.Caveats {
+			if c != nil {
+				caveats[out[i]] = c
+			}
+		}
+		resp["caveats"] = caveats
+	}
+	if res.ExpiresAt != nil {
+		expires := map[string]time.Time{}
+		for i, t := range res.ExpiresAt {
+			if !t.IsZero() {
+				expires[out[i]] = t
+			}
+		}
+		resp["expires_at"] = expires
+	}
+	writeJSON(w, http.StatusOK, resp)
 	return nil
 }
 
@@ -836,12 +857,13 @@ func (s *Server) checkBulk(w http.ResponseWriter, r *http.Request) error {
 
 func (s *Server) lookup(w http.ResponseWriter, r *http.Request) error {
 	var body struct {
-		ResourceType string      `json:"resource_type"`
-		Permission   string      `json:"permission"`
-		Subject      string      `json:"subject"`
-		Consistency  Consistency `json:"consistency"`
-		Cursor       string      `json:"cursor"`
-		Limit        int         `json:"limit"`
+		ResourceType string        `json:"resource_type"`
+		Permission   string        `json:"permission"`
+		Subject      string        `json:"subject"`
+		Context      caveatContext `json:"context"` // caveat parameters, optional
+		Consistency  Consistency   `json:"consistency"`
+		Cursor       string        `json:"cursor"`
+		Limit        int           `json:"limit"`
 	}
 	if err := decode(r, &body); err != nil {
 		return err
@@ -860,33 +882,52 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) error {
 	ctx, cancel := s.withTimeout(r)
 	defer cancel()
 	res, err := s.eng.LookupResources(ctx, engine.LookupResourcesRequest{ResourceType: body.ResourceType,
-		Permission: body.Permission, Subject: subj, Consistency: body.Consistency, Cursor: body.Cursor, Limit: body.Limit})
+		Permission: body.Permission, Subject: subj, Consistency: body.Consistency, Cursor: body.Cursor, Limit: body.Limit,
+		Context: body.Context})
 	if err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"resource_ids": res.ResourceIDs, "cursor": res.Cursor, "looked_up_at": res.At.Token})
+	out := map[string]any{"resource_ids": res.ResourceIDs, "cursor": res.Cursor, "looked_up_at": res.At.Token}
+	// Objects the subject may access, depending on caveat parameters the
+	// request left out; absent when there are none.
+	if len(res.Conditional) > 0 {
+		type conditional struct {
+			ID      string   `json:"id"`
+			Missing []string `json:"missing"`
+		}
+		cond := make([]conditional, len(res.Conditional))
+		for i, c := range res.Conditional {
+			cond[i] = conditional{ID: c.ID, Missing: c.Missing}
+		}
+		out["conditional"] = cond
+	}
+	writeJSON(w, http.StatusOK, out)
 	return nil
 }
 
 // foundSubject is the JSON form of one subject a subject lookup found:
-// "user:alice", "group:eng#member", or "user:*" with the subjects the
-// wildcard leaves out.
+// "user:alice", "group:eng#member", or "user:*" with the subjects whose
+// answer differs from the wildcard's. A conditional subject holds the
+// permission only if the caveat parameters it names as missing allow it.
 type foundSubject struct {
-	Subject  string   `json:"subject"`
-	Excluded []string `json:"excluded,omitempty"`
+	Subject     string   `json:"subject"`
+	Excluded    []string `json:"excluded,omitempty"`
+	Conditional bool     `json:"conditional,omitempty"`
+	Missing     []string `json:"missing,omitempty"`
 }
 
 // lookupSubjects answers which subjects of a type hold a permission on one
 // object, a page at a time.
 func (s *Server) lookupSubjects(w http.ResponseWriter, r *http.Request) error {
 	var body struct {
-		Resource        string      `json:"resource"`     // type:id
-		Permission      string      `json:"permission"`   // relation or permission
-		SubjectType     string      `json:"subject_type"` // e.g. user, or group with subject_relation member
-		SubjectRelation string      `json:"subject_relation"`
-		Consistency     Consistency `json:"consistency"`
-		Cursor          string      `json:"cursor"`
-		Limit           int         `json:"limit"`
+		Resource        string        `json:"resource"`     // type:id
+		Permission      string        `json:"permission"`   // relation or permission
+		SubjectType     string        `json:"subject_type"` // e.g. user, or group with subject_relation member
+		SubjectRelation string        `json:"subject_relation"`
+		Context         caveatContext `json:"context"` // caveat parameters, optional
+		Consistency     Consistency   `json:"consistency"`
+		Cursor          string        `json:"cursor"`
+		Limit           int           `json:"limit"`
 	}
 	if err := decode(r, &body); err != nil {
 		return err
@@ -899,7 +940,7 @@ func (s *Server) lookupSubjects(w http.ResponseWriter, r *http.Request) error {
 	defer cancel()
 	res, err := s.eng.LookupSubjects(ctx, engine.LookupSubjectsRequest{ResourceType: rt, ResourceID: rid, Permission: body.Permission,
 		SubjectType: body.SubjectType, SubjectRelation: body.SubjectRelation, Consistency: body.Consistency,
-		Cursor: body.Cursor, Limit: body.Limit})
+		Cursor: body.Cursor, Limit: body.Limit, Context: body.Context})
 	if err != nil {
 		return err
 	}
@@ -907,6 +948,7 @@ func (s *Server) lookupSubjects(w http.ResponseWriter, r *http.Request) error {
 	for i, f := range res.Subjects {
 		subj := store.Subject{Type: body.SubjectType, ID: f.ID, Relation: body.SubjectRelation}
 		out[i].Subject = subj.String()
+		out[i].Conditional, out[i].Missing = f.Conditional, f.Missing
 		for _, id := range f.Excluded {
 			out[i].Excluded = append(out[i].Excluded, store.Subject{Type: body.SubjectType, ID: id}.String())
 		}
@@ -916,13 +958,16 @@ func (s *Server) lookupSubjects(w http.ResponseWriter, r *http.Request) error {
 }
 
 // expandNode is the JSON form of one node of an expand tree:
-// check.TraceNode without the fields only a check fills in.
+// check.TraceNode without the fields only a check fills in. Caveat is the
+// caveat, with its stored context, of the relationship the node was
+// reached through.
 type expandNode struct {
 	Kind     check.TraceKind `json:"kind"`
 	Object   string          `json:"object"`
 	Relation string          `json:"relation,omitempty"`
 	Expr     string          `json:"expr,omitempty"`
 	Subject  string          `json:"subject,omitempty"`
+	Caveat   *store.Caveat   `json:"caveat,omitempty"`
 	Memo     bool            `json:"memo,omitempty"`
 	Cut      bool            `json:"cut,omitempty"`
 	Omitted  int             `json:"omitted,omitempty"`
@@ -932,6 +977,9 @@ type expandNode struct {
 func toExpandNode(n *check.TraceNode) *expandNode {
 	out := &expandNode{Kind: n.Kind, Object: n.Object, Relation: n.Relation, Expr: n.Expr, Subject: n.Subject,
 		Memo: n.Memo, Cut: n.Cut, Omitted: n.Omitted}
+	if n.Caveat != "" {
+		out.Caveat = &store.Caveat{Name: n.Caveat, Context: n.CaveatContext}
+	}
 	for _, c := range n.Children {
 		out.Children = append(out.Children, toExpandNode(c))
 	}

@@ -182,7 +182,8 @@ type ItemResult struct {
 // LookupResourcesRequest asks which objects of ResourceType Subject has
 // Permission on. Cursor is the last ID of the previous page ("" to start);
 // Limit is at most check.MaxLookupLimit, and 0 means
-// check.DefaultLookupLimit.
+// check.DefaultLookupLimit. Context holds caveat parameters, as in a
+// CheckRequest, for every object checked.
 type LookupResourcesRequest struct {
 	ResourceType string
 	Permission   string
@@ -190,12 +191,17 @@ type LookupResourcesRequest struct {
 	Consistency  Consistency
 	Cursor       string
 	Limit        int
+	Context      map[string]any
 }
 
-// LookupResourcesResult is one page of a lookup. Cursor continues it, and
-// is "" when the scan is complete.
+// LookupResourcesResult is one page of a lookup: in ResourceIDs the
+// objects on which the subject has the permission, in Conditional (nil
+// when there are none) those on which it has it only if the caveat
+// parameters each names allow it. The page's limit counts both. Cursor
+// continues it, and is "" when the scan is complete.
 type LookupResourcesResult struct {
 	ResourceIDs []string
+	Conditional []check.ConditionalID
 	Cursor      string
 	At          Snapshot
 }
@@ -204,7 +210,8 @@ type LookupResourcesResult struct {
 // ResourceType:ResourceID. Recursive expands every userset and arrow
 // target the tree reaches; without it the tree stops at usersets, as
 // Zanzibar's Expand does. MaxNodes is at most check.MaxTraceNodes, and 0
-// means check.DefaultTraceNodes. check.Engine.Expand describes the tree.
+// means check.DefaultTraceNodes. check.Engine.Expand describes the tree,
+// including the caveats on its edges, which it names without evaluating.
 type ExpandRequest struct {
 	ResourceType string
 	ResourceID   string
@@ -225,7 +232,9 @@ type ExpandResult struct {
 // SubjectRelation, when it is set) hold Permission on
 // ResourceType:ResourceID. Cursor is the last subject ID of the previous
 // page ("" to start, check.Wildcard after a wildcard); Limit is at most
-// check.MaxLookupLimit, and 0 means check.DefaultLookupLimit.
+// check.MaxLookupLimit, and 0 means check.DefaultLookupLimit. Context
+// holds caveat parameters, as in a CheckRequest; a subject whose answer
+// depends on one it lacks is found as conditional.
 // check.Engine.LookupSubjects describes the answer.
 type LookupSubjectsRequest struct {
 	ResourceType    string
@@ -236,6 +245,7 @@ type LookupSubjectsRequest struct {
 	Consistency     Consistency
 	Cursor          string
 	Limit           int
+	Context         map[string]any
 }
 
 // LookupSubjectsResult is one page of a subject lookup. Cursor continues
@@ -257,8 +267,15 @@ type ReadRequest struct {
 
 // ReadResult is one page of a read. Cursor continues it, and is "" when
 // there are no more.
+//
+// Caveats and ExpiresAt run alongside Relationships: Caveats[i] is the
+// caveat Relationships[i] carries (nil for none; shared with the store,
+// not to be modified) and ExpiresAt[i] its expiry in UTC (zero for none).
+// Each is nil when no relationship on the page has one.
 type ReadResult struct {
 	Relationships []store.Relationship
+	Caveats       []*store.Caveat
+	ExpiresAt     []time.Time
 	Cursor        string
 	At            Snapshot
 }
@@ -436,12 +453,18 @@ func (e *Local) run(ctx context.Context, sc *schema.Schema, rev store.Revision, 
 	e.checkTime.Observe(time.Since(start))
 	e.dispatches.Add(uint64(stats.Dispatches))
 	e.cacheHits.Add(uint64(stats.CacheHits))
+	e.countCaveats(stats)
+	return r, err
+}
+
+// countCaveats adds the caveats a check or lookup evaluated to
+// grantd_check_caveats_total.
+func (e *Local) countCaveats(stats check.Stats) {
 	if stats.Caveats > 0 {
 		// Registered at the first caveat, so a server whose schema has
 		// none exposes exactly grantd's metrics.
-		e.metrics.Counter("grantd_check_caveats_total", "", "Caveat expressions evaluated across all checks.").Add(uint64(stats.Caveats))
+		e.metrics.Counter("grantd_check_caveats_total", "", "Caveat expressions evaluated across all checks and subject lookups.").Add(uint64(stats.Caveats))
 	}
-	return r, err
 }
 
 // Check implements Engine.
@@ -502,7 +525,7 @@ func (e *Local) LookupResources(ctx context.Context, req LookupResourcesRequest)
 		return LookupResourcesResult{}, err
 	}
 	sc, _ := e.st.Schema()
-	res, err := e.eng.LookupResources(ctx, sc, e.st, rev, req.ResourceType, req.Permission, req.Subject, req.Cursor, req.Limit)
+	res, err := e.eng.LookupResourcesContext(ctx, sc, e.st, rev, req.ResourceType, req.Permission, req.Subject, req.Cursor, req.Limit, req.Context)
 	if err != nil {
 		return LookupResourcesResult{}, err
 	}
@@ -510,7 +533,7 @@ func (e *Local) LookupResources(ctx context.Context, req LookupResourcesRequest)
 	if ids == nil {
 		ids = []string{}
 	}
-	return LookupResourcesResult{ResourceIDs: ids, Cursor: res.Next, At: e.at(rev)}, nil
+	return LookupResourcesResult{ResourceIDs: ids, Conditional: res.Conditional, Cursor: res.Next, At: e.at(rev)}, nil
 }
 
 // Expand implements Engine. Its dispatches count in
@@ -549,8 +572,9 @@ func (e *Local) LookupSubjects(ctx context.Context, req LookupSubjectsRequest) (
 	sc, _ := e.st.Schema()
 	res, stats, err := e.eng.LookupSubjects(ctx, sc, rev, check.LookupSubjectsRequest{ResourceType: req.ResourceType,
 		ResourceID: req.ResourceID, Permission: req.Permission, SubjectType: req.SubjectType,
-		SubjectRelation: req.SubjectRelation, After: req.Cursor, Limit: req.Limit})
+		SubjectRelation: req.SubjectRelation, After: req.Cursor, Limit: req.Limit, Context: req.Context})
 	e.dispatches.Add(uint64(stats.Dispatches))
+	e.countCaveats(stats)
 	if err != nil {
 		return LookupSubjectsResult{}, err
 	}
@@ -576,14 +600,27 @@ func (e *Local) ReadRelationships(ctx context.Context, req ReadRequest) (ReadRes
 	if err := ctx.Err(); err != nil {
 		return ReadResult{}, err
 	}
-	rels, next, err := e.st.Read(rev, req.Filter, req.Cursor, req.Limit)
+	stored, next, err := e.st.ReadStored(rev, req.Filter, req.Cursor, req.Limit)
 	if err != nil {
 		return ReadResult{}, err
 	}
-	if rels == nil {
-		rels = []store.Relationship{}
+	out := ReadResult{Relationships: make([]store.Relationship, len(stored)), Cursor: next, At: e.at(rev)}
+	for i, r := range stored {
+		out.Relationships[i] = r.Relationship
+		if r.Caveat != nil {
+			if out.Caveats == nil {
+				out.Caveats = make([]*store.Caveat, len(stored))
+			}
+			out.Caveats[i] = r.Caveat
+		}
+		if !r.ExpiresAt.IsZero() {
+			if out.ExpiresAt == nil {
+				out.ExpiresAt = make([]time.Time, len(stored))
+			}
+			out.ExpiresAt[i] = r.ExpiresAt
+		}
 	}
-	return ReadResult{Relationships: rels, Cursor: next, At: e.at(rev)}, nil
+	return out, nil
 }
 
 // Write implements Engine. A ctx that has already ended stops the write
