@@ -43,7 +43,7 @@ type provider struct {
 type app struct {
 	id         string
 	providers  []string
-	policy     *policy.Compiled
+	policy     *policy.Policy
 	defaultURL string
 }
 
@@ -87,10 +87,11 @@ func buildRuntime(ctx context.Context, cfg *config.Config, o buildOptions) (*run
 	}
 	var hosts []string
 	for _, ac := range cfg.Apps {
-		a := &app{id: ac.ID, providers: ac.Providers, defaultURL: ac.DefaultURL, policy: policy.Compile(policy.Rule{
-			Providers: ac.Providers, AnyUser: ac.Allow.AnyUser, Emails: ac.Allow.Emails,
-			EmailDomains: ac.Allow.EmailDomains, Groups: ac.Allow.Groups,
-		})}
+		pol, err := ac.Policy()
+		if err != nil {
+			return nil, fmt.Errorf("app %s: %w", ac.ID, err)
+		}
+		a := &app{id: ac.ID, providers: ac.Providers, defaultURL: ac.DefaultURL, policy: pol}
 		rt.apps[a.id] = a
 		for _, h := range ac.Hosts {
 			rt.appsByHost[h] = a

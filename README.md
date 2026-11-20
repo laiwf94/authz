@@ -188,6 +188,19 @@ the first start fills from `WICKET_COOKIE_KEYS` and `WICKET_SIGNING_KEYS` so
 nobody is signed out; the published JWKS follows every rotation (see
 [docs/DESIGN.md](docs/DESIGN.md#key-rings-in-the-gateway)).
 
+An app can open some paths to everyone and guard others more tightly than
+its `allow`: `"public": ["/static"]` needs no sign-in, and each entry of
+`"paths"` (`path`, optional `exact` and `methods`, then `public`, `deny` or
+an `allow` like the app's) decides the requests under its pattern, where a
+`{name}` segment matches any one segment. The most specific rule wins:
+more segments, then exact over prefix, then a literal over a `{name}`, then
+a rule listing the method over one that lists none; the app's `allow`
+decides the rest. Paths are decoded and `.`/`..` resolved before matching,
+and a path servers could read differently (an encoded `/` or `\`, a `;`) is
+refused with 403 `bad_path`; an app without `public` or `paths` never
+looks at the path. Matching order and checks are in
+[internal/authn/policy](internal/authn/policy/paths.go).
+
 `"revalidate": {"interval": "5m"}` on an OpenID provider confirms every
 session with its refresh token at that interval and ends it when the
 provider refuses (a disabled user), or by `on_failure` (`end` or `grace`)

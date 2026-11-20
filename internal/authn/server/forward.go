@@ -4,9 +4,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/laiwf94/authz/internal/authn/policy"
 	"github.com/laiwf94/authz/internal/authn/session"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/logging"
@@ -77,14 +79,24 @@ func originalURL(r *http.Request) *url.URL {
 	return u
 }
 
+// originalMethod is the method of the original request: X-Forwarded-Method
+// (Traefik), X-Original-Method (nginx, when the location sets it), or the
+// method of the auth request itself (Envoy, and nginx by default).
+func originalMethod(r *http.Request) string {
+	if m := r.Header.Get("X-Forwarded-Method"); m != "" {
+		return m
+	}
+	if m := r.Header.Get("X-Original-Method"); m != "" {
+		return m
+	}
+	return r.Method
+}
+
 // isNavigation guesses whether the original request came from a browser
 // page load (which can follow a redirect to a login page) rather than an
 // API call or a script.
 func isNavigation(r *http.Request) bool {
-	method := r.Header.Get("X-Forwarded-Method")
-	if method == "" {
-		method = r.Method
-	}
+	method := originalMethod(r)
 	if method != http.MethodGet && method != http.MethodHead {
 		return false
 	}
@@ -111,8 +123,30 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 		writeError(w, r, http.StatusForbidden, "permission_denied", "no application is configured for this host")
 		return
 	}
+	path := ""
+	if orig != nil {
+		path = orig.EscapedPath()
+	}
+	m := a.policy.Match(originalMethod(r), path)
+	if m.Bad {
+		s.decision("forbidden")
+		s.audit(r.Context(), audit.Envelope{Subject: "app:" + a.id, Action: "access", Decision: audit.Deny},
+			audit.AccessDenied{Reason: policy.DeniedBadPath, App: a.id},
+			slog.String("reason", policy.DeniedBadPath), slog.String("app", a.id),
+			slog.String("path", printableASCII(path, 256)))
+		writeError(w, r, http.StatusForbidden, "permission_denied", "the request path is ambiguous")
+		return
+	}
 	sess, err := s.currentSession(r, rt)
-	if err != nil {
+	if m.Public {
+		// Anyone may open a public path. A signed-in user's identity is
+		// still passed on, so a public page can greet them.
+		s.decision("public")
+		if err != nil || !slices.Contains(a.providers, sess.Identity.Provider) {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	} else if err != nil {
 		s.decision("unauthenticated")
 		rd := ""
 		if orig != nil {
@@ -127,14 +161,17 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 		w.Header().Set("WWW-Authenticate", `Cookie realm="wicket"`)
 		writeError(w, r, http.StatusUnauthorized, "unauthenticated", "sign in at the URL in the X-Auth-Redirect header")
 		return
-	}
-	if ok, reason := a.policy.Evaluate(sess.Identity); !ok {
+	} else if ok, reason := a.policy.Evaluate(&m, &sess.Identity); !ok {
 		s.decision("forbidden")
+		attrs := []slog.Attr{slog.String("reason", reason), slog.String("app", a.id),
+			slog.String("provider", sess.Identity.Provider), slog.String("sub", sess.Identity.Subject),
+			slog.String("session", sess.ID)}
+		if m.Rule >= 0 {
+			attrs = append(attrs, slog.String("rule", a.policy.RuleName(m.Rule)))
+		}
 		s.audit(r.Context(), audit.Envelope{Actor: sess.Identity.Subject, Subject: "app:" + a.id, Action: "access", Decision: audit.Deny},
 			audit.AccessDenied{Reason: reason, App: a.id, Provider: sess.Identity.Provider, Session: sess.ID},
-			slog.String("reason", reason), slog.String("app", a.id),
-			slog.String("provider", sess.Identity.Provider), slog.String("sub", sess.Identity.Subject),
-			slog.String("session", sess.ID))
+			attrs...)
 		if isNavigation(r) {
 			renderPage(w, http.StatusForbidden, "forbidden", map[string]any{"Title": "No access", "User": displayUser(sess),
 				"LogoutURL": rt.cfg.PublicURL + "/logout", "CSRF": s.keys.Seal(purposeLogout, []byte(sess.ID)),
@@ -150,7 +187,9 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 		writeError(w, r, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
-	s.decision("allowed")
+	if !m.Public {
+		s.decision("allowed")
+	}
 	h := w.Header()
 	h.Set(HeaderUser, headerValue(sess.Identity.Subject))
 	h.Set(HeaderEmail, headerValue(sess.Identity.Email))

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/laiwf94/authz/internal/authn/policy"
 	"github.com/laiwf94/authz/internal/authn/redirect"
 	"github.com/laiwf94/authz/internal/platform/jose"
 )
@@ -26,6 +27,7 @@ const (
 	maxProviders      = 64
 	maxApps           = 1024
 	maxListEntries    = 10_000
+	maxPathRules      = 10_000
 	DefaultSkew       = 2 * time.Minute
 	MaxSkew           = 10 * time.Minute
 	DefaultTokenTTL   = 2 * time.Minute
@@ -155,6 +157,22 @@ type App struct {
 	Providers  []string `json:"providers"`
 	Allow      Allow    `json:"allow"`
 	DefaultURL string   `json:"default_url"`
+	// Public lists path prefixes anyone may open, signed in or not.
+	Public []string `json:"public"`
+	// Paths are per-path, per-method rules; where none matches, Allow
+	// decides. internal/authn/policy documents the matching order.
+	Paths []PathRule `json:"paths"`
+}
+
+// PathRule decides the requests under one path pattern of an app: anyone
+// (public), nobody (deny) or those its allow names.
+type PathRule struct {
+	Path    string   `json:"path"`
+	Exact   bool     `json:"exact"`
+	Methods []string `json:"methods"`
+	Public  bool     `json:"public"`
+	Deny    bool     `json:"deny"`
+	Allow   Allow    `json:"allow"`
 }
 
 // Allow is an app's access rule. Nothing is allowed by default.
@@ -385,24 +403,8 @@ func (c *Config) validateApps(providers map[string]int, pc *Result) (map[string]
 			seen[pid] = true
 			used[pid] = true
 		}
-		al := a.Allow
-		if n := len(al.Emails) + len(al.EmailDomains) + len(al.Groups); n > maxListEntries {
-			pc.Errorf(path+".allow", "allow lists have more than %d entries", maxListEntries)
-		} else if n == 0 && !al.AnyUser {
-			pc.Warnf(path+".allow", "nobody is allowed: set any_user or list emails, email_domains or groups")
-		} else if n > 0 && al.AnyUser {
-			pc.Warnf(path+".allow", "any_user allows everyone from the app's providers; the other lists have no effect")
-		}
-		for j, d := range al.EmailDomains {
-			if d == "" || strings.ContainsAny(d, "@ ") || strings.HasPrefix(d, ".") {
-				pc.Errorf(indexPath(path+".allow.email_domains", j), "email domain %q should look like example.com", d)
-			}
-		}
-		for j, e := range al.Emails {
-			if strings.Count(e, "@") != 1 {
-				pc.Errorf(indexPath(path+".allow.emails", j), "%q is not an email address", e)
-			}
-		}
+		validateAllow(pc, path+".allow", a.Allow, true)
+		validatePaths(pc, path, a)
 		if a.DefaultURL == "" && len(a.Hosts) > 0 {
 			a.DefaultURL = "https://" + a.Hosts[0] + "/"
 		} else if du, err := url.Parse(a.DefaultURL); a.DefaultURL != "" && (err != nil || du.Scheme != "https" || du.Host == "") {
@@ -411,6 +413,71 @@ func (c *Config) validateApps(providers map[string]int, pc *Result) (map[string]
 		}
 	}
 	return used, hostsOK
+}
+
+// validateAllow checks an allow rule. warnEmpty warns when it allows
+// nobody, which a path rule that is public or deny expects.
+func validateAllow(pc *Result, path string, al Allow, warnEmpty bool) {
+	if n := len(al.Emails) + len(al.EmailDomains) + len(al.Groups); n > maxListEntries {
+		pc.Errorf(path, "allow lists have more than %d entries", maxListEntries)
+	} else if n == 0 && !al.AnyUser && warnEmpty {
+		pc.Warnf(path, "nobody is allowed: set any_user or list emails, email_domains or groups")
+	} else if n > 0 && al.AnyUser {
+		pc.Warnf(path, "any_user allows everyone from the app's providers; the other lists have no effect")
+	}
+	for j, d := range al.EmailDomains {
+		if d == "" || strings.ContainsAny(d, "@ ") || strings.HasPrefix(d, ".") {
+			pc.Errorf(indexPath(path+".email_domains", j), "email domain %q should look like example.com", d)
+		}
+	}
+	for j, e := range al.Emails {
+		if strings.Count(e, "@") != 1 {
+			pc.Errorf(indexPath(path+".emails", j), "%q is not an email address", e)
+		}
+	}
+}
+
+// validatePaths checks an app's public paths and path rules by compiling
+// them as the gateway will, reporting each problem at its rule.
+func validatePaths(pc *Result, path string, a *App) {
+	if n := len(a.Public) + len(a.Paths); n > maxPathRules {
+		pc.Errorf(path+".paths", "public and paths have more than %d entries", maxPathRules)
+		return
+	}
+	for i, r := range a.Paths {
+		if !r.Public && !r.Deny {
+			validateAllow(pc, indexPath(path+".paths", i)+".allow", r.Allow, true)
+		}
+	}
+	_, err := a.Policy()
+	var multi interface{ Unwrap() []error }
+	if err == nil {
+		return
+	}
+	errs := []error{err}
+	if errors.As(err, &multi) {
+		errs = multi.Unwrap()
+	}
+	for _, e := range errs {
+		var re *policy.RuleError
+		if !errors.As(e, &re) {
+			pc.Errorf(path, "%v", e)
+			continue
+		}
+		pc.Errorf(path+"."+re.Rule, "%s", re.Msg)
+	}
+}
+
+// Policy compiles the app's access policy.
+func (a *App) Policy() (*policy.Policy, error) {
+	pa := policy.App{Rule: policy.Rule{Providers: a.Providers, AnyUser: a.Allow.AnyUser, Emails: a.Allow.Emails,
+		EmailDomains: a.Allow.EmailDomains, Groups: a.Allow.Groups}, Public: a.Public}
+	for _, r := range a.Paths {
+		pa.Paths = append(pa.Paths, policy.PathRule{Path: r.Path, Exact: r.Exact, Methods: r.Methods,
+			Public: r.Public, Deny: r.Deny, AnyUser: r.Allow.AnyUser, Emails: r.Allow.Emails,
+			EmailDomains: r.Allow.EmailDomains, Groups: r.Allow.Groups})
+	}
+	return policy.CompileApp(pa)
 }
 
 func requireHTTPS(pc *Result, path, u string) bool {
