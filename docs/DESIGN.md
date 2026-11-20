@@ -1907,6 +1907,63 @@ those lookups do not pay for the caveat pointers. Measured on a 4-core
 against 821), the larger set values; a 200-member group behind a caveated
 userset, half its members caveated, takes about 290 µs.
 
+On a cycle that carries a caveat, a subject lookup can name more missing
+parameters than CheckResult for the same subject: the fixpoint goes round
+the cycle once more than a walk over simple paths, and adds parameters
+that cannot change the answer. The permissionship is the same (#257).
+
+### How caveats and expiry are tested
+
+Three layers check caveats and expiry beyond each package's unit tests
+(week 4, #83).
+
+**Conformance cases.** `internal/authz/check/testdata/conformance/*.txt`
+are plain-text cases in the spirit of SpiceDB's validation files. Each
+file has a schema and cases that write relationships (with caveats,
+stored contexts and expiries), move a fake clock, mark revisions, and
+assert checks, resource lookups and subject lookups at the head or at a
+marked revision. Every check runs on an uncached engine and twice on a
+cached one. Its answer must also come out of LookupResources and
+LookupSubjects. The files cover:
+
+- `caveats.txt`: one caveat at a time, for every parameter type (bool,
+  int, uint, double, timestamp, duration, IP address and range, list and
+  map); stored values over requested ones; `&&` and `||` deciding without
+  a missing operand; type errors and missing map keys failing the check;
+  wildcards; touching again.
+- `operators.txt`: union, intersection, exclusion, usersets, arrows,
+  nested groups and a caveated cycle.
+- `expiry.txt`: the revision boundary to the nanosecond, time passing
+  without a write, relationships written already expired, expiry moved by
+  a touch, recreation after expiry, expiring memberships, arrows and bans,
+  and caveats with expiries.
+
+**Randomised graphs against a reference.**
+`TestCaveatsAndExpiryMatchReference` builds 16 random timelines over a
+schema with four caveats. Each timeline has eight batches of touches and
+deletes. A fake clock moves 1 ns, 1 s or 10 s between batches, and
+expiries land on, a nanosecond before or a nanosecond after later commit
+times. At every revision, newest first and then oldest first, it compares
+the following with a reference that only sees the relationships live at
+that revision's commit time, under four request contexts:
+
+- CheckResult for every group, folder and document permission and every
+  user (one of them named by no relationship), on a cached and an uncached
+  engine;
+- LookupResources;
+- LookupSubjects, paged.
+
+The reference evaluates caveats in Go, not CEL. `TestReferenceCaveatsMatchCEL`
+checks it against the schema's CEL on every context used. It solves
+memberships by iterating whole tables to a least fixpoint, not by the
+engine's memoised depth-first walk. Permissionship must always match.
+Where the random graph has no cycles, the missing names must match a
+recursive Kleene evaluation exactly. Where it has cycles, every conditional
+check must instead turn definite, and match the reference, once the
+parameters it names are supplied. Breaking the expiry comparison, the
+revision in cache keys or the context hash in cache keys each fails the
+test on its first timeline.
+
 ## One clock (internal/platform/clock)
 
 Code that reads the time or waits on it takes a `clock.Clock` (week 2,

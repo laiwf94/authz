@@ -1,0 +1,139 @@
+# Expiring relationships. A relationship stops granting at the first
+# revision committed at or after its expiry, and every snapshot keeps what
+# it saw. "at" moves the clock; each write is a revision of its own.
+
+schema
+  caveat flag(on bool) { on }
+  
+  definition user {}
+  
+  definition group {
+    relation member: user | user with flag | group#member
+  }
+  
+  definition folder {
+    relation viewer: user | group#member
+    permission view = viewer
+  }
+  
+  definition doc {
+    relation parent: folder
+    relation viewer: user | user with flag | user:* | group#member
+    relation banned: user
+    permission view = (viewer + parent->view) - banned
+  }
+
+case visible until the revision whose commit time reaches the expiry
+write doc:d#viewer@user:a expires 10s
+mark t0
+check doc:d#view@user:a => allowed
+at 9.999999999s
+write doc:noise#viewer@user:z
+mark t1
+check doc:d#view@user:a => allowed
+at 10s
+write doc:noise#viewer@user:y
+mark t2
+check doc:d#view@user:a => denied
+check @t0 doc:d#view@user:a => allowed
+check @t1 doc:d#view@user:a => allowed
+check @t2 doc:d#view@user:a => denied
+resources @t1 doc#view@user:a => d
+resources @t2 doc#view@user:a => -
+subjects @t1 doc:d#view@user => a
+subjects @t2 doc:d#view@user => -
+
+case time passing without a write changes nothing
+write doc:d#viewer@user:a expires 10s
+at 1h
+check doc:d#view@user:a => allowed
+write doc:noise#viewer@user:z
+check doc:d#view@user:a => denied
+
+case written already expired
+at 20s
+write doc:d#viewer@user:a expires 20s
+write doc:d#viewer@user:b expires 5s
+write doc:d#viewer@user:c expires 20.000000001s
+check doc:d#view@user:a => denied
+check doc:d#view@user:b => denied
+check doc:d#view@user:c => allowed
+
+case touching again moves the expiry, and old snapshots keep the old one
+write doc:d#viewer@user:a expires 10s
+mark short
+at 5s
+write doc:d#viewer@user:a expires 1h
+mark long
+at 30s
+write doc:noise#viewer@user:z
+check doc:d#view@user:a => allowed
+check @short doc:d#view@user:a => allowed
+at 2h
+write doc:d#viewer@user:a
+check doc:d#view@user:a => allowed
+check @long doc:d#view@user:a => allowed
+
+case recreated after it expired
+write doc:d#viewer@user:a expires 1s
+at 2s
+write doc:noise#viewer@user:z
+check doc:d#view@user:a => denied
+# Deleting an expired relationship changes nothing.
+delete doc:d#viewer@user:a
+write doc:d#viewer@user:a
+check doc:d#view@user:a => allowed
+
+case an expiring membership in a group and an arrow
+write group:g#member@user:a expires 10s
+write folder:f#viewer@group:g#member
+write doc:d#parent@folder:f expires 20s
+write doc:e#viewer@group:g#member
+check doc:d#view@user:a => allowed
+check doc:e#view@user:a => allowed
+at 10s
+write doc:noise#viewer@user:z
+check doc:d#view@user:a => denied
+check doc:e#view@user:a => denied
+check group:g#member@user:a => denied
+check doc:d#view@group:g#member => allowed
+at 20s
+write doc:noise#viewer@user:y
+check doc:d#view@group:g#member => denied
+resources doc#view@group:g#member => e
+
+case an expiring ban gives access back
+write doc:d#viewer@user:*
+write doc:d#banned@user:a expires 10s
+check doc:d#view@user:a => denied
+subjects doc:d#view@user => *-a
+at 10s
+write doc:noise#viewer@user:z
+check doc:d#view@user:a => allowed
+subjects doc:d#view@user => *
+
+case a caveat with an expiry
+write doc:d#viewer@user:a with flag expires 10s
+check doc:d#view@user:a {"on":true} => allowed
+check doc:d#view@user:a => conditional[on]
+at 10s
+write doc:noise#viewer@user:z
+check doc:d#view@user:a {"on":true} => denied
+check doc:d#view@user:a => denied
+
+case an expiring plain grant next to a lasting caveated one
+write group:g#member@user:a expires 10s
+write doc:d#viewer@group:g#member
+write doc:d#viewer@user:a with flag
+check doc:d#view@user:a => allowed
+at 10s
+write doc:noise#viewer@user:z
+check doc:d#view@user:a => conditional[on]
+check doc:d#view@user:a {"on":true} => allowed
+
+case touching a relationship with a caveat replaces its expiry too
+write group:g#member@user:a expires 10s
+write group:g#member@user:a with flag
+at 10s
+write doc:noise#viewer@user:z
+check group:g#member@user:a => conditional[on]

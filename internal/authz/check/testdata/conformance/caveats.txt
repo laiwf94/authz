@@ -1,0 +1,139 @@
+# Caveat semantics on one relation: parameter types, stored context over
+# the request's, three-valued answers with the parameters still missing,
+# short-circuits that decide without them, and failures.
+
+schema
+  caveat flag(on bool) { on }
+  
+  caveat ip_allowed(allowed cidr, client_ip ipaddress) { allowed.containsIP(client_ip) }
+  
+  caveat on_shift(shift_start int, shift_end int, hour int) {
+    hour >= shift_start && hour < shift_end
+  }
+  
+  caveat either(a bool, b bool) { a || b }
+  
+  caveat not_expired(now timestamp, until timestamp) { now < until }
+  
+  caveat within(now timestamp, granted timestamp, ttl duration) { now - granted < ttl }
+  
+  caveat in_region(regions list<string>, region string) { region in regions }
+  
+  caveat quota(limits map<int>, plan string, used int) { used < limits[plan] }
+  
+  caveat big(n uint) { n > 18446744073709551000u }
+  
+  caveat ratio(x double) { x >= 0.5 }
+  
+  definition user {}
+  
+  definition doc {
+    relation viewer: user | user with flag | user with ip_allowed | user with on_shift | user with either | user with not_expired | user with within | user with in_region | user with quota | user with big | user with ratio | user:* with flag
+  }
+
+case a stored context that decides on its own
+write doc:d#viewer@user:a with flag {"on":true}
+write doc:d#viewer@user:b with flag {"on":false}
+check doc:d#viewer@user:a => allowed
+check doc:d#viewer@user:b => denied
+# Stored values win over the request's.
+check doc:d#viewer@user:b {"on":true} => denied
+check doc:d#viewer@user:a {"on":false} => allowed
+
+case nothing stored: the request decides or the answer is conditional
+write doc:d#viewer@user:a with flag
+check doc:d#viewer@user:a => conditional[on]
+check doc:d#viewer@user:a {} => conditional[on]
+check doc:d#viewer@user:a {"on":true} => allowed
+check doc:d#viewer@user:a {"on":false} => denied
+# One context serves every caveat a check meets, so a parameter this
+# caveat does not declare is ignored.
+check doc:d#viewer@user:a {"on":true,"other":1} => allowed
+check doc:d#viewer@user:nobody => denied
+
+case part stored, part requested
+write doc:d#viewer@user:a with ip_allowed {"allowed":"10.0.0.0/8"}
+check doc:d#viewer@user:a => conditional[client_ip]
+check doc:d#viewer@user:a {"client_ip":"10.20.30.40"} => allowed
+check doc:d#viewer@user:a {"client_ip":"192.168.1.1"} => denied
+check doc:d#viewer@user:a {"client_ip":"::1"} => denied
+check doc:d#viewer@user:a {"allowed":"0.0.0.0/0","client_ip":"192.168.1.1"} => denied
+check doc:d#viewer@user:a {"client_ip":"not an address"} => error client_ip
+check doc:d#viewer@user:a {"client_ip":7} => error client_ip
+
+case && decides false without its other operand
+write doc:d#viewer@user:a with on_shift {"shift_end":17}
+check doc:d#viewer@user:a => conditional[hour shift_start]
+# hour < 17 is false, so the missing start does not matter.
+check doc:d#viewer@user:a {"hour":20} => denied
+check doc:d#viewer@user:a {"hour":10} => conditional[shift_start]
+check doc:d#viewer@user:a {"hour":10,"shift_start":9} => allowed
+check doc:d#viewer@user:a {"hour":10,"shift_start":11} => denied
+check doc:d#viewer@user:a {"hour":17,"shift_start":0} => denied
+
+case || decides true without its other operand
+write doc:d#viewer@user:a with either
+write doc:d#viewer@user:b with either {"b":false}
+check doc:d#viewer@user:a => conditional[a b]
+check doc:d#viewer@user:a {"a":true} => allowed
+check doc:d#viewer@user:a {"b":true} => allowed
+check doc:d#viewer@user:a {"a":false} => conditional[b]
+check doc:d#viewer@user:b {"a":false} => denied
+check doc:d#viewer@user:b => conditional[a]
+
+case timestamps and durations
+write doc:d#viewer@user:a with not_expired {"until":"2026-12-31T00:00:00Z"}
+write doc:d#viewer@user:b with within {"granted":"2026-11-23T09:00:00Z","ttl":"1h"}
+check doc:d#viewer@user:a {"now":"2026-12-30T23:59:59.999Z"} => allowed
+check doc:d#viewer@user:a {"now":"2026-12-31T00:00:00Z"} => denied
+check doc:d#viewer@user:a => conditional[now]
+check doc:d#viewer@user:b {"now":"2026-11-23T09:59:59Z"} => allowed
+check doc:d#viewer@user:b {"now":"2026-11-23T10:00:00Z"} => denied
+check doc:d#viewer@user:b {"now":"yesterday"} => error now
+
+case lists and maps
+write doc:d#viewer@user:a with in_region {"regions":["eu","us"]}
+write doc:d#viewer@user:b with quota {"limits":{"free":10,"pro":1000},"plan":"free"}
+check doc:d#viewer@user:a {"region":"eu"} => allowed
+check doc:d#viewer@user:a {"region":"apac"} => denied
+check doc:d#viewer@user:a {"region":7} => error region
+check doc:d#viewer@user:b {"used":9} => allowed
+check doc:d#viewer@user:b {"used":10} => denied
+check doc:d#viewer@user:b => conditional[used]
+# The stored plan wins, so a request cannot switch to a bigger quota.
+check doc:d#viewer@user:b {"used":500,"plan":"pro"} => denied
+
+case a missing map key fails the check instead of denying
+write doc:d#viewer@user:a with quota {"limits":{"free":10},"plan":"team"}
+check doc:d#viewer@user:a {"used":1} => error caveat evaluation failed
+
+case numbers keep every digit and their type
+write doc:d#viewer@user:a with big
+write doc:d#viewer@user:b with ratio
+check doc:d#viewer@user:a {"n":18446744073709551615} => allowed
+check doc:d#viewer@user:a {"n":18446744073709550999} => denied
+check doc:d#viewer@user:a {"n":-1} => error n
+check doc:d#viewer@user:b {"x":0.5} => allowed
+check doc:d#viewer@user:b {"x":1} => allowed
+check doc:d#viewer@user:b {"x":0.49} => denied
+
+case a caveated wildcard and a plain grant
+write doc:d#viewer@user:* with flag
+write doc:d#viewer@user:a with flag {"on":true}
+check doc:d#viewer@user:a => allowed
+check doc:d#viewer@user:b => conditional[on]
+check doc:d#viewer@user:b {"on":true} => allowed
+check doc:d#viewer@user:b {"on":false} => denied
+subjects doc:d#viewer@user => *-a?[on] a
+subjects doc:d#viewer@user {"on":false} => a
+resources doc#viewer@user:b => d?[on]
+
+case touching again replaces the caveat and its context
+write doc:d#viewer@user:a with flag {"on":false}
+mark before
+write doc:d#viewer@user:a with flag {"on":true}
+check doc:d#viewer@user:a => allowed
+check @before doc:d#viewer@user:a => denied
+write doc:d#viewer@user:a with ip_allowed {"allowed":"10.0.0.0/8"}
+check doc:d#viewer@user:a => conditional[client_ip]
+check doc:d#viewer@user:a {"on":true} => conditional[client_ip]

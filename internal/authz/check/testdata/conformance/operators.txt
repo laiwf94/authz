@@ -1,0 +1,159 @@
+# Caveats through the schema's operators: unions, intersections,
+# exclusions, usersets, arrows and cycles. Answers combine as Kleene's
+# three-valued logic, and a conditional answer names every parameter that
+# could still change it.
+
+schema
+  caveat flag(on bool) { on }
+  
+  caveat gate(open bool) { open }
+  
+  caveat ip_allowed(allowed cidr, client_ip ipaddress) { allowed.containsIP(client_ip) }
+  
+  definition user {}
+  
+  definition group {
+    relation member: user | user with flag | group#member | group#member with gate
+  }
+  
+  definition folder {
+    relation parent: folder | folder with gate
+    relation viewer: user | user with flag | group#member
+    permission view = viewer + parent->view
+  }
+  
+  definition doc {
+    relation parent: folder | folder with flag
+    relation viewer: user | user with ip_allowed | user:* | user:* with gate | group#member | group#member with flag
+    relation editor: user | user with flag
+    relation banned: user | user with flag | user with gate
+    permission view = (viewer + editor + parent->view) - banned
+    permission edit = editor & viewer
+  }
+
+case union: allowed wins, conditionals add their parameters
+write doc:d#viewer@user:a with ip_allowed
+write doc:d#editor@user:a with flag
+check doc:d#view@user:a => conditional[allowed client_ip on]
+check doc:d#view@user:a {"on":true} => allowed
+check doc:d#view@user:a {"on":false} => conditional[allowed client_ip]
+check doc:d#view@user:a {"on":false,"allowed":"10.0.0.0/8","client_ip":"10.0.0.1"} => allowed
+check doc:d#view@user:a {"on":false,"allowed":"10.0.0.0/8","client_ip":"8.8.8.8"} => denied
+
+case intersection: denied wins
+write doc:d#viewer@user:a with ip_allowed {"allowed":"10.0.0.0/8"}
+write doc:d#editor@user:a with flag
+write doc:d#editor@user:b with flag
+check doc:d#edit@user:a => conditional[client_ip on]
+check doc:d#edit@user:a {"on":false} => denied
+check doc:d#edit@user:a {"client_ip":"8.8.8.8"} => denied
+check doc:d#edit@user:a {"on":true} => conditional[client_ip]
+check doc:d#edit@user:a {"on":true,"client_ip":"10.1.1.1"} => allowed
+# b is no viewer, so the flag cannot matter.
+check doc:d#edit@user:b => denied
+
+case exclusion: a conditional ban is never allowed
+write doc:d#viewer@user:a
+write doc:d#banned@user:a with flag
+check doc:d#view@user:a => conditional[on]
+check doc:d#view@user:a {"on":true} => denied
+check doc:d#view@user:a {"on":false} => allowed
+resources doc#view@user:a => d?[on]
+subjects doc:d#view@user => a?[on]
+
+case exclusion: both sides conditional
+write doc:d#viewer@user:a with ip_allowed
+write doc:d#banned@user:a with gate
+check doc:d#view@user:a => conditional[allowed client_ip open]
+check doc:d#view@user:a {"open":true} => denied
+check doc:d#view@user:a {"allowed":"10.0.0.0/8","client_ip":"8.8.8.8"} => denied
+check doc:d#view@user:a {"allowed":"10.0.0.0/8","client_ip":"10.0.0.8"} => conditional[open]
+
+case a ban decided by its stored context
+write doc:d#viewer@user:a
+write doc:d#viewer@user:b
+write doc:d#banned@user:a with flag {"on":true}
+write doc:d#banned@user:b with flag {"on":false}
+check doc:d#view@user:a {"on":false} => denied
+check doc:d#view@user:b {"on":true} => allowed
+subjects doc:d#view@user => b
+
+case wildcard minus a conditional ban
+write doc:d#viewer@user:*
+write doc:d#banned@user:x with flag
+check doc:d#view@user:y => allowed
+check doc:d#view@user:x => conditional[on]
+subjects doc:d#view@user => *-x x?[on]
+subjects doc:d#view@user {"on":true} => *-x
+subjects doc:d#view@user {"on":false} => *
+
+case caveated wildcard minus a plain ban
+write doc:d#viewer@user:* with gate
+write doc:d#banned@user:x
+check doc:d#view@user:y => conditional[open]
+check doc:d#view@user:x => denied
+check doc:d#view@user:x {"open":true} => denied
+subjects doc:d#view@user => *-x?[open]
+subjects doc:d#view@user {"open":true} => *-x
+
+case a caveated userset and caveated memberships multiply
+write group:g#member@user:a with flag
+write group:g#member@user:b
+write doc:d#viewer@group:g#member with flag
+check doc:d#view@user:a => conditional[on]
+check doc:d#view@user:b => conditional[on]
+check doc:d#view@user:b {"on":true} => allowed
+check doc:d#view@user:a {"on":false} => denied
+check doc:d#view@group:g#member => conditional[on]
+subjects doc:d#view@user => a?[on] b?[on]
+subjects doc:d#view@group#member => g?[on]
+
+case nested groups with a gate between them
+write group:inner#member@user:a with flag
+write group:outer#member@group:inner#member with gate
+write doc:d#viewer@group:outer#member
+check doc:d#view@user:a => conditional[on open]
+check doc:d#view@user:a {"open":true} => conditional[on]
+check doc:d#view@user:a {"open":false} => denied
+check doc:d#view@user:a {"open":true,"on":true} => allowed
+check group:outer#member@user:a {"on":true} => conditional[open]
+
+case a caveat on a cycle
+write group:a#member@group:b#member with gate
+write group:b#member@group:a#member
+write group:b#member@user:u
+write group:a#member@user:v with flag
+check group:a#member@user:u => conditional[open]
+check group:a#member@user:u {"open":true} => allowed
+check group:b#member@user:u => allowed
+check group:b#member@user:v {"on":true} => allowed
+check group:b#member@user:v {"on":false} => denied
+check group:a#member@user:w => denied
+check group:a#member@user:v {"on":true} => allowed
+# A check walks simple paths, so it names only "on" for v in a and in b.
+# The subject lookup's fixpoint goes round the cycle once more and also
+# names "open", which cannot change the answer (#257). Permissionship
+# agrees.
+subjects group:a#member@user => u?[open] v?[on open]
+subjects group:b#member@user => u v?[on open]
+
+case caveated arrows and parents
+write doc:d#parent@folder:f with flag
+write folder:f#parent@folder:root with gate
+write folder:root#viewer@user:a
+write folder:f#viewer@user:b with flag
+check doc:d#view@user:a => conditional[on open]
+check doc:d#view@user:a {"on":true,"open":true} => allowed
+check doc:d#view@user:a {"on":true,"open":false} => denied
+check doc:d#view@user:b => conditional[on]
+check doc:d#view@user:b {"on":true} => allowed
+check folder:f#view@user:a {"on":false} => conditional[open]
+resources folder#view@user:a => root f?[open]
+resources doc#view@user:a {"on":true} => d?[open]
+
+case the same subject through a plain and a caveated path
+write doc:d#viewer@user:a with ip_allowed
+write group:g#member@user:a
+write doc:d#viewer@group:g#member
+check doc:d#view@user:a => allowed
+check doc:d#view@user:a {"allowed":"10.0.0.0/8","client_ip":"8.8.8.8"} => allowed
