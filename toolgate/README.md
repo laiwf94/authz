@@ -318,13 +318,57 @@ runs; the in-memory steps are stable.
 | Policy decision, 200 rules, path constraint | 0.26 to 0.32 µs |
 | Argument schema validation (4 properties, path and URL checks) | 1.3 µs |
 | Static key authentication | 0.08 µs |
-| Signed token verification | 2.3 to 2.6 µs |
+| Signed token verification (HS256) | 2.3 to 2.6 µs |
 | Rate limiter take | 0.10 to 0.12 µs |
 | Audit append, one writer (fsync each) | 4.3 to 7.2 ms |
 | Audit append, 16 writers (group commit) | 64 to 122 µs per record |
 | `tools/call` end to end over HTTP, one agent | 8.6 to 17 ms |
 | `tools/call` end to end, 64 concurrent callers | 0.8 to 1.2 ms per call |
 | Denied `tools/call` end to end (one audit record) | 4.2 to 8.7 ms |
+
+### Token verification and JWKS refresh
+
+```console
+$ go test -run='^$' -bench='Verify|JWKS' -benchmem ./internal/agents/identity/
+```
+
+These figures are from a shared 4-vCPU Intel Xeon at 2.1 GHz (Go 1.27,
+linux/amd64), three runs each; they are slower than the table above, which
+was measured on a faster machine. Each verification is a whole
+`Authenticate`: header and claim parsing, key lookup, signature, and the
+issuer, audience, lifetime and scope checks. "4 CPUs" is the time per token
+with all four verifying at once (`RunParallel`); nothing on the path takes a
+lock.
+
+| Algorithm and key | One CPU | 4 CPUs | Allocated |
+|---|---|---|---|
+| HS256 (shared secret, for comparison) | 3.9 to 4.0 µs | 2.4 to 2.6 µs | 2.5 KB, 28 allocs |
+| EdDSA (Ed25519) | 51 to 56 µs | 13 to 14 µs | 2.9 KB, 64 allocs |
+| ES256 (P-256) | 77 to 82 µs | 21 µs | 4.3 KB, 86 allocs |
+| RS256, 2048-bit key | 36 to 38 µs | 11 µs | 4.6 KB, 75 allocs |
+| RS256, 3072-bit key | 143 to 150 µs | 62 to 69 µs | 46 KB, 159 allocs |
+| RS256, 4096-bit key | 223 to 245 µs | 97 to 99 µs | 65 KB, 167 allocs |
+
+Through a JWKS client the numbers are the same (EdDSA 50 to 55 µs, ES256
+79 to 80 µs, RS256 35 to 38 µs): a known kid is read from the current set
+without a lock or a request. The refresh path, against an issuer on
+loopback TLS over a kept-alive connection:
+
+| JWKS operation | Time | Allocated |
+|---|---|---|
+| Token with an unknown kid, refused inside the minute without a request | 5.9 µs | 3.0 KB, 64 allocs |
+| Refresh answered 304 (ETag unchanged) | 71 to 78 µs | 8.3 KB, 87 allocs |
+| Refresh answered 200, 3 keys (one of each type) | 105 to 123 µs | 16 KB, 158 allocs |
+| Refresh answered 200, 100 keys (the most a set may hold, 22 KB) | 0.72 to 0.79 ms | 277 KB, 1772 allocs |
+| Parsing alone, 3 keys / 100 keys | 9.6 to 11 µs / 0.31 to 0.32 ms | 5.5 KB / 185 KB |
+| First token under a rotated key: unknown kid, fetch, swap, verify (EdDSA) | 187 to 201 µs | 20 KB, 232 allocs |
+
+A refresh runs once per `max-age` (5 minutes to 24 hours) and an
+unknown kid fetches at most once a minute, so the refresh path costs well
+under a millisecond a minute per issuer; it never runs on a request for a
+known kid. RSA keys of 3072 bits and more are about four and six times the
+cost of 2048-bit ones and allocate ten times as much; issuers that can
+choose should sign with EdDSA, ES256 or RS256 at 2048 bits.
 
 ## Repository map
 
