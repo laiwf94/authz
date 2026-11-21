@@ -90,6 +90,55 @@ link the roadmap issue they come from.
   ([#80](https://github.com/laiwf94/authz/issues/80)): the engine contract
   as a test suite, and a deterministic in-memory fake engine for the
   sign-on and agent tests.
+- **Expiring relationships** ([#83](https://github.com/laiwf94/authz/issues/83)).
+  A touch or create in `POST /v1/relationships/write` may set `expires_at`
+  (RFC 3339). Every revision now has a commit time, and a relationship
+  stops granting at the first revision committed at or after its expiry,
+  so every reader of a revision agrees and a snapshot never changes with
+  the clock. An expired relationship can be created again; garbage
+  collection and the startup checkpoint drop it. Reads, watch and the
+  checkpoint carry the expiry. A store that never holds an expiry writes
+  the same log as before, byte for byte.
+- **Caveats** ([#83](https://github.com/laiwf94/authz/issues/83)). Schemas
+  declare caveats in SpiceDB's syntax,
+  `caveat ip_allowed(allowed cidr, client_ip ipaddress) { allowed.containsIP(client_ip) }`,
+  in a CEL subset with typed parameters (bool, int, uint, double, string,
+  timestamp, duration, IP address and range, lists and maps), checked
+  when the schema is written and evaluated under a cost limit. Relation
+  types name them (`group#member with ip_allowed`), and relationships
+  attach them with a stored context of at most 4 KiB; stored values win
+  over the request's. Schema changes that would strand a stored caveat
+  are refused, and dry runs list them.
+- **Conditional answers** ([#83](https://github.com/laiwf94/authz/issues/83)).
+  `/v1/check`, each `/v1/check/bulk` item, `/v1/lookup/resources` and
+  `/v1/lookup/subjects` take a caveat `context`. An answer that depends on
+  parameters nobody supplied is `{"allowed":false,"conditional":true,"missing":[...]}`,
+  so clients that read only `allowed` keep failing closed; resource lookups
+  list such objects under `conditional`, and subject lookups mark such
+  subjects `conditional` with their `missing` names. Exclusions of a
+  conditional subject are never allowed. Expand names the caveat and stored
+  context on caveated edges, reads add `caveats` and `expires_at`, and watch
+  reports both. Conditional decisions are `authz.check_decided` denies with
+  `conditional` and `missing` in the audit chain, and
+  `grantd_check_caveats_total` counts evaluations. Cached answers that no
+  caveat touched are shared across contexts; the rest are keyed by a hash
+  of the context. A server without caveats answers and logs exactly as
+  grantd did.
+- **One expression language for the platform**
+  ([#83](https://github.com/laiwf94/authz/issues/83)). `internal/platform/cel`
+  parses, type-checks and evaluates the CEL subset with three-valued
+  results for missing variables, per-expression cost limits and a fuzz
+  target per entry point. Relationship caveats use it now and tool policy
+  conditions will from agents week 5.
+- **Conditional access example** ([#83](https://github.com/laiwf94/authz/issues/83)).
+  [examples/caveats](examples/caveats) restricts a group's edit access to
+  an office network and gives a contractor a viewer link that runs out,
+  against a running `authz serve`. CI runs it on a fresh server and on a
+  data directory it then restarts on, and compares its output with a
+  recording.
+- Known difference, [#257](https://github.com/laiwf94/authz/issues/257): on
+  a cycle that carries a caveat, a subject lookup can name more missing
+  parameters than a check for the same subject. The permissionship agrees.
 
 ### Sign-on (authn)
 

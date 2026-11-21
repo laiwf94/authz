@@ -1964,6 +1964,23 @@ parameters it names are supplied. Breaking the expiry comparison, the
 revision in cache keys or the context hash in cache keys each fails the
 test on its first timeline.
 
+**End to end.** `examples/caveats/demo.sh` is the README's walk-through of
+both features against a running server, over HTTP only: group edit access
+restricted to an office network by `ip_allowed`, and a viewer link
+written with an `expires_at` three seconds out. It shows a check without
+the client address coming back conditional on `client_ip`, allowed from
+inside the range and denied from outside it; the same answers from both
+lookups; the caveat, its stored context and the expiry in a read; and the
+link still allowed at the last revision after it has run out (a snapshot
+never changes with the clock), then denied from the next write on.
+`TestCaveatsDemo` (internal/authz/golden) builds `authz serve`, runs the
+script against it in memory and on a data directory, and compares the
+output with `testdata/caveats-demo.golden`, recorded from authz since
+grantd had neither feature. After the run on disk it restarts the server
+on that directory and reads the caveat and stored context back from the
+recovered log, with the expired link gone. The test needs bash, curl and
+python3, as the script does, and runs in the CI Test step.
+
 ## One clock (internal/platform/clock)
 
 Code that reads the time or waits on it takes a `clock.Clock` (week 2,

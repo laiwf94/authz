@@ -1,0 +1,23 @@
+1. Write the schema: a caveat, ip_allowed, on group editors of a doc
+2. Engineering edits doc:design from the office network only; bob gets a viewer link for three seconds
+3. Alice's edit access depends on where the request comes from; her view access does not
+   doc:design edit user:alice (no context)     -> conditional, missing client_ip
+   doc:design edit user:alice from 10.1.2.3    -> allowed
+   doc:design edit user:alice from 203.0.113.9 -> denied
+   doc:design view user:alice from 203.0.113.9 -> allowed
+4. Which docs can alice edit, without and with her address?
+   {"resource_ids": [], "conditional": [{"id": "design", "missing": ["client_ip"]}]}
+   {"resource_ids": ["design"], "conditional": null}
+5. Who can edit doc:design?
+   [{"subject": "user:alice", "conditional": true, "missing": ["client_ip"]}]
+6. Read doc:design's relationships: the caveat with its stored context, and which ones expire
+   doc:design#editor@group:eng#member with {"name": "ip_allowed", "context": {"allowed": "10.0.0.0/8"}}
+   doc:design#parent@folder:root
+   doc:design#viewer@user:bob (expires)
+7. Bob's link, before and after it runs out
+   doc:design view user:bob   (no context)     -> allowed
+   the link has run out, but the newest revision was committed before that: a snapshot never changes
+   doc:design view user:bob   (no context)     -> allowed
+   the next write commits a revision after the expiry, and from there on bob is denied
+   doc:design view user:bob   (no context)     -> denied
+   viewers of doc:design: []

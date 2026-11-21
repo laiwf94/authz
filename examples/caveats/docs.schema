@@ -1,0 +1,28 @@
+// Document sharing with conditions: the schema of examples/docs.schema, plus
+// edit access that holds only from an allowed network, and time-limited
+// viewer links (relationships written with expires_at).
+caveat ip_allowed(allowed cidr, client_ip ipaddress) {
+  allowed.containsIP(client_ip)
+}
+
+definition user {}
+
+definition group {
+  relation member: user | group#member
+}
+
+definition folder {
+  relation parent: folder
+  relation viewer: user | user:* | group#member
+  permission view = viewer + parent->view
+}
+
+definition doc {
+  relation parent: folder
+  relation owner: user
+  relation editor: user | group#member | group#member with ip_allowed
+  relation viewer: user
+  relation banned: user
+  permission edit = owner + editor
+  permission view = (edit + viewer + parent->view) - banned
+}

@@ -75,6 +75,52 @@ byte. Around that sit API keys checked in constant time, limits on request size
 and work, deadlines, structured JSON logs with request IDs, Prometheus metrics
 and graceful shutdown.
 
+### Conditions and expiry
+
+Access can depend on the request and on time. A schema declares **caveats**,
+small typed CEL expressions, and a relation type can require one; each
+relationship that uses it stores part of the context, and the check supplies
+the rest. A relationship can also carry **`expires_at`** and stops granting
+at the first revision committed after it.
+
+```text
+caveat ip_allowed(allowed cidr, client_ip ipaddress) {
+  allowed.containsIP(client_ip)
+}
+
+definition doc {
+  relation editor: user | group#member | group#member with ip_allowed
+  relation viewer: user
+  ...
+}
+```
+
+```console
+$ J='Content-Type: application/json'
+$ curl -s localhost:8080/v1/relationships/write -H "$AUTH" -H "$J" -d '{"updates":[
+    {"op":"touch","relationship":"doc:design#editor@group:eng#member",
+     "caveat":{"name":"ip_allowed","context":{"allowed":"10.0.0.0/8"}}},
+    {"op":"touch","relationship":"doc:design#viewer@user:bob","expires_at":"2026-12-01T00:00:00Z"}]}'
+$ curl -s localhost:8080/v1/check -H "$AUTH" -H "$J" \
+    -d '{"resource":"doc:design","permission":"edit","subject":"user:alice"}'
+{"allowed":false,"checked_at":"...","conditional":true,"missing":["client_ip"]}
+$ curl -s localhost:8080/v1/check -H "$AUTH" -H "$J" \
+    -d '{"resource":"doc:design","permission":"edit","subject":"user:alice","context":{"client_ip":"10.1.2.3"}}'
+{"allowed":true,"checked_at":"..."}
+```
+
+An answer is allowed, denied or **conditional** on the parameters nobody
+supplied; `allowed` is false unless the answer is allowed, so a client that
+reads only `allowed` fails closed. Resource and subject lookups return
+conditional answers apart from the definite ones, and reads, expand and
+watch show each relationship's caveat and expiry.
+[examples/caveats/demo.sh](examples/caveats/demo.sh) walks through
+IP-restricted editing and a viewer link that runs out against a running
+server; CI compares its output with
+[a recording](internal/authz/golden/testdata/caveats-demo.golden). How
+caveats are evaluated, cached and tested is in
+[docs/DESIGN.md](docs/DESIGN.md#caveats-on-relationships-and-in-checks).
+
 ## Running authz
 
 Everything is one binary, `authz`, with a subcommand per part
