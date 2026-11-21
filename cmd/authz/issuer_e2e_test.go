@@ -61,11 +61,17 @@ func newE2EIssuer(t *testing.T, clients map[string]string) *e2eIssuer {
 	mux.HandleFunc("GET /jwks", func(w http.ResponseWriter, r *http.Request) {
 		is.mu.Lock()
 		is.fetches++
+		first := is.fetches == 1
 		keys := make([]map[string]string, 0, len(is.published))
 		for _, s := range is.published {
 			keys = append(keys, jose.PublicJWK(s.Public(), s.KeyID()))
 		}
 		is.mu.Unlock()
+		if first {
+			// A slow first answer, so a gateway that serves before it
+			// holds keys is seen to.
+			time.Sleep(300 * time.Millisecond)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "max-age=300")
 		json.NewEncoder(w).Encode(map[string]any{"keys": keys})
@@ -285,6 +291,12 @@ func TestMCPIssuerEndToEnd(t *testing.T) {
 	if !strings.Contains(logs.String(), `"listening","addr":"`+addr+`"`) {
 		t.Fatalf("not listening on %s: %s", addr, logs.String())
 	}
+	// The server listens before its JWKS client's first fetch returns; a
+	// token that came first would cause a fetch of its own for the kid,
+	// which the fetch counts below don't expect.
+	eventually(t, "issuer keys loaded at start", func() bool {
+		return strings.Contains(logs.String(), `"msg":"jwks keys loaded"`)
+	})
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	// mcp posts a tools/call of echo with text and returns the HTTP
