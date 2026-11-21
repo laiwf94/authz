@@ -1,7 +1,10 @@
 package config
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/laiwf94/authz/internal/authn/policy"
 )
 
 const pathsDoc = `{
@@ -82,4 +85,49 @@ func TestPathRuleProblems(t *testing.T) {
 		want{"$.apps[0].paths[5]", SeverityError, "a parameter is a whole segment {name}"},
 		want{"$.apps[0].paths[6].exect", SeverityError, `unknown field (did you mean "exact"?)`},
 	)
+}
+
+func TestPathCheckRules(t *testing.T) {
+	doc := `{
+  "public_url": "https://auth.example.com",
+  "providers": [
+    {"id": "corp", "type": "oidc", "issuer": "https://idp.example.com", "client_id": "c", "client_secret_env": "SECRET"}
+  ],
+  "apps": [
+    {"id": "wiki", "hosts": ["wiki.example.com"], "providers": ["corp"], "allow": {"any_user": true},
+     "paths": [
+       {"path": "/docs/{id}", "methods": ["PUT"], "check": {"resource": "doc:{path.id}", "permission": "edit"}},
+       {"path": "/docs/{id}", "methods": ["GET"], "allow": {"groups": ["staff"]},
+        "check": {"resource": "doc:{path.id}", "permission": "view", "subject": "user:{claims.idp}.{claims.sub}"}},
+       {"path": "/x/{id}", "check": {"resource": "doc:{path.doc}", "permission": "view"}},
+       {"path": "/y", "deny": true, "check": {"resource": "doc:y", "permission": "view"}},
+       {"path": "/z", "check": {"resource": "doc:z", "permision": "view"}}
+     ]}
+  ]
+}`
+	ps := checkDoc(t, doc)
+	// The first two are clean: a check rule naming nobody asks the engine
+	// for everyone, so there is no "nobody is allowed" warning.
+	expect(t, ps,
+		want{"$.apps[0].paths[2]", SeverityError, "the rule's path has no {doc} parameter"},
+		want{"$.apps[0].paths[3]", SeverityError, "a public or deny rule takes no check"},
+		want{"$.apps[0].paths[4]", SeverityError, `check.permission "" must be a relation or permission name`},
+		want{"$.apps[0].paths[4].check.permision", SeverityError, `unknown field (did you mean "permission"?)`},
+	)
+
+	good := doc[:strings.Index(doc, `,
+       {"path": "/x/{id}"`)] + "]}]}"
+	c, err := Parse([]byte(good), getenvSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.Apps[0].Policy()
+	if err != nil || !p.HasChecks() {
+		t.Fatalf("%v %v", p, err)
+	}
+	m := p.Match("GET", "/docs/plan")
+	req, ok, err := p.CheckFor(&m, &policy.Identity{Provider: "corp", Subject: "alice", Groups: []string{"staff"}})
+	if !ok || err != nil || req.ResourceID != "plan" || req.Permission != "view" || req.Subject.ID != "corp.alice" {
+		t.Fatalf("%+v %v %v", req, ok, err)
+	}
 }

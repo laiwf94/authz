@@ -247,6 +247,18 @@ refused with 403 `bad_path`; an app without `public` or `paths` never
 looks at the path. Matching order and checks are in
 [internal/authn/policy](internal/authn/policy/paths.go).
 
+A path rule can ask the authorization engine instead:
+`{"path": "/docs/{id}", "methods": ["PUT"], "check": {"resource": "doc:{path.id}", "permission": "edit"}}`
+lets a user through when `user:{claims.sub}` (or the rule's `subject`,
+built from `{path.<name>}`, `{claims.sub}` and `{claims.idp}`) has `edit`
+on that doc. Under `authz run` the gateway asks serve's engine in process,
+with no network hop; each session keeps the consistency token of its last
+check, so its next one reads a snapshot at least as fresh. A denial is 403
+`check_denied`, a value that is not an object ID 403 `check_bad_input`, and
+an engine that cannot answer (or a gateway running without serve) 503
+`check_unavailable`
+([internal/authn/policy](internal/authn/policy/check.go)).
+
 `"revalidate": {"interval": "5m"}` on an OpenID provider confirms every
 session with its refresh token at that interval and ends it when the
 provider refuses (a disabled user), or by `on_failure` (`end` or `grace`)

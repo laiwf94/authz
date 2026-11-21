@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -161,14 +163,29 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 		w.Header().Set("WWW-Authenticate", `Cookie realm="wicket"`)
 		writeError(w, r, http.StatusUnauthorized, "unauthenticated", "sign in at the URL in the X-Auth-Redirect header")
 		return
-	} else if ok, reason := a.policy.Evaluate(&m, &sess.Identity); !ok {
-		s.decision("forbidden")
+	} else if d := s.authorize(r.Context(), a, &m, sess); !d.Allowed {
+		reason := d.Reason
 		attrs := []slog.Attr{slog.String("reason", reason), slog.String("app", a.id),
 			slog.String("provider", sess.Identity.Provider), slog.String("sub", sess.Identity.Subject),
 			slog.String("session", sess.ID)}
 		if m.Rule >= 0 {
 			attrs = append(attrs, slog.String("rule", a.policy.RuleName(m.Rule)))
 		}
+		if c := d.Check; c != nil {
+			attrs = append(attrs, slog.String("check", checkText(c)))
+			if c.Err != nil {
+				attrs = append(attrs, slog.String("error", c.Err.Error()))
+			}
+		}
+		if reason == policy.CheckUnavailable {
+			// An outage, not a denial: the engine could not answer.
+			s.decision("unavailable")
+			s.log.LogAttrs(r.Context(), slog.LevelError, "relationship check failed", append(attrs,
+				slog.String("request_id", requestIDFrom(r.Context())))...)
+			writeError(w, r, http.StatusServiceUnavailable, "unavailable", "the access check could not be made; try again")
+			return
+		}
+		s.decision("forbidden")
 		s.audit(r.Context(), audit.Envelope{Actor: sess.Identity.Subject, Subject: "app:" + a.id, Action: "access", Decision: audit.Deny},
 			audit.AccessDenied{Reason: reason, App: a.id, Provider: sess.Identity.Provider, Session: sess.ID},
 			attrs...)
@@ -208,6 +225,43 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 		logging.Propagate(r.Context(), h)
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// authorize decides a signed-in request: the path rule, and for a
+// relationship rule a check of the in-process engine at least as fresh as
+// the session's previous one. The snapshot the check read is kept in the
+// session for the next.
+func (s *Server) authorize(ctx context.Context, a *app, m *policy.Match, sess *session.Session) policy.Decision {
+	ok, reason := a.policy.Evaluate(m, &sess.Identity)
+	if reason != policy.CheckRequired {
+		return policy.Decision{Allowed: ok, Reason: reason}
+	}
+	var eng policy.Checker
+	var engErr error
+	if s.opts.Engine == nil {
+		engErr = errors.New("no authorization engine: run the gateway under authz run with its serve part")
+	} else if e, err := s.opts.Engine(ctx); err != nil {
+		engErr = err
+	} else {
+		eng = e
+	}
+	d := a.policy.Authorize(ctx, m, &sess.Identity, eng, sess.ConsistencyToken())
+	if c := d.Check; c != nil {
+		if engErr != nil && d.Reason == policy.CheckUnavailable {
+			c.Err = engErr
+		}
+		if c.Err == nil {
+			s.sessions.SetConsistency(sess.ID, uint64(c.Result.At.Revision), c.Result.At.Token)
+		}
+		s.m.Counter("wicket_relationship_checks_total", `result="`+d.Reason+`"`, "Relationship checks made by path rules, by result.").Inc()
+	}
+	return d
+}
+
+// checkText is a check for logs: resource#permission@subject.
+func checkText(c *policy.CheckTrace) string {
+	q := c.Request
+	return q.ResourceType + ":" + q.ResourceID + "#" + q.Permission + "@" + q.Subject.String()
 }
 
 func (s *Server) decision(d string) {

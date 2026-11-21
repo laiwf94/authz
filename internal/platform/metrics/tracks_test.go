@@ -44,6 +44,9 @@ func registerTracks(r *Registry) {
 	for _, d := range []string{"allow", "deny", "login"} {
 		r.Counter("wicket_auth_decisions_total", `decision="`+d+`"`, "Forward-auth decisions.").Inc()
 	}
+	for _, res := range []string{"allowed", "check_denied"} {
+		r.Counter("wicket_relationship_checks_total", `result="`+res+`"`, "Relationship checks made by path rules, by result.").Inc()
+	}
 	r.Counter("wicket_logins_total", `result="failure",reason="`+"bad_state"+`"`, "Completed logins by result.").Inc()
 	r.Counter("wicket_logins_total", `result="success",reason="ok"`, "Completed logins by result.").Add(9)
 	for _, res := range []string{"confirmed", "refused"} {

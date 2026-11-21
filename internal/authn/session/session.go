@@ -70,6 +70,39 @@ type Session struct {
 	// own sessions page, not for the admin API.
 	device string
 	ip     string
+	// consistency is the authorization engine's consistency token from
+	// this session's latest relationship check, read at consistencyRev:
+	// the next check reads a snapshot at least as fresh. It is a cache,
+	// kept in memory only; after a restart the next check starts afresh.
+	consistency    string
+	consistencyRev uint64
+}
+
+// ConsistencyToken returns the consistency token of the session's latest
+// relationship check, or "" when it has made none.
+func (s *Session) ConsistencyToken() string { return s.consistency }
+
+// MaxConsistencyTokenBytes bounds a consistency token the store keeps.
+const MaxConsistencyTokenBytes = 512
+
+// SetConsistency records the snapshot a relationship check of session id
+// read: rev and its token. The token is kept only when rev is newer than
+// the one the session holds, so concurrent checks finishing out of order
+// never move the session back; a token that is empty or longer than
+// MaxConsistencyTokenBytes is ignored. It reports whether the token was
+// kept; a session that ended keeps nothing.
+func (s *Store) SetConsistency(id string, rev uint64, token string) bool {
+	if token == "" || len(token) > MaxConsistencyTokenBytes {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.byID[id]
+	if !ok || !s.live(sess, s.opts.Now()) || rev <= sess.consistencyRev {
+		return false
+	}
+	sess.consistency, sess.consistencyRev = token, rev
+	return true
 }
 
 // Device returns the label of the browser that signed in, or "".

@@ -86,6 +86,10 @@ wicket_logins_total{result="success",reason="ok"} 9
 # HELP wicket_rate_limited_total Requests refused by the login rate limit.
 # TYPE wicket_rate_limited_total counter
 wicket_rate_limited_total 2
+# HELP wicket_relationship_checks_total Relationship checks made by path rules, by result.
+# TYPE wicket_relationship_checks_total counter
+wicket_relationship_checks_total{result="allowed"} 1
+wicket_relationship_checks_total{result="check_denied"} 1
 # HELP wicket_revalidations_total Session revalidations by provider and result: confirmed, refused, failed (ended) or kept (inside the grace).
 # TYPE wicket_revalidations_total counter
 wicket_revalidations_total{provider="corp",result="confirmed"} 1

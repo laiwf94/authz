@@ -43,13 +43,17 @@ type App struct {
 //
 // Public lets anyone through, signed in or not; Deny lets nobody through;
 // otherwise AnyUser, Emails, EmailDomains and Groups say who may, from the
-// app's providers, exactly as the app-wide rule does.
+// app's providers, exactly as the app-wide rule does. Check makes it a
+// relationship rule: the authorization engine decides (see CheckRule),
+// for every user of the app's providers or, when the rule also lists who
+// may, for those it lists.
 type PathRule struct {
 	Path    string
 	Exact   bool
 	Methods []string
 	Public  bool
 	Deny    bool
+	Check   *CheckRule
 
 	AnyUser      bool
 	Emails       []string
@@ -84,6 +88,7 @@ type rule struct {
 	public  bool
 	deny    bool
 	allow   *Compiled
+	check   *compiledCheck // nil unless a relationship rule
 }
 
 type node struct {
@@ -211,6 +216,9 @@ func compileRule(name string, pr PathRule, providers []string) (rule, []string, 
 	if (pr.Public || pr.Deny) && who {
 		return fail("a public or deny rule takes no allow (any_user, emails, email_domains or groups)")
 	}
+	if (pr.Public || pr.Deny) && pr.Check != nil {
+		return fail("a public or deny rule takes no check")
+	}
 	for _, m := range pr.Methods {
 		b := methodBit(m)
 		if b == 0 {
@@ -271,8 +279,18 @@ func compileRule(name string, pr PathRule, providers []string) (rule, []string, 
 	}
 	r.pattern = b.String()
 	if !pr.Public && !pr.Deny {
-		r.allow = Compile(Rule{Providers: providers, AnyUser: pr.AnyUser, Emails: pr.Emails,
+		// A relationship rule that lists nobody asks the engine for every
+		// user of the app's providers.
+		anyUser := pr.AnyUser || (pr.Check != nil && !who)
+		r.allow = Compile(Rule{Providers: providers, AnyUser: anyUser, Emails: pr.Emails,
 			EmailDomains: pr.EmailDomains, Groups: pr.Groups})
+	}
+	if pr.Check != nil {
+		cc, err := compileCheck(pr.Check, r.params)
+		if err != nil {
+			return fail("%v", err)
+		}
+		r.check = cc
 	}
 	// The trie stores parameters as "".
 	for i, s := range segs {
@@ -378,7 +396,9 @@ func (p *Policy) Match(method, rawPath string) Match {
 
 // Evaluate decides a matched request for an identity; id is nil when the
 // request carries no session. It returns whether the request may proceed
-// and a reason code.
+// and a reason code. A relationship rule cannot be decided here: when the
+// identity passes the rule's other conditions Evaluate answers false with
+// CheckRequired, and Authorize asks the engine.
 func (p *Policy) Evaluate(m *Match, id *Identity) (bool, string) {
 	if m.Bad {
 		return false, DeniedBadPath
@@ -397,10 +417,15 @@ func (p *Policy) Evaluate(m *Match, id *Identity) (bool, string) {
 	if id == nil {
 		return false, DeniedNoSubject
 	}
-	return c.Evaluate(*id)
+	ok, reason := c.Evaluate(*id)
+	if ok && m.Rule >= 0 && p.rules[m.Rule].check != nil {
+		return false, CheckRequired
+	}
+	return ok, reason
 }
 
-// Decide matches and evaluates in one call.
+// Decide matches and evaluates in one call. A relationship rule answers
+// CheckRequired; see Authorize.
 func (p *Policy) Decide(method, rawPath string, id *Identity) (bool, string) {
 	m := p.Match(method, rawPath)
 	return p.Evaluate(&m, id)

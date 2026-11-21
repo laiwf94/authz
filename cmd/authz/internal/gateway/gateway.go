@@ -564,10 +564,18 @@ func serveIn(ctx context.Context, h part.Host, getenv func(string) string, path 
 		},
 		Sessions: sessions, Keys: cookies, Upstream: upstream, Logger: log, Metrics: h.Registry(),
 		AdminToken: st.adminToken, TrustedProxies: st.trusted, LoginRate: st.loginRate, Now: now,
-		Audit: auditLog,
+		Audit: auditLog, Engine: h.Engine,
 	})
 	if err != nil {
 		return err
+	}
+	if h.Engines == nil {
+		for _, a := range cfg.Apps {
+			if p, err := a.Policy(); err == nil && p.HasChecks() {
+				log.Warn("path rules with a check need the authorization engine in this process; "+
+					"run authz run with its serve part, or those requests are refused with 503", "app", a.ID)
+			}
+		}
 	}
 
 	if fk != nil {

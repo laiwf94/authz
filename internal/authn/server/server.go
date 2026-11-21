@@ -26,6 +26,7 @@ import (
 	"github.com/laiwf94/authz/internal/authn/config"
 	"github.com/laiwf94/authz/internal/authn/saml"
 	"github.com/laiwf94/authz/internal/authn/session"
+	"github.com/laiwf94/authz/internal/authz/engine"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/jose"
 	"github.com/laiwf94/authz/internal/platform/keys"
@@ -72,6 +73,12 @@ type Options struct {
 	// platform's hash chain, besides the "audit" log line. It should be
 	// opened with audit.Default() schemas. The server does not close it.
 	Audit *audit.Log
+
+	// Engine returns the authorization engine that path rules with a
+	// check ask, in process (part.Host.Engine under authz run). It is
+	// called per request; nil, or an error, refuses such requests with 503
+	// check_unavailable.
+	Engine func(ctx context.Context) (engine.Engine, error)
 
 	// For tests.
 	HTTPClient func(p *config.Provider) (*http.Client, error)

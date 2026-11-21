@@ -165,14 +165,27 @@ type App struct {
 }
 
 // PathRule decides the requests under one path pattern of an app: anyone
-// (public), nobody (deny) or those its allow names.
+// (public), nobody (deny), those its allow names, or, with check, those
+// the authorization engine allows (of those its allow names, when it
+// names any).
 type PathRule struct {
-	Path    string   `json:"path"`
-	Exact   bool     `json:"exact"`
-	Methods []string `json:"methods"`
-	Public  bool     `json:"public"`
-	Deny    bool     `json:"deny"`
-	Allow   Allow    `json:"allow"`
+	Path    string    `json:"path"`
+	Exact   bool      `json:"exact"`
+	Methods []string  `json:"methods"`
+	Public  bool      `json:"public"`
+	Deny    bool      `json:"deny"`
+	Allow   Allow     `json:"allow"`
+	Check   PathCheck `json:"check"`
+}
+
+// PathCheck is a path rule's relationship check (policy.CheckRule):
+// "resource": "doc:{path.id}", "permission": "edit", and optionally
+// "subject", which defaults to "user:{claims.sub}". A rule whose check
+// sets none of them has no check.
+type PathCheck struct {
+	Resource   string `json:"resource"`
+	Permission string `json:"permission"`
+	Subject    string `json:"subject"`
 }
 
 // Allow is an app's access rule. Nothing is allowed by default.
@@ -446,7 +459,8 @@ func validatePaths(pc *Result, path string, a *App) {
 	}
 	for i, r := range a.Paths {
 		if !r.Public && !r.Deny {
-			validateAllow(pc, indexPath(path+".paths", i)+".allow", r.Allow, true)
+			// A check rule that names nobody asks the engine for everyone.
+			validateAllow(pc, indexPath(path+".paths", i)+".allow", r.Allow, !r.Check.Set())
 		}
 	}
 	_, err := a.Policy()
@@ -475,9 +489,19 @@ func (a *App) Policy() (*policy.Policy, error) {
 	for _, r := range a.Paths {
 		pa.Paths = append(pa.Paths, policy.PathRule{Path: r.Path, Exact: r.Exact, Methods: r.Methods,
 			Public: r.Public, Deny: r.Deny, AnyUser: r.Allow.AnyUser, Emails: r.Allow.Emails,
-			EmailDomains: r.Allow.EmailDomains, Groups: r.Allow.Groups})
+			EmailDomains: r.Allow.EmailDomains, Groups: r.Allow.Groups, Check: r.Check.rule()})
 	}
 	return policy.CompileApp(pa)
+}
+
+// Set reports whether the rule has a check.
+func (c PathCheck) Set() bool { return c != PathCheck{} }
+
+func (c PathCheck) rule() *policy.CheckRule {
+	if !c.Set() {
+		return nil
+	}
+	return &policy.CheckRule{Resource: c.Resource, Permission: c.Permission, Subject: c.Subject}
 }
 
 func requireHTTPS(pc *Result, path, u string) bool {
