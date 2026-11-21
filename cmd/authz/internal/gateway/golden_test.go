@@ -3,9 +3,12 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,30 +31,45 @@ var goldenDir = filepath.Join("..", "..", "..", "..", "internal", "authn", "gold
 func TestGoldenGateway(t *testing.T) {
 	for _, sc := range e2e.Scenarios {
 		t.Run(sc.File, func(t *testing.T) {
-			host := freeAddr(t)
-			e := e2e.NewEnv(t, host, sc.Options)
-			var key bytes.Buffer
-			if err := subcommand("gensigningkey", &key); err != nil {
-				t.Fatal(err)
+			// The config must name the gateway's port before it opens it,
+			// so another test can take the port in between: then start
+			// again on another one.
+			var e *e2e.Env
+			var host, admin string
+			for attempt := 1; ; attempt++ {
+				host = freeAddr(t)
+				e = e2e.NewEnv(t, host, sc.Options)
+				var key bytes.Buffer
+				if err := subcommand("gensigningkey", &key); err != nil {
+					t.Fatal(err)
+				}
+				signing := filepath.Join(e.Dir, "signing.pem")
+				if err := os.WriteFile(signing, key.Bytes(), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				vars := map[string]string{
+					"WICKET_CONFIG":       e.ConfigPath,
+					"WICKET_COOKIE_KEYS":  cookieKey,
+					"WICKET_ADDR":         host,
+					"WICKET_ADMIN_ADDR":   "127.0.0.1:0",
+					"WICKET_SESSION_FILE": filepath.Join(e.Dir, "sessions.log"),
+					"WICKET_SIGNING_KEYS": signing,
+					"WICKET_LOGIN_RATE":   "10000",
+					"CORP_SECRET":         e2e.ClientSecret,
+				}
+				if sc.AdminToken {
+					vars["WICKET_ADMIN_TOKEN"] = e2e.AdminToken
+				}
+				a, err := startGateway(t, vars, e.Clock.Now)
+				if err == nil {
+					admin = a
+					break
+				}
+				if !errors.Is(err, syscall.EADDRINUSE) || attempt == maxStartAttempts {
+					t.Fatalf("gateway did not start (attempt %d): %v", attempt, err)
+				}
+				t.Logf("%s was taken before the gateway opened it; starting again on another port", host)
 			}
-			signing := filepath.Join(e.Dir, "signing.pem")
-			if err := os.WriteFile(signing, key.Bytes(), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			vars := map[string]string{
-				"WICKET_CONFIG":       e.ConfigPath,
-				"WICKET_COOKIE_KEYS":  cookieKey,
-				"WICKET_ADDR":         host,
-				"WICKET_ADMIN_ADDR":   "127.0.0.1:0",
-				"WICKET_SESSION_FILE": filepath.Join(e.Dir, "sessions.log"),
-				"WICKET_SIGNING_KEYS": signing,
-				"WICKET_LOGIN_RATE":   "10000",
-				"CORP_SECRET":         e2e.ClientSecret,
-			}
-			if sc.AdminToken {
-				vars["WICKET_ADMIN_TOKEN"] = e2e.AdminToken
-			}
-			admin := startGateway(t, vars, e.Clock.Now)
 			g := e2e.NewRecorder(t, e, e2e.Target{Admin: "http://" + admin, Transport: e2e.PlainHTTP(host)})
 			sc.Run(g)
 			e2e.Check(t, filepath.Join(goldenDir, sc.File), g.Bytes(), false)
@@ -59,8 +77,12 @@ func TestGoldenGateway(t *testing.T) {
 	}
 }
 
-// startGateway serves until the test ends and returns the admin address.
-func startGateway(t *testing.T, vars map[string]string, now func() time.Time) string {
+// maxStartAttempts bounds TestGoldenGateway's starts on a fresh port.
+const maxStartAttempts = 5
+
+// startGateway serves until the test ends and returns the admin address,
+// or the error of a gateway that did not start, with its log.
+func startGateway(t *testing.T, vars map[string]string, now func() time.Time) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	logs := &syncBuf{}
@@ -78,12 +100,11 @@ func startGateway(t *testing.T, vars map[string]string, now func() time.Time) st
 				t.Logf("gateway log:\n%s", logs.String())
 			}
 		})
-		return a
+		return a, nil
 	case err := <-done:
 		cancel()
-		t.Fatalf("gateway did not start: %v\n%s", err, logs.String())
+		return "", fmt.Errorf("%w\n%s", err, logs.String())
 	}
-	return ""
 }
 
 // freeAddr returns a loopback address with a port that was free a moment
