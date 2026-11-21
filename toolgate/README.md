@@ -65,8 +65,12 @@ Each of the steps below can refuse a call, and a refusal ends it there. The
 exact order is in the [design notes](docs/DESIGN.md#the-path-of-one-call).
 
 Every agent has an identity: a static key (only its SHA-256 is stored, and it
-is compared in constant time) or a short-lived signed token (HS256 JWS with
-`iss`, `aud`, `exp`, `nbf`, `iat`, a lifetime cap and key rotation by `kid`).
+is compared in constant time; keys are issued, rotated and revoked on the
+admin API without a restart), a short-lived token the gateway's own key
+signs (HS256 JWS with `iss`, `aud`, `exp`, `nbf`, `iat`, a lifetime cap and
+key rotation by `kid`), or an access token from an authorization server
+(EdDSA, ES256 or RS256, verified against the keys of the issuer's pinned
+JWKS; see [Agent tokens from an authorization server](#agent-tokens-from-an-authorization-server)).
 An identity carries an agent id, an owner and scopes.
 
 The policy is an ordered JSON rule list. Nothing is allowed unless a rule says
@@ -219,6 +223,77 @@ allowed and a refused read of the sandbox, `toolgate audit verify` on the log
 the container wrote, `toolgate policy test` on the example cases, and a clean
 `docker stop`. CI runs it on every change (the "Image (agents)" step of ci.yml).
 
+## Agent tokens from an authorization server
+
+Agents can authenticate with access tokens from an OAuth authorization
+server or identity provider instead of keys the gateway holds. The gateway
+is then an OAuth protected resource, as the MCP authorization
+specification asks: a client that knows only the gateway's URL finds the
+authorization server from the first 401, gets a token for this gateway
+and calls with it. Two sections of the agents config set it up:
+
+```json
+{"resource": {"url": "https://mcp.example.com", "scopes_supported": ["files:read"], "name": "Example tools"},
+ "issuers": [{"issuer": "https://idp.example.com", "audience": "https://mcp.example.com",
+              "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+              "algorithms": ["ES256"], "claims": {"subject": "azp", "scopes": "scp"},
+              "max_ttl_seconds": 900}]}
+```
+
+- `resource.url` is the gateway's resource identifier (RFC 8707), in
+  canonical form: https (http only on loopback), lower-case host, no default
+  port, query or trailing slash. Every issuer's `audience`, and
+  `tokens.audience` when the gateway also signs tokens, must be exactly
+  this URL, so a token the authorization server minted for another
+  resource is refused.
+- `issuer` is the exact `iss`; `jwks_uri` is where its keys are fetched,
+  over https, through the egress guard. Keys never come from a URL in a
+  token (`jku`, `x5u`, `jwk` and `x5c` are ignored). `claims` names the
+  claims holding the agent id, owner and scopes (`sub`, `owner` and `scope`
+  by default). An issuer on a private network needs its addresses in
+  `private_networks`, and one with a private CA its bundle in `ca_file`.
+- The same issuers can be listed in `$.mcp.issuers` of the platform file,
+  after the agents config's. Both reload without a restart; a reload keeps
+  a JWKS client and the keys it holds while its URL is unchanged.
+
+What a client sees:
+
+```console
+$ curl -si -X POST https://mcp.example.com/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="toolgate", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource", scope="files:read"
+
+$ curl -s https://mcp.example.com/.well-known/oauth-protected-resource
+{"authorization_servers":["https://idp.example.com"],"bearer_methods_supported":["header"],"resource":"https://mcp.example.com","resource_name":"Example tools","scopes_supported":["files:read"]}
+```
+
+The client reads the authorization server's own metadata (RFC 8414, at
+`https://idp.example.com/.well-known/oauth-authorization-server`), asks its
+token endpoint for a token with `resource=https://mcp.example.com`, and
+sends it as `Authorization: Bearer`. A bad, expired or misdirected token
+gets the same 401 with `error="invalid_token"` and says nothing about why.
+
+Key rotation needs nothing from the gateway. The issuer publishes its new
+key in the JWKS next to the old one, then starts signing with it: the
+first token under the new `kid` makes the gateway fetch the set again (at
+most once a minute; calls that arrive during the fetch wait for it, others
+keep verifying), so no call fails. Keys the issuer drops stop verifying at
+the next scheduled refresh, which follows the set's `max-age` from 5
+minutes to 24 hours, and all of an issuer's keys stop 24 hours after its
+last successful fetch.
+
+A static key is revoked at once: `POST /admin/keys/{id}/revoke` answers
+only after the revocation is saved and in force, and every call that
+starts after the answer is refused with 401 `invalid_token` (see [API](#api)).
+
+`TestMCPIssuerEndToEnd` in [cmd/authz](../cmd/authz/issuer_e2e_test.go)
+runs all of this through the built binary and a local authorization
+server on loopback TLS: discovery from the 401 to a served call, a token
+for another resource refused, four agents calling without one failure
+while the issuer rotates its key (one JWKS fetch for the new kid however
+many agents present it), and a static key issued and then revoked while
+its agent keeps calling.
+
 ## Moving from the toolgate binary
 
 Nothing in a deployment has to change on the day it moves to authz:
@@ -298,7 +373,7 @@ again and retry.
 | Policy cases | The case parser is strict (unknown fields, duplicate keys and names, expectations that cannot apply are errors); a case written from the engine's own answer passes and the same case with the decision flipped fails on that field; the example cases run against the example policy in CI. |
 | Rate limiting | Random schedules against an exact integer token-bucket reference; the GCRA limiter must admit exactly the same calls. |
 | Audit log | Every single-byte flip is detected (by `Verify` or by the head hash); the log cut at every byte offset recovers exactly the complete records and the chain continues; edits, deletions, swaps and duplicates are reported at the right line; failed writes and fsyncs are injected. |
-| End to end | A real gateway in front of a real MCP server over HTTP: filtered lists, credential injection, every denial path, rate limits, quotas, approval (including concurrent waiters, single use, denial), rug-pull quarantine and re-approval, redaction, truncation, upstream timeouts, oversized and malformed upstream replies, a down upstream, policy hot reload, signed tokens, legacy sessions and session hijack attempts, audit failure refusing calls. The binary itself is restarted with its state to check that pins and the audit chain survive. |
+| End to end | A real gateway in front of a real MCP server over HTTP: filtered lists, credential injection, every denial path, rate limits, quotas, approval (including concurrent waiters, single use, denial), rug-pull quarantine and re-approval, redaction, truncation, upstream timeouts, oversized and malformed upstream replies, a down upstream, policy hot reload, signed tokens, tokens from an authorization server discovered from the 401 and verified through a key rotation under load, static keys revoked while in use, legacy sessions and session hijack attempts, audit failure refusing calls. The binary itself is restarted with its state to check that pins and the audit chain survive. |
 | Protocol | Every transport rule of both protocol eras over HTTP (headers, `_meta`, versions, Origin, Accept, body limit, batches, sessions); the client against a modern server, a hand-written 2025-era server with SSE, pagination and expiring sessions, and a set of misbehaving servers. |
 | Parsers | Go fuzzing of the JSON-RPC decoder, the policy parser, the policy case parser and runner, the schema compiler and validator, the token verifier and the audit log reader. |
 | Concurrency | The whole suite runs under the race detector in CI. |

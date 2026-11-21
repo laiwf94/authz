@@ -401,6 +401,33 @@ link the roadmap issue they come from.
 
 ### Agent gateway (agents)
 
+- **Agent tokens from authorization servers** ([#84](https://github.com/laiwf94/authz/issues/84)).
+  Week 4 is complete. Agents can call with EdDSA, ES256 or RS256 access
+  tokens from external issuers, listed in a new `issuers` section of the
+  agents config (and `$.mcp.issuers` of the platform file): each pins its
+  `iss`, `audience`, `jwks_uri`, accepted algorithms, claim names for the
+  agent id, owner and scopes, a maximum lifetime, and the private networks
+  and CA its keys may be fetched with. Keys come only from that URL,
+  through an egress guard that refuses private and metadata addresses at
+  connect time; a JWKS client per key set caps documents at 64 KiB,
+  follows no redirects, caches by ETag, refreshes on `max-age` (5 minutes
+  to 24 hours) and fetches at most once a minute for an unknown kid, so an
+  issuer rotates its key without a failed call. Each key verifies only its
+  own algorithm and issuer. A new `resource` section makes the gateway an
+  OAuth protected resource: it serves RFC 9728 metadata at
+  `/.well-known/oauth-protected-resource`, every 401 carries
+  `WWW-Authenticate` with `resource_metadata` in both protocol eras, and
+  tokens whose audience is not the resource are refused (RFC 8707). Static
+  agent keys are issued, rotated (with an overlap of up to 7 days) and
+  revoked on the admin API under `/admin/keys` without a restart, with
+  compare-and-set on the key set version, saved to `static-keys.json`
+  before they take effect, and audited as `static_key_created`,
+  `static_key_rotated` and `static_key_revoked`. Verification costs 51 to
+  56 µs for EdDSA, 77 to 82 µs for ES256 and 36 to 38 µs for RS256-2048 on
+  one CPU (toolgate/README.md). `TestMCPIssuerEndToEnd` runs discovery
+  from the 401, a rotation under load and a live revocation through the
+  built binary.
+
 - **TestRunRestartAndReload no longer flakes on a restart that quarantines** ([#247](https://github.com/laiwf94/authz/issues/247)).
   The restarted gateway can write `tool_quarantined` for the tool the test
   changed while it was down before the test reads the audit head. The test

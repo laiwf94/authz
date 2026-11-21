@@ -240,17 +240,23 @@ synced) before it takes effect, and is audited as `static_key_created`,
 file another process changed is refused rather than overwritten. Limits: 16
 issued keys per agent, 1024 issued keys and 1024 revocations per file.
 
-Signed tokens are compact JWS (RFC 7515) with HMAC-SHA256 and JWT claims
-(RFC 7519) [14]: `iss`, `aud`, `sub` (agent id), `owner`, `scope`, `iat`, `nbf`,
-`exp`, `jti`. Following RFC 8725, the algorithm is fixed: a header naming any
-`alg` other than `HS256` is refused, so `none` and algorithm confusion are not
-possible. The `kid` selects among configured keys; tokens signed with an older
+Signed tokens are compact JWS (RFC 7515) with JWT claims (RFC 7519) [14]:
+`iss`, `aud`, `sub` (agent id), `owner`, `scope`, `iat`, `nbf`, `exp`, `jti`.
+There are two kinds, and a token goes down exactly one path, chosen by its
+`alg` and `iss`. Tokens the gateway's own key signs are HS256 and are
+checked only against the configured shared secrets; tokens from an
+external issuer are EdDSA, ES256 or RS256 and are checked only against that
+issuer's public keys, each key bound to one algorithm and key type
+(RFC 8725). So `none` and algorithm confusion are not possible: a public
+key is never used as an HMAC secret, an HMAC kid never selects a public
+key, and one issuer's keys never verify another's tokens. The `kid` selects among configured keys; tokens signed with an older
 key stay valid while it is configured, and new tokens use the first key, which
 is how keys rotate. `iss` and `aud` must match the gateway's, `exp - iat` may
 not exceed the configured maximum (default one hour), and 30 seconds of clock
-skew is allowed. The MAC is checked before the claims are parsed. Unknown
-header fields and claims are refused, which also rules out `jku`/`x5u` key
-fetching.
+skew is allowed. The MAC is checked before the claims are parsed. For HS256
+tokens, unknown header fields and claims are refused. For issuer tokens the
+header may carry members the gateway doesn't use, but keys never come from
+the token: `jku`, `jwk`, `x5u` and `x5c` are ignored.
 
 The issuer of signed tokens holds the signing key and is trusted: it can mint
 any agent id with any scopes. Policy is the limit on what those scopes do.
@@ -267,6 +273,23 @@ that URL, through the egress guard, never from a URL a token names.
 the same URL, networks and CA certificates; a reload keeps a client and the
 keys it holds while those are unchanged, and the clients stop with the
 server.
+
+A JWKS client serves known kids from the current set without a lock or a
+request. It refreshes on the set's `max-age`, clamped to 5 minutes to 24
+hours (one hour without one), with `If-None-Match`, and backs off from 30
+seconds after a failure; a failed or malformed fetch keeps the current
+set, and the keys stop verifying 24 hours after the last fetch that
+succeeded. A token with an unknown kid starts at most one fetch a minute;
+lookups that arrive while it runs wait for it, and the rest fail at once,
+so made-up kids can't make the gateway hammer the issuer. That is what
+makes rotation safe without coordination: an issuer that publishes its
+next key before signing with it has every call served, and the first
+token under the new kid brings the new set in. A key the issuer removes
+stops verifying at the next refresh that succeeds, not at once; a key that
+must stop now is one an operator removes by pointing the issuer at
+another `jwks_uri` or removing the issuer, which takes effect on reload.
+`TestMCPIssuerEndToEnd` checks discovery, the audience binding, a rotation
+under four calling agents and a live revocation through the built binary.
 
 The `resource` section makes the gateway an OAuth protected resource, as
 the MCP authorization specification asks in both protocol eras. Its `url`
