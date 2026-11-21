@@ -152,18 +152,21 @@ type ToolCall struct {
 	Protocol         string `json:"protocol,omitempty"`
 	RuleID           string `json:"rule_id,omitempty"`
 	ConstraintRuleID string `json:"constraint_rule_id,omitempty"`
-	Reason           string `json:"reason,omitempty"`
-	ApprovalID       string `json:"approval_id,omitempty"`
-	Decision         string `json:"decision"`
-	Stage            string `json:"stage"`
-	Outcome          string `json:"outcome,omitempty"`
-	LatencyMS        int64  `json:"latency_ms,omitempty"`
-	ResponseBytes    int    `json:"response_bytes,omitempty"`
-	Redactions       int    `json:"redactions,omitempty"`
-	Truncated        bool   `json:"truncated,omitempty"`
-	UpstreamCode     int    `json:"upstream_code,omitempty"`
-	Error            string `json:"error,omitempty"`
-	RequestID        string `json:"request_id,omitempty"`
+	// Checks are the relationship checks the decision asked, each
+	// "resource#permission@subject: outcome".
+	Checks        []string `json:"checks,omitempty"`
+	Reason        string   `json:"reason,omitempty"`
+	ApprovalID    string   `json:"approval_id,omitempty"`
+	Decision      string   `json:"decision"`
+	Stage         string   `json:"stage"`
+	Outcome       string   `json:"outcome,omitempty"`
+	LatencyMS     int64    `json:"latency_ms,omitempty"`
+	ResponseBytes int      `json:"response_bytes,omitempty"`
+	Redactions    int      `json:"redactions,omitempty"`
+	Truncated     bool     `json:"truncated,omitempty"`
+	UpstreamCode  int      `json:"upstream_code,omitempty"`
+	Error         string   `json:"error,omitempty"`
+	RequestID     string   `json:"request_id,omitempty"`
 }
 
 // ApprovalRequested is a call held for a human.

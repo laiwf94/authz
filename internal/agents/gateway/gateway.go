@@ -47,6 +47,7 @@ import (
 	"github.com/laiwf94/authz/internal/agents/pins"
 	"github.com/laiwf94/authz/internal/agents/policy"
 	"github.com/laiwf94/authz/internal/agents/ratelimit"
+	"github.com/laiwf94/authz/internal/authz/engine"
 	"github.com/laiwf94/authz/internal/platform/audit"
 	"github.com/laiwf94/authz/internal/platform/keys"
 	"github.com/laiwf94/authz/internal/platform/logging"
@@ -86,6 +87,11 @@ type Options struct {
 	// revokes keys in, merged with the configured agents' keys; nil keeps
 	// one in memory, lost on restart.
 	StaticKeys *keys.StaticStore
+	// Engine returns the authorization engine that rules with a
+	// relationship check ask, in process (part.Host.Engine under authz
+	// run). It is called during a call that reaches such a rule; nil, or
+	// an error, refuses calls that depend on a check with 503 -31012.
+	Engine func(ctx context.Context) (engine.Engine, error)
 }
 
 // Gateway serves agents over MCP and administrators over the admin API.
@@ -333,7 +339,7 @@ func (g *Gateway) Authenticate(r *http.Request) (any, string, error) {
 }
 
 func subjectOf(id *identity.Identity) policy.Subject {
-	return policy.Subject{AgentID: id.AgentID, Scopes: id.Scopes}
+	return policy.Subject{AgentID: id.AgentID, Owner: id.Owner, Scopes: id.Scopes}
 }
 
 // refreshBackoff is how long a failed tool-list refresh is remembered before
@@ -583,13 +589,29 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 		}
 	}
 
-	d := p.Evaluate(subjectOf(id), upName, toolName, args)
+	d := p.Decide(ctx, subjectOf(id), upName, toolName, args, g.engine)
 	rec["rule_id"] = d.RuleID
 	if d.ConstraintRuleID != "" {
 		rec["constraint_rule_id"] = d.ConstraintRuleID
 	}
+	if len(d.Checks) > 0 {
+		checks := make([]any, len(d.Checks))
+		for i, t := range d.Checks {
+			checks[i] = t.String()
+			if !t.Cached {
+				g.count("toolgate_relationship_checks_total", `result="`+t.Outcome+`"`, "Relationship checks made by tool rules, by result.")
+			}
+		}
+		rec["checks"] = checks
+	}
 	if !d.Allowed {
 		rec["decision"], rec["reason"] = "deny", d.Reason
+		if d.Unavailable {
+			// An outage, not a denial: the engine could not answer.
+			g.log.Error("relationship check failed", "agent", id.AgentID, "tool", name, "rule", orDefault(d.ConstraintRuleID, d.RuleID), "reason", d.Reason)
+			return refuse("check_unavailable", rpcErr(http.StatusServiceUnavailable, mcp.CodeCheckUnavailable,
+				map[string]any{"rule_id": orDefault(d.ConstraintRuleID, d.RuleID)}, "the access check could not be made; try again"))
+		}
 		if d.RuleID == policy.DefaultDenyID && d.ConstraintRuleID == "" && !p.Visible(subjectOf(id), upName, toolName) {
 			// Do not confirm that a tool the agent cannot see exists.
 			return refuse("denied", unknownTool(name))
@@ -766,4 +788,23 @@ func (g *Gateway) policyReloaded(r policy.ReloadResult) {
 	g.count("toolgate_policy_reloads_total", `result="applied"`, "Policy reload attempts.")
 	g.log.Info("policy reloaded", "hash", r.Hash)
 	_ = g.audit(context.Background(), "policy_applied", data)
+}
+
+// engine is the CheckEngine policy decisions ask.
+func (g *Gateway) engine(ctx context.Context) (policy.Checker, error) {
+	if g.opt.Engine == nil {
+		return nil, errors.New("no authorization engine in this process: run authz run with its serve part")
+	}
+	e, err := g.opt.Engine(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }

@@ -49,6 +49,10 @@ toolgate_rate_limited_total{scope="tool"} 1
 # HELP toolgate_redactions_total Secrets redacted from tool results.
 # TYPE toolgate_redactions_total counter
 toolgate_redactions_total 1
+# HELP toolgate_relationship_checks_total Relationship checks made by tool rules, by result.
+# TYPE toolgate_relationship_checks_total counter
+toolgate_relationship_checks_total{result="allowed"} 1
+toolgate_relationship_checks_total{result="denied"} 1
 # HELP toolgate_tool_calls_total Tool calls by outcome.
 # TYPE toolgate_tool_calls_total counter
 toolgate_tool_calls_total{upstream="",tool="",outcome="unknown_tool"} 1

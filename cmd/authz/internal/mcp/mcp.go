@@ -518,11 +518,16 @@ func serveGateway(ctx context.Context, h part.Host, getenv func(string) string, 
 		return err
 	}
 	gw, err := gateway.New(gateway.Options{Config: gc, Auth: auth, Policy: pol, Audit: auditLog, Pins: pinStore,
-		ApprovalLog: approvalPath, StaticKeys: staticKeys, AuditKey: cfg.auditKey, AllowedOrigins: cfg.origins, Log: log, Metrics: h.Registry()})
+		ApprovalLog: approvalPath, StaticKeys: staticKeys, AuditKey: cfg.auditKey, AllowedOrigins: cfg.origins, Log: log, Metrics: h.Registry(),
+		Engine: h.Engine})
 	if err != nil {
 		return err
 	}
 	defer gw.Close()
+	if h.Engines == nil && pol.Current().HasChecks() {
+		log.Warn("tool rules with a check need the authorization engine in this process; " +
+			"run authz run with its serve part, or calls that depend on them are refused with 503")
+	}
 	jwks.commit(pd)
 	if fk != nil {
 		kctx, stopKeys := context.WithCancel(ctx)

@@ -10,14 +10,20 @@
 //  2. Otherwise the first allow rule whose subject, upstream and tool match
 //     and whose argument schema accepts the arguments allows the call.
 //  3. Otherwise the call is denied by "default-deny". If an allow rule matched
-//     everything but the arguments, its id and the validation error are
-//     reported, so the agent learns what to fix.
+//     everything but the arguments (or its relationship check), its id and
+//     the reason are reported, so the agent learns what to fix.
+//
+// A rule may also ask the authorization engine whether the user behind the
+// agent holds a permission on a resource named by the arguments (check.go):
+// in an allow rule that is one more condition, in a deny rule the condition
+// under which it forbids the call.
 //
 // Every decision names the rule that produced it, for the audit log.
 package policy
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -85,6 +91,7 @@ type fileRule struct {
 	Arguments        json.RawMessage `json:"arguments"`
 	RequiresApproval bool            `json:"requires_approval"`
 	Output           *fileOutput     `json:"output"`
+	Check            *fileCheck      `json:"check"`
 }
 
 type fileOutput struct {
@@ -111,7 +118,11 @@ type Rule struct {
 	args             *schema.Schema
 	RequiresApproval bool
 	Output           *guard.Guard
+	check            *compiledCheck
 }
+
+// HasCheck reports whether the rule asks the authorization engine.
+func (r *Rule) HasCheck() bool { return r.check != nil }
 
 type toolPattern struct {
 	name   string
@@ -126,11 +137,13 @@ type Policy struct {
 	// the rules that can apply to it (naming it or "*"), in file order.
 	byUpstream map[string][]int
 	wildcard   []int // rules that apply to every upstream
+	checks     bool  // some rule has a relationship check
 }
 
 // Subject is who is calling.
 type Subject struct {
 	AgentID string
+	Owner   string // the user behind the agent, {owner} in checks
 	Scopes  []string
 }
 
@@ -142,8 +155,16 @@ type Decision struct {
 	RequiresApproval bool
 	Output           *guard.Guard
 	// ConstraintRuleID is set on a default deny when an allow rule matched
-	// everything except its argument schema.
+	// everything except its argument schema or its relationship check.
 	ConstraintRuleID string
+	// Unavailable is set on a denial that is an outage: a relationship
+	// check the decision depends on could not be answered.
+	Unavailable bool
+	// Checks are the relationship checks the call reached, in the order
+	// asked.
+	Checks []CheckTrace
+	// byCheck: ConstraintRuleID's rule failed its check, not its schema.
+	byCheck bool
 }
 
 // Parse validates and compiles a policy document.
@@ -178,6 +199,7 @@ func Parse(src []byte) (*Policy, error) {
 			return nil, fmt.Errorf("policy: rule id %q is used twice", r.ID)
 		}
 		seen[r.ID] = true
+		p.checks = p.checks || r.check != nil
 		p.Rules = append(p.Rules, r)
 	}
 	for i, r := range p.Rules {
@@ -265,6 +287,11 @@ func compileRule(fr fileRule) (*Rule, error) {
 	if r.Effect == Deny && (fr.RequiresApproval || fr.Output != nil) {
 		return nil, errors.New("requires_approval and output apply only to allow rules")
 	}
+	if fr.Check != nil {
+		if r.check, err = compileCheck(fr.Check); err != nil {
+			return nil, err
+		}
+	}
 	if fr.Output != nil {
 		if r.Output, err = guard.New(fr.Output.Redact, fr.Output.RedactPatterns, fr.Output.MaxBytes); err != nil {
 			return nil, fmt.Errorf("output: %w", err)
@@ -322,24 +349,59 @@ func (p *Policy) candidates(upstream string) []int {
 	return p.wildcard
 }
 
-// Evaluate decides a tools/call. args is the decoded arguments object (or nil
-// when the call has none, which is checked as an empty object).
+// Evaluate decides a tools/call without an engine: a rule with a
+// relationship check counts its check as unavailable. args is the decoded
+// arguments object (or nil when the call has none, which is checked as an
+// empty object).
 func (p *Policy) Evaluate(s Subject, upstream, tool string, args any) Decision {
+	return p.Decide(context.Background(), s, upstream, tool, args, nil)
+}
+
+// Decide decides a tools/call, asking the engine get returns for the
+// relationship checks of the rules the call reaches. get is called at most
+// once, and only when a check has to be asked; nil means there is no
+// engine. Identical checks are asked once per call.
+func (p *Policy) Decide(ctx context.Context, s Subject, upstream, tool string, args any, get CheckEngine) Decision {
 	if args == nil {
 		args = map[string]any{}
 	}
+	k := checker{ctx: ctx, get: get}
+	d := p.decide(&k, s, upstream, tool, args)
+	d.Checks = k.traces
+	return d
+}
+
+func (p *Policy) decide(k *checker, s Subject, upstream, tool string, args any) Decision {
 	cands := p.candidates(upstream)
 	for _, i := range cands {
 		r := p.Rules[i]
 		if r.Effect != Deny || !r.matchesSubject(s) || !r.matchesTool(tool) {
 			continue
 		}
-		if r.args == nil || r.args.Validate(args) == nil {
+		if r.args != nil && r.args.Validate(args) != nil {
+			continue
+		}
+		if r.check == nil {
 			return Decision{RuleID: r.ID, Reason: "rule " + r.ID + " forbids this call"}
+		}
+		// Fail closed: only a definite "denied" lets the call past.
+		switch t := k.run(r, s, args); t.Outcome {
+		case CheckDenied:
+			continue
+		case CheckAllowed:
+			return Decision{RuleID: r.ID, Reason: "rule " + r.ID + " forbids this call"}
+		case CheckUnavailable:
+			return Decision{RuleID: r.ID, Unavailable: true,
+				Reason: "rule " + r.ID + ": the relationship check could not be made: " + t.Err.Error()}
+		default:
+			return Decision{RuleID: r.ID, Reason: "rule " + r.ID + " forbids this call: its relationship check is " + checkWhy(t)}
 		}
 	}
 	var constraint *Rule
-	var constraintErr error
+	var constraintWhy string
+	var constraintByCheck bool
+	var unavailable *Rule
+	var unavailableErr error
 	for _, i := range cands {
 		r := p.Rules[i]
 		if r.Effect != Allow || !r.matchesSubject(s) || !r.matchesTool(tool) {
@@ -348,7 +410,19 @@ func (p *Policy) Evaluate(s Subject, upstream, tool string, args any) Decision {
 		if r.args != nil {
 			if err := r.args.Validate(args); err != nil {
 				if constraint == nil {
-					constraint, constraintErr = r, err
+					constraint, constraintWhy = r, "arguments rejected by rule "+r.ID+": "+err.Error()
+				}
+				continue
+			}
+		}
+		if r.check != nil {
+			if t := k.run(r, s, args); t.Outcome != CheckAllowed {
+				if t.Outcome == CheckUnavailable {
+					if unavailable == nil {
+						unavailable, unavailableErr = r, t.Err
+					}
+				} else if constraint == nil {
+					constraint, constraintWhy, constraintByCheck = r, "relationship check of rule "+r.ID+" is "+checkWhy(t), true
 				}
 				continue
 			}
@@ -356,16 +430,34 @@ func (p *Policy) Evaluate(s Subject, upstream, tool string, args any) Decision {
 		return Decision{Allowed: true, RuleID: r.ID, Reason: "allowed by rule " + r.ID,
 			RequiresApproval: r.RequiresApproval, Output: r.Output}
 	}
+	if unavailable != nil {
+		// The rule that could not ask might have allowed the call.
+		return Decision{RuleID: DefaultDenyID, ConstraintRuleID: unavailable.ID, Unavailable: true,
+			Reason: "rule " + unavailable.ID + ": the relationship check could not be made: " + unavailableErr.Error()}
+	}
 	if constraint != nil {
-		return Decision{RuleID: DefaultDenyID, ConstraintRuleID: constraint.ID,
-			Reason: fmt.Sprintf("arguments rejected by rule %s: %v", constraint.ID, constraintErr)}
+		return Decision{RuleID: DefaultDenyID, ConstraintRuleID: constraint.ID, Reason: constraintWhy, byCheck: constraintByCheck}
 	}
 	return Decision{RuleID: DefaultDenyID, Reason: "no rule allows this call"}
 }
 
+// checkWhy is a check's failed outcome for a reason.
+func checkWhy(t CheckTrace) string {
+	q := t.Request
+	what := q.ResourceType + ":" + q.ResourceID + "#" + q.Permission + "@" + q.Subject.String()
+	switch t.Outcome {
+	case CheckBadInput:
+		return "missing its input: " + t.Err.Error()
+	case CheckConditional:
+		return "conditional on " + strings.Join(t.Result.Missing, ", ") + ": " + what
+	}
+	return t.Outcome + ": " + what
+}
+
 // Visible reports whether a tool should appear in the subject's tools/list:
 // some allow rule could permit a call to it, and no deny rule without an
-// argument schema forbids every call to it.
+// argument schema or a relationship check forbids every call to it. It
+// never asks the engine.
 func (p *Policy) Visible(s Subject, upstream, tool string) bool {
 	visible := false
 	for _, i := range p.candidates(upstream) {
@@ -373,7 +465,7 @@ func (p *Policy) Visible(s Subject, upstream, tool string) bool {
 		if !r.matchesSubject(s) || !r.matchesTool(tool) {
 			continue
 		}
-		if r.Effect == Deny && r.args == nil {
+		if r.Effect == Deny && r.args == nil && r.check == nil {
 			return false
 		}
 		if r.Effect == Allow {

@@ -78,6 +78,9 @@ func registerTracks(r *Registry) {
 	r.Counter("toolgate_upstream_errors_total", fmt.Sprintf(`upstream=%q,op="tools/list"`, "files"), "Failed upstream requests.").Inc()
 	r.Counter("toolgate_upstream_errors_total", fmt.Sprintf(`upstream=%q,op="tools/call"`, "files"), "Failed upstream requests.").Inc()
 	r.Counter("toolgate_tools_quarantined_total", "", "Tool definitions quarantined after a change.").Inc()
+	for _, res := range []string{"allowed", "denied"} {
+		r.Counter("toolgate_relationship_checks_total", `result="`+res+`"`, "Relationship checks made by tool rules, by result.").Inc()
+	}
 	r.Counter("toolgate_audit_failures_total", "", "Audit records that could not be written.")
 	r.Counter("toolgate_audit_records_total", fmt.Sprintf("event=%q", "tool.call"), "Audit records written.").Add(6)
 	r.Counter("toolgate_tool_calls_total", fmt.Sprintf(`upstream="",tool="",outcome=%q`, "unknown_tool"), "Tool calls by outcome.").Inc()

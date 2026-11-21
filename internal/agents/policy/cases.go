@@ -2,6 +2,7 @@ package policy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,9 @@ import (
 	"strings"
 
 	"github.com/laiwf94/authz/internal/agents/jsonrpc"
+	"github.com/laiwf94/authz/internal/authz/check"
+	"github.com/laiwf94/authz/internal/authz/engine"
+	"github.com/laiwf94/authz/internal/authz/store"
 )
 
 // Limits on a case file.
@@ -39,21 +43,34 @@ const (
 // when the gateway would answer "Unknown tool" rather than "denied by
 // policy", because the agent cannot see the tool. A list case names the
 // tools an upstream offers and expects exactly the ones the subject sees.
+//
+// Rules with a relationship check are decided against the case's checks
+// instead of an engine: a map from "resource#permission@subject" to
+// "allowed", "denied", "conditional" or "unavailable". A check the map
+// does not list is denied. The subject's owner fills {owner}:
+//
+//	{"name": "alice edits her project",
+//	 "subject": {"agent": "alice-bot", "owner": "alice"},
+//	 "call": {"tool": "fs.write_file", "arguments": {"project": "p1"}},
+//	 "checks": {"project:p1#edit@user:alice": "allowed"},
+//	 "expect": {"decision": "allow", "rule": "edit-projects"}}
 type caseFile struct {
 	Version int        `json:"version"`
 	Cases   []fileCase `json:"cases"`
 }
 
 type fileCase struct {
-	Name    string      `json:"name"`
-	Subject fileSubject `json:"subject"`
-	Call    *fileCall   `json:"call"`
-	List    []string    `json:"list"`
-	Expect  fileExpect  `json:"expect"`
+	Name    string            `json:"name"`
+	Subject fileSubject       `json:"subject"`
+	Call    *fileCall         `json:"call"`
+	List    []string          `json:"list"`
+	Checks  map[string]string `json:"checks"`
+	Expect  fileExpect        `json:"expect"`
 }
 
 type fileSubject struct {
 	Agent  string   `json:"agent"`
+	Owner  string   `json:"owner"`
 	Scopes []string `json:"scopes"`
 }
 
@@ -97,6 +114,9 @@ type Case struct {
 	Call      *ToolRef
 	Arguments any // decoded with numbers as json.Number; nil when absent
 	List      []ToolRef
+	// Checks answers the relationship checks of a call case, keyed by
+	// "resource#permission@subject"; unlisted checks are denied.
+	Checks map[string]string
 
 	Want Expect
 }
@@ -176,7 +196,27 @@ func compileCase(fc fileCase) (Case, error) {
 			return c, fmt.Errorf("subject scope %q is not valid", sc)
 		}
 	}
-	c.Subject = Subject{AgentID: s.Agent, Scopes: s.Scopes}
+	if len(s.Owner) > 128 || strings.ContainsFunc(s.Owner, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return c, errors.New("subject owner must be at most 128 bytes with no control characters")
+	}
+	c.Subject = Subject{AgentID: s.Agent, Owner: s.Owner, Scopes: s.Scopes}
+	if fc.Checks != nil && fc.Call == nil {
+		return c, errors.New(`"checks" applies only to call cases`)
+	}
+	if len(fc.Checks) > MaxSelectorItems {
+		return c, fmt.Errorf("checks has more than %d entries", MaxSelectorItems)
+	}
+	for k, v := range fc.Checks {
+		if _, err := parseCheckText(k); err != nil {
+			return c, fmt.Errorf("checks: %w", err)
+		}
+		switch v {
+		case CheckAllowed, CheckDenied, CheckConditional, CheckUnavailable:
+		default:
+			return c, fmt.Errorf("checks: %q must be \"allowed\", \"denied\", \"conditional\" or \"unavailable\"", k)
+		}
+	}
+	c.Checks = fc.Checks
 	e := fc.Expect
 	switch {
 	case fc.Call != nil && fc.List != nil:
@@ -351,7 +391,8 @@ func runCase(p *Policy, ids map[string]bool, c *Case) CaseResult {
 		}
 		return res
 	}
-	d := p.Evaluate(c.Subject, c.Call.Upstream, c.Call.Tool, c.Arguments)
+	d := p.Decide(context.Background(), c.Subject, c.Call.Upstream, c.Call.Tool, c.Arguments,
+		func(context.Context) (Checker, error) { return caseChecker(c.Checks), nil })
 	hidden := !d.Allowed && d.RuleID == DefaultDenyID && d.ConstraintRuleID == "" &&
 		!p.Visible(c.Subject, c.Call.Upstream, c.Call.Tool)
 	res.Got = describe(d, hidden)
@@ -400,7 +441,13 @@ func describe(d Decision, hidden bool) string {
 	b.WriteString(decisionWord(d.Allowed))
 	b.WriteString(" by ")
 	b.WriteString(d.RuleID)
-	if d.ConstraintRuleID != "" {
+	switch {
+	case d.ConstraintRuleID == "":
+	case d.Unavailable:
+		b.WriteString(" (check of " + d.ConstraintRuleID + " unavailable)")
+	case d.byCheck:
+		b.WriteString(" (check of " + d.ConstraintRuleID + " failed)")
+	default:
 		b.WriteString(" (arguments rejected by " + d.ConstraintRuleID + ")")
 	}
 	if d.RequiresApproval {
@@ -441,4 +488,43 @@ func (rep CaseReport) WriteText(w io.Writer, verbose bool) {
 		status = "FAIL"
 	}
 	fmt.Fprintf(w, "%s %d cases: %d passed, %d failed\n", status, len(rep.Results), rep.Passed, rep.Failed)
+}
+
+// caseChecker answers checks from a case's map.
+type caseChecker map[string]string
+
+func (m caseChecker) Check(_ context.Context, req engine.CheckRequest) (engine.CheckResult, error) {
+	key := req.ResourceType + ":" + req.ResourceID + "#" + req.Permission + "@" + req.Subject.String()
+	switch m[key] {
+	case CheckAllowed:
+		return engine.CheckResult{Allowed: true, Permissionship: check.Allowed}, nil
+	case CheckConditional:
+		return engine.CheckResult{Permissionship: check.Conditional, Missing: []string{"case"}}, nil
+	case CheckUnavailable:
+		return engine.CheckResult{}, errors.New("the case makes the engine unavailable")
+	}
+	return engine.CheckResult{Permissionship: check.Denied}, nil
+}
+
+// parseCheckText validates "type:id#permission@subject".
+func parseCheckText(s string) (engine.CheckRequest, error) {
+	var req engine.CheckRequest
+	res, sub, ok := strings.Cut(s, "@")
+	if !ok {
+		return req, fmt.Errorf("%q must be type:id#permission@subject", s)
+	}
+	obj, perm, ok := strings.Cut(res, "#")
+	if !ok {
+		return req, fmt.Errorf("%q must be type:id#permission@subject", s)
+	}
+	typ, id, ok := strings.Cut(obj, ":")
+	if !ok || !validName(typ) || !store.ValidID(id) || !validName(perm) {
+		return req, fmt.Errorf("%q must be type:id#permission@subject", s)
+	}
+	subj, err := store.ParseSubject(sub, false)
+	if err != nil {
+		return req, fmt.Errorf("%q: %w", s, err)
+	}
+	req.ResourceType, req.ResourceID, req.Permission, req.Subject = typ, id, perm, subj
+	return req, nil
 }

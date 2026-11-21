@@ -84,6 +84,34 @@ rules only, so odd input fails closed. Unknown keywords are errors, every
 decision names the rule that made it, and the file is hot-reloaded
 atomically; an invalid file is rejected and the old policy keeps running.
 
+A rule can also ask the authorization engine. Under `authz run` with its
+serve part, a rule's `check` names a resource, a permission and a subject
+built from the call, and the in-process engine is asked whether the subject
+holds the permission, with no network hop:
+
+```json
+{"id": "edit-own-projects", "effect": "allow", "agents": ["*"],
+ "upstreams": ["files"], "tools": ["write_file"],
+ "check": {"resource": "project:{args.project}", "permission": "edit"}}
+```
+
+IDs are templates of `{owner}` (the user behind the agent), `{agent}` and
+`{args.name}` (a string or integer argument, `{args.a.b}` for a nested one).
+The subject defaults to `user:{owner}` and may be a userset
+(`team:{args.team}#member`). In an allow rule the check is one more
+condition: if the engine does not answer allowed, the rule does not allow
+and the next one is tried. In a deny rule it is the condition for the deny,
+and it fails closed: a missing or invalid value, a conditional answer or an
+engine that cannot answer all deny. Each distinct check is asked once per
+call, at `minimize_latency`. When the engine cannot answer and no other rule
+allows the call, it is refused with 503 `-31012`, an outage rather than a
+denial. Audit records list each check as
+`resource#permission@subject: outcome`, and
+`toolgate_relationship_checks_total{result}` counts them. A case file can
+answer checks itself, with `"checks": {"project:p1#edit@user:alice":
+"allowed"}` and the subject's `"owner"`, so `authz mcp policy test` needs no
+engine.
+
 A policy can be tested like code. A case file lists calls and tool lists with
 the decision each should get, and `authz mcp policy test POLICY CASES` checks
 them all and prints, for each case that fails, what it expected next to what
@@ -354,7 +382,7 @@ reserve: `-31000` unauthenticated (401), `-31001` denied by policy, `-31002`
 rate limited (429), `-31003` daily quota (429), `-31004` approval pending,
 `-31005` approval denied, `-31006` tool quarantined, `-31007` upstream error
 (502), `-31008` upstream timeout (504), `-31009` upstream busy (429), `-31010`
-audit log unavailable (503). Protocol errors use the specification's codes:
+audit log unavailable (503), `-31012` relationship check unavailable (503). Protocol errors use the specification's codes:
 `-32020` header mismatch, `-32022` unsupported version, `-32602` invalid params
 or unknown tool. Clients in a 2025 session get every JSON-RPC error with
 HTTP 200, as those revisions expect, and still get `Retry-After`.

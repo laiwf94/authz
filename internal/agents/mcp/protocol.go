@@ -106,6 +106,8 @@ const (
 	CodeUpstreamTimeout  = -31008
 	CodeUpstreamBusy     = -31009
 	CodeAuditUnavailable = -31010
+	// -31011 is kept for result rules (#87).
+	CodeCheckUnavailable = -31012 // a relationship check could not be made
 )
 
 // Implementation identifies a client or server (clientInfo / serverInfo).
