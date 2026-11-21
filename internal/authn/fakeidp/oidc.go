@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +29,8 @@ type grant struct {
 	user        *User
 	expires     time.Time
 	sid         string // the provider session the grant belongs to
+	authTime    time.Time
+	acr         string
 }
 
 func randomString() string {
@@ -57,6 +60,7 @@ func (i *IdP) discovery(w http.ResponseWriter, _ *http.Request) {
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"scopes_supported":                      []string{"openid", "email", "profile", "groups"},
+		"acr_values_supported":                  []string{ACRPassword, ACRMFA},
 		"backchannel_logout_supported":          true,
 		"backchannel_logout_session_supported":  true,
 	})
@@ -115,10 +119,27 @@ func (i *IdP) checkAuthorize(q url.Values) (string, int) {
 	if q.Get("nonce") == "" || q.Get("state") == "" {
 		return "state and nonce are required", http.StatusBadRequest
 	}
+	if v := q.Get("max_age"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err != nil || n < 0 {
+			return "max_age must be a non-negative integer", http.StatusBadRequest
+		}
+	}
 	return "", 0
 }
 
-var authorizeParams = []string{"client_id", "redirect_uri", "response_type", "scope", "state", "nonce", "code_challenge", "code_challenge_method"}
+var authorizeParams = []string{"client_id", "redirect_uri", "response_type", "scope", "state", "nonce", "code_challenge", "code_challenge_method", "max_age", "acr_values"}
+
+// authorizeHidden carries the request's parameters through the form,
+// leaving out the optional ones it does not have.
+func authorizeHidden(q url.Values) map[string]string {
+	hidden := map[string]string{}
+	for _, k := range authorizeParams {
+		if _, ok := q[k]; ok || (k != "max_age" && k != "acr_values") {
+			hidden[k] = q.Get(k)
+		}
+	}
+	return hidden
+}
 
 func (i *IdP) authorizeForm(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -126,11 +147,8 @@ func (i *IdP) authorizeForm(w http.ResponseWriter, r *http.Request) {
 		httpError(w, status, msg)
 		return
 	}
-	hidden := map[string]string{}
-	for _, k := range authorizeParams {
-		hidden[k] = q.Get(k)
-	}
-	renderLogin(w, http.StatusOK, loginView{Action: i.cfg.Issuer + "/authorize", Protocol: "OpenID Connect", Hidden: hidden})
+	renderLogin(w, http.StatusOK, loginView{Action: i.cfg.Issuer + "/authorize", Protocol: "OpenID Connect",
+		Hidden: authorizeHidden(q), OTP: i.wantsMFA(strings.Fields(q.Get("acr_values")))})
 }
 
 func (i *IdP) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
@@ -144,20 +162,27 @@ func (i *IdP) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		httpError(w, status, msg)
 		return
 	}
+	mfa := i.wantsMFA(strings.Fields(q.Get("acr_values")))
 	u, ok := i.user(q.Get("username"), q.Get("password"))
-	if !ok {
-		hidden := map[string]string{}
-		for _, k := range authorizeParams {
-			hidden[k] = q.Get(k)
+	if !ok || !checkOTP(u, mfa, q.Get("otp")) {
+		msg := "Wrong username or password."
+		if ok {
+			msg = "Wrong or missing one-time code."
 		}
 		renderLogin(w, http.StatusUnauthorized, loginView{Action: i.cfg.Issuer + "/authorize", Protocol: "OpenID Connect",
-			Error: "Wrong username or password.", Hidden: hidden})
+			Error: msg, Hidden: authorizeHidden(q), OTP: mfa})
 		return
 	}
+	acr := ACRPassword
+	if mfa {
+		acr = ACRMFA
+	}
+	now := i.cfg.Now()
+	authTime := i.authenticated(u, now)
 	code := randomString()
 	i.mu.Lock()
 	i.codes[code] = &grant{client: q.Get("client_id"), redirectURI: q.Get("redirect_uri"), challenge: q.Get("code_challenge"),
-		nonce: q.Get("nonce"), user: u, expires: i.cfg.Now().Add(codeTTL), sid: randomString()}
+		nonce: q.Get("nonce"), user: u, expires: now.Add(codeTTL), sid: randomString(), authTime: authTime, acr: acr}
 	i.mu.Unlock()
 	target, _ := url.Parse(q.Get("redirect_uri"))
 	tq := target.Query()
@@ -226,7 +251,7 @@ func (i *IdP) token(w http.ResponseWriter, r *http.Request) {
 	idToken, err := i.SignJWT(map[string]any{
 		"iss": i.cfg.Issuer, "sub": g.user.Username, "aud": clientID, "exp": now.Add(tokenTTL).Unix(),
 		"iat": now.Unix(), "nonce": g.nonce, "sid": g.sid, "email": g.user.Email, "email_verified": true,
-		"name": g.user.Name, "groups": g.user.Groups,
+		"name": g.user.Name, "groups": g.user.Groups, "auth_time": g.authTime.Unix(), "acr": g.acr,
 		"at_hash": base64.RawURLEncoding.EncodeToString(atHash[:16]),
 	})
 	if err != nil {

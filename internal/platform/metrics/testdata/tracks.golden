@@ -100,6 +100,9 @@ wicket_saml_logouts_total{provider="partner",initiator="idp",result="accepted"} 
 # HELP wicket_sessions_ended_total Sessions ended because the identity provider no longer vouched for them.
 # TYPE wicket_sessions_ended_total counter
 wicket_sessions_ended_total{reason="refresh_refused"} 1
+# HELP wicket_step_ups_total Requests sent to sign in again for a path rule's step-up, by reason.
+# TYPE wicket_step_ups_total counter
+wicket_step_ups_total{reason="step_up_max_age"} 1
 # HELP grantd_head_revision Newest committed revision.
 # TYPE grantd_head_revision gauge
 grantd_head_revision 42

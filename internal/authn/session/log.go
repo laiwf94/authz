@@ -44,11 +44,18 @@ type record struct {
 	// address it signed in from.
 	Device string `json:"device,omitempty"`
 	IP     string `json:"ip,omitempty"`
+	// AuthTime, ACR and StepUp are, on a create record, when and how the
+	// user authenticated at the provider and the rule a step-up login was
+	// for.
+	AuthTime time.Time `json:"auth_time,omitzero"`
+	ACR      string    `json:"acr,omitempty"`
+	StepUp   string    `json:"step_up,omitempty"`
 }
 
 // createRecord is the record that recreates sess on replay.
 func createRecord(sess *Session) record {
-	r := record{Op: opCreate, Session: sess, Refresh: sess.refresh, SID: sess.sid, Device: sess.device, IP: sess.ip}
+	r := record{Op: opCreate, Session: sess, Refresh: sess.refresh, SID: sess.sid, Device: sess.device, IP: sess.ip,
+		AuthTime: sess.authTime, ACR: sess.acr, StepUp: sess.stepUp}
 	if sess.revalidated.After(sess.CreatedAt) {
 		r.Revalidated = sess.revalidated
 	}
@@ -186,6 +193,7 @@ func (r *replayer) apply(rec record) error {
 		rec.Session.refresh = rec.Refresh
 		rec.Session.sid = rec.SID
 		rec.Session.device, rec.Session.ip = rec.Device, rec.IP
+		rec.Session.authTime, rec.Session.acr, rec.Session.stepUp = rec.AuthTime, rec.ACR, rec.StepUp
 		rec.Session.revalidated = rec.Session.CreatedAt
 		if rec.Revalidated.After(rec.Session.CreatedAt) {
 			rec.Session.revalidated = rec.Revalidated
@@ -256,6 +264,9 @@ func validate(rec record) error {
 		}
 		if !validDevice(rec.Device, rec.IP) {
 			return errors.New("create with a malformed device or ip")
+		}
+		if !validAuth(rec.ACR, rec.StepUp) {
+			return errors.New("create with a malformed acr or step-up rule")
 		}
 	case opTouch, opRevoke:
 		if len(rec.ID) != 32 {

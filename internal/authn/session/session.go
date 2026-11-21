@@ -76,6 +76,42 @@ type Session struct {
 	// kept in memory only; after a restart the next check starts afresh.
 	consistency    string
 	consistencyRev uint64
+	// authTime and acr are when and how the user authenticated at the
+	// identity provider (auth_time and acr, or AuthnInstant and
+	// AuthnContextClassRef), for path rules that ask for a step-up; zero
+	// when the provider did not say. stepUp names the rule a step-up login
+	// was made for, so a session that fails it at once is not sent round
+	// again.
+	authTime time.Time
+	acr      string
+	stepUp   string
+}
+
+// Auth returns when and how the user authenticated at the provider.
+func (s *Session) Auth() policy.Auth { return policy.Auth{Time: s.authTime, ACR: s.acr} }
+
+// StepUp returns the path rule the session's login stepped up for, or "".
+func (s *Session) StepUp() string { return s.stepUp }
+
+// MaxStepUpBytes bounds the rule name a session keeps.
+const MaxStepUpBytes = 64
+
+// ErrBadAuth is an acr or step-up rule name the store cannot keep.
+var ErrBadAuth = errors.New("session: acr must be a valid authentication context class and step-up rule at most 64 printable ASCII characters")
+
+func validAuth(acr, stepUp string) bool {
+	if acr != "" && !policy.ValidACR(acr) {
+		return false
+	}
+	if len(stepUp) > MaxStepUpBytes {
+		return false
+	}
+	for i := 0; i < len(stepUp); i++ {
+		if stepUp[i] < 0x21 || stepUp[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // ConsistencyToken returns the consistency token of the session's latest
@@ -341,6 +377,11 @@ type Extra struct {
 	// shown on the user's own sessions page.
 	Device string
 	IP     string
+	// AuthTime and ACR are when and how the user authenticated at the
+	// provider; StepUp names the path rule the login stepped up for.
+	AuthTime time.Time
+	ACR      string
+	StepUp   string
 }
 
 // CreateWith is Create with everything a login can bring.
@@ -354,6 +395,9 @@ func (s *Store) CreateWith(id policy.Identity, e Extra) (string, *Session, error
 	}
 	if !validDevice(e.Device, e.IP) {
 		return "", nil, ErrBadDevice
+	}
+	if !validAuth(e.ACR, e.StepUp) {
+		return "", nil, ErrBadAuth
 	}
 	var raw [secretBytes]byte
 	_, _ = rand.Read(raw[:])
@@ -370,7 +414,7 @@ func (s *Store) CreateWith(id policy.Identity, e Extra) (string, *Session, error
 	}
 	sess := &Session{ID: IDFromSecret(secret), Identity: id, CreatedAt: now, LastSeen: now, ExpiresAt: exp,
 		refresh: sealedRefresh, revalidated: now, persistedSeen: now, sid: e.SID,
-		device: e.Device, ip: e.IP}
+		device: e.Device, ip: e.IP, authTime: e.AuthTime, acr: e.ACR, stepUp: e.StepUp}
 
 	if len(s.byID) >= s.opts.MaxSessions {
 		s.sweepLocked(now)

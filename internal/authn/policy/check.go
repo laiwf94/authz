@@ -71,6 +71,9 @@ type Decision struct {
 	// Check is set when a relationship rule was reached: what was asked
 	// and what the engine said.
 	Check *CheckTrace
+	// StepUp is the rule's requirement when the sign-in did not satisfy
+	// it (Reason StepUpMaxAge or StepUpACR, or StepUpLoop).
+	StepUp *StepUp
 }
 
 // CheckTrace records one relationship check.

@@ -60,6 +60,11 @@ type Result struct {
 	// SessionIndex is the IdP's handle for its session, if it gave one; a
 	// LogoutRequest names it to end this session alone.
 	SessionIndex string
+	// AuthnInstant is when the IdP authenticated the user, and
+	// AuthnContextClassRef how; zero and "" when the AuthnStatement does
+	// not say.
+	AuthnInstant         time.Time
+	AuthnContextClassRef string
 }
 
 // ParseResponse validates a base64 SAMLResponse from the HTTP-POST binding
@@ -262,6 +267,20 @@ func (sp *SP) checkAssertion(a *etree.Element, requestID string, now time.Time) 
 		return nil, fail(ReasonMalformed, "SessionIndex must be 1-%d visible ASCII characters", MaxSessionIndexBytes)
 	}
 
+	authnInstant, err := optionalTime(authn[0], "AuthnInstant")
+	if err != nil {
+		return nil, err
+	}
+	classRef := ""
+	if ctx := children(authn[0], NSAssertion, "AuthnContext"); len(ctx) == 1 {
+		if refs := children(ctx[0], NSAssertion, "AuthnContextClassRef"); len(refs) == 1 {
+			classRef = strings.TrimSpace(refs[0].Text())
+			if !policy.ValidACR(classRef) {
+				return nil, fail(ReasonMalformed, "AuthnContextClassRef must be 1-%d visible ASCII characters", policy.MaxACRBytes)
+			}
+		}
+	}
+
 	// The ID is remembered until the assertion can no longer be accepted.
 	expires := confirmExpiry
 	if !notOnOrAfter.IsZero() && notOnOrAfter.Before(expires) {
@@ -287,7 +306,8 @@ func (sp *SP) checkAssertion(a *etree.Element, requestID string, now time.Time) 
 			return nil, fail(ReasonAttributes, "%v", err)
 		}
 	}
-	return &Result{Identity: id, SessionNotOnOrAfter: sessionEnd, SessionIndex: sessionIndex}, nil
+	return &Result{Identity: id, SessionNotOnOrAfter: sessionEnd, SessionIndex: sessionIndex,
+		AuthnInstant: authnInstant, AuthnContextClassRef: classRef}, nil
 }
 
 // subject finds a bearer SubjectConfirmation that answers our request at our

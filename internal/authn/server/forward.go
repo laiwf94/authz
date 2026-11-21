@@ -154,7 +154,13 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 		if orig != nil {
 			rd, _ = rt.redirects.Validate(orig.String())
 		}
-		login := loginURL(rt, a.id, rd, "")
+		// A step-up path asks for its requirement at the first sign-in
+		// too, so one login is enough.
+		stepRule := ""
+		if a.policy.StepUp(&m) != nil {
+			stepRule = a.policy.RuleName(m.Rule)
+		}
+		login := stepUpLoginURL(rt, a.id, rd, "", stepRule)
 		w.Header().Set(HeaderRedirect, login)
 		if redirect && isNavigation(r) {
 			http.Redirect(w, r, login, http.StatusFound)
@@ -177,6 +183,10 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 				attrs = append(attrs, slog.String("error", c.Err.Error()))
 			}
 		}
+		if policy.IsStepUp(reason) {
+			s.stepUp(w, r, rt, a, &m, sess, orig, redirect, d.StepUp, reason, attrs)
+			return
+		}
 		if reason == policy.CheckUnavailable {
 			// An outage, not a denial: the engine could not answer.
 			s.decision("unavailable")
@@ -195,7 +205,11 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 				"RequestID": requestIDFrom(r.Context())})
 			return
 		}
-		writeError(w, r, http.StatusForbidden, "permission_denied", "this account may not use this application")
+		msg := "this account may not use this application"
+		if reason == policy.StepUpLoop {
+			msg = "the identity provider did not give the sign-in this page needs"
+		}
+		writeError(w, r, http.StatusForbidden, "permission_denied", msg)
 		return
 	}
 	tok, err := s.upstreamToken(rt, sess, a.id)
@@ -227,12 +241,25 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 	w.WriteHeader(http.StatusOK)
 }
 
-// authorize decides a signed-in request: the path rule, and for a
-// relationship rule a check of the in-process engine at least as fresh as
-// the session's previous one. The snapshot the check read is kept in the
-// session for the next.
+// authorize decides a signed-in request: the path rule, then the rule's
+// step-up requirement, and for a relationship rule a check of the
+// in-process engine at least as fresh as the session's previous one. The
+// snapshot the check read is kept in the session for the next. A user the
+// rule refuses is refused before any step-up, and a user who must step up
+// is sent to do so before the engine is asked.
 func (s *Server) authorize(ctx context.Context, a *app, m *policy.Match, sess *session.Session) policy.Decision {
 	ok, reason := a.policy.Evaluate(m, &sess.Identity)
+	if !ok && reason != policy.CheckRequired {
+		return policy.Decision{Allowed: false, Reason: reason}
+	}
+	if su := a.policy.StepUp(m); su != nil {
+		if fresh, why := su.Satisfied(sess.Auth(), s.now()); !fresh {
+			if sess.StepUp() == a.policy.RuleName(m.Rule) && su.IsStepUpLoop(sess.Auth(), sess.CreatedAt, s.now()) {
+				why = policy.StepUpLoop
+			}
+			return policy.Decision{Reason: why, StepUp: su}
+		}
+	}
 	if reason != policy.CheckRequired {
 		return policy.Decision{Allowed: ok, Reason: reason}
 	}
@@ -256,6 +283,41 @@ func (s *Server) authorize(ctx context.Context, a *app, m *policy.Match, sess *s
 		s.m.Counter("wicket_relationship_checks_total", `result="`+d.Reason+`"`, "Relationship checks made by path rules, by result.").Inc()
 	}
 	return d
+}
+
+// stepUp answers a signed-in request whose sign-in is too old or too weak
+// for its rule: the user is sent to sign in again with the same provider,
+// asking for the rule's max_age and acr_values, and returned to the
+// original URL (its path and query; a request body cannot be replayed, so
+// a non-GET request gets the challenge and the client decides). A browser
+// navigation with ?redirect=1 is redirected; anything else gets 401 with
+// an insufficient_user_authentication challenge (RFC 9470) and the login
+// URL in X-Auth-Redirect.
+func (s *Server) stepUp(w http.ResponseWriter, r *http.Request, rt *runtime, a *app, m *policy.Match, sess *session.Session,
+	orig *url.URL, redirect bool, su *policy.StepUp, reason string, attrs []slog.Attr) {
+	s.decision("step_up")
+	s.m.Counter("wicket_step_ups_total", `reason="`+reason+`"`, "Requests sent to sign in again for a path rule's step-up, by reason.").Inc()
+	attrs = append(attrs, slog.String("request_id", requestIDFrom(r.Context())))
+	if au := sess.Auth(); !au.Time.IsZero() {
+		attrs = append(attrs, slog.Time("auth_time", au.Time))
+	}
+	if acr := sess.Auth().ACR; acr != "" {
+		attrs = append(attrs, slog.String("acr", acr))
+	}
+	s.log.LogAttrs(r.Context(), slog.LevelInfo, "step-up required", attrs...)
+	rd := ""
+	if orig != nil {
+		rd, _ = rt.redirects.Validate(orig.String())
+	}
+	login := stepUpLoginURL(rt, a.id, rd, sess.Identity.Provider, a.policy.RuleName(m.Rule))
+	w.Header().Set(HeaderRedirect, login)
+	if redirect && isNavigation(r) {
+		http.Redirect(w, r, login, http.StatusFound)
+		return
+	}
+	w.Header().Set("WWW-Authenticate", `Cookie realm="wicket", error="insufficient_user_authentication", `+
+		`error_description="a more recent or stronger sign-in is required", `+su.Challenge())
+	writeError(w, r, http.StatusUnauthorized, "step_up_required", "sign in again at the URL in the X-Auth-Redirect header")
 }
 
 // checkText is a check for logs: resource#permission@subject.

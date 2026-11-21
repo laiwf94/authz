@@ -102,6 +102,7 @@ type authnRequest struct {
 	sp         *ServiceProvider
 	acs        string
 	relayState string
+	classRefs  []string // the RequestedAuthnContext's AuthnContextClassRef values
 }
 
 // parseAuthnRequest decodes an HTTP-Redirect AuthnRequest from the raw query
@@ -147,7 +148,13 @@ func (i *IdP) parseAuthnRequest(rawQuery string) (*authnRequest, error) {
 			return nil, err
 		}
 	}
-	return &authnRequest{id: root.SelectAttrValue("ID", ""), sp: sp, acs: acs, relayState: q.Get("RelayState")}, nil
+	req := &authnRequest{id: root.SelectAttrValue("ID", ""), sp: sp, acs: acs, relayState: q.Get("RelayState")}
+	if rac := root.FindElement("./RequestedAuthnContext"); rac != nil {
+		for _, c := range rac.FindElements("./AuthnContextClassRef") {
+			req.classRefs = append(req.classRefs, strings.TrimSpace(c.Text()))
+		}
+	}
+	return req, nil
 }
 
 // verifyRedirectSignature checks the query-string signature of the
@@ -182,14 +189,15 @@ func verifyRedirectSignature(rawQuery string, q url.Values, sp *ServiceProvider)
 }
 
 func (i *IdP) samlForm(w http.ResponseWriter, r *http.Request) {
-	if _, err := i.parseAuthnRequest(r.URL.RawQuery); err != nil {
+	req, err := i.parseAuthnRequest(r.URL.RawQuery)
+	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// The form carries the original query, so the POST checks the request
 	// and its signature again.
 	renderLogin(w, http.StatusOK, loginView{Action: i.cfg.Issuer + "/saml/sso", Protocol: "SAML 2.0",
-		Hidden: map[string]string{"query": r.URL.RawQuery}})
+		Hidden: map[string]string{"query": r.URL.RawQuery}, OTP: i.wantsMFA(req.classRefs)})
 }
 
 var postForm = template.Must(template.New("post").Parse(`<!doctype html>
@@ -213,14 +221,24 @@ func (i *IdP) samlSubmit(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	mfa := i.wantsMFA(req.classRefs)
 	u, ok := i.user(f.Get("username"), f.Get("password"))
-	if !ok {
+	if !ok || !checkOTP(u, mfa, f.Get("otp")) {
+		msg := "Wrong username or password."
+		if ok {
+			msg = "Wrong or missing one-time code."
+		}
 		renderLogin(w, http.StatusUnauthorized, loginView{Action: i.cfg.Issuer + "/saml/sso", Protocol: "SAML 2.0",
-			Error: "Wrong username or password.", Hidden: map[string]string{"query": f.Get("query")}})
+			Error: msg, Hidden: map[string]string{"query": f.Get("query")}, OTP: mfa})
 		return
 	}
+	classRef := ""
+	if mfa {
+		classRef = ACRMFA
+	}
 	idx := i.addSAMLSession(u.Email, req.sp.EntityID)
-	resp, err := i.SAMLResponse(ResponseOptions{SP: *req.sp, InResponseTo: req.id, User: *u, SessionIndex: idx})
+	resp, err := i.SAMLResponse(ResponseOptions{SP: *req.sp, InResponseTo: req.id, User: *u, SessionIndex: idx,
+		AuthnInstant: i.authenticated(u, i.cfg.Now()), ClassRef: classRef})
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "could not build the response")
 		return
@@ -243,6 +261,10 @@ type ResponseOptions struct {
 	// SessionIndex names the IdP session in the AuthnStatement (default: a
 	// fresh one that no logout knows about).
 	SessionIndex string
+	// AuthnInstant is when the user authenticated (default: now), and
+	// ClassRef the AuthnContextClassRef (default: PasswordProtectedTransport).
+	AuthnInstant time.Time
+	ClassRef     string
 }
 
 // SAMLResponse builds a signed (and, if configured, encrypted) response and
@@ -312,15 +334,22 @@ func (i *IdP) SAMLResponseDoc(o ResponseOptions) (*etree.Document, error) {
 	cond.CreateAttr("NotOnOrAfter", now.Add(life).Format(timeFormat))
 	cond.CreateElement("saml:AudienceRestriction").CreateElement("saml:Audience").SetText(o.SP.EntityID)
 	as := a.CreateElement("saml:AuthnStatement")
-	as.CreateAttr("AuthnInstant", now.Format(timeFormat))
+	instant := now
+	if !o.AuthnInstant.IsZero() {
+		instant = o.AuthnInstant.UTC()
+	}
+	as.CreateAttr("AuthnInstant", instant.Format(timeFormat))
 	idx := o.SessionIndex
 	if idx == "" {
 		idx = newID()
 	}
 	as.CreateAttr("SessionIndex", idx)
 	as.CreateAttr("SessionNotOnOrAfter", now.Add(8*time.Hour).Format(timeFormat))
-	as.CreateElement("saml:AuthnContext").CreateElement("saml:AuthnContextClassRef").
-		SetText("urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport")
+	classRef := o.ClassRef
+	if classRef == "" {
+		classRef = "urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport"
+	}
+	as.CreateElement("saml:AuthnContext").CreateElement("saml:AuthnContextClassRef").SetText(classRef)
 	st := a.CreateElement("saml:AttributeStatement")
 	addAttr := func(name string, values ...string) {
 		at := st.CreateElement("saml:Attribute")

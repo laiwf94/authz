@@ -46,7 +46,8 @@ type App struct {
 // app's providers, exactly as the app-wide rule does. Check makes it a
 // relationship rule: the authorization engine decides (see CheckRule),
 // for every user of the app's providers or, when the rule also lists who
-// may, for those it lists.
+// may, for those it lists. StepUp asks those it lets through for a recent
+// or stronger sign-in (see StepUp).
 type PathRule struct {
 	Path    string
 	Exact   bool
@@ -54,6 +55,7 @@ type PathRule struct {
 	Public  bool
 	Deny    bool
 	Check   *CheckRule
+	StepUp  *StepUp
 
 	AnyUser      bool
 	Emails       []string
@@ -89,6 +91,7 @@ type rule struct {
 	deny    bool
 	allow   *Compiled
 	check   *compiledCheck // nil unless a relationship rule
+	stepUp  *StepUp        // nil unless the rule asks for a step-up
 }
 
 type node struct {
@@ -218,6 +221,16 @@ func compileRule(name string, pr PathRule, providers []string) (rule, []string, 
 	}
 	if (pr.Public || pr.Deny) && pr.Check != nil {
 		return fail("a public or deny rule takes no check")
+	}
+	if (pr.Public || pr.Deny) && pr.StepUp != nil {
+		return fail("a public or deny rule takes no step_up")
+	}
+	if pr.StepUp != nil {
+		su, err := compileStepUp(pr.StepUp)
+		if err != nil {
+			return fail("%v", err)
+		}
+		r.stepUp = su
 	}
 	for _, m := range pr.Methods {
 		b := methodBit(m)

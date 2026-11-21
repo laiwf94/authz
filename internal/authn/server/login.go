@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -52,6 +53,20 @@ type loginState struct {
 	Verifier  string `json:"v,omitempty"`
 	RequestID string `json:"i,omitempty"`
 	Expires   int64  `json:"e"`
+	// StepUp names the path rule a step-up login is for, and MaxAge (in
+	// seconds, 0 for none) and ACR are what it asked the provider for: the
+	// answer must satisfy them before a session is made.
+	StepUp string   `json:"u,omitempty"`
+	MaxAge int64    `json:"m,omitempty"`
+	ACR    []string `json:"c,omitempty"`
+}
+
+// stepUp is the requirement a login asked for, or nil.
+func (st *loginState) stepUp() *policy.StepUp {
+	if st.StepUp == "" {
+		return nil
+	}
+	return &policy.StepUp{MaxAge: time.Duration(st.MaxAge) * time.Second, ACRValues: st.ACR}
 }
 
 const loginCookiePrefix = "__Host-wicket-login-"
@@ -128,7 +143,9 @@ func (s *Server) takeLoginState(w http.ResponseWriter, r *http.Request, kind, pr
 	return &st, ""
 }
 
-// handleLogin starts a login: GET /login?app=ID&rd=URL[&provider=ID].
+// handleLogin starts a login: GET /login?app=ID&rd=URL[&provider=ID]
+// [&step_up=RULE]. step_up names the app's path rule ("paths[3]") whose
+// requirement the provider is asked for, and the answer must meet.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	rt := s.rt.Load()
 	q := r.URL.Query()
@@ -148,6 +165,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	stepRule := q.Get("step_up")
+	var su *policy.StepUp
+	if stepRule != "" {
+		if su = a.policy.StepUpRule(stepRule); su == nil {
+			s.errorPage(w, r, http.StatusBadRequest, "Sign-in link out of date", "This sign-in link asks for a check the application no longer makes. Open the page again.", loginURL(rt, a.id, rd, ""))
+			return
+		}
+	}
 	pid := q.Get("provider")
 	if pid == "" && len(a.providers) == 1 {
 		pid = a.providers[0]
@@ -155,7 +180,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if pid == "" {
 		links := make([]providerLink, 0, len(a.providers))
 		for _, id := range a.providers {
-			links = append(links, providerLink{Name: rt.providers[id].display, URL: loginURL(rt, a.id, rd, id)})
+			links = append(links, providerLink{Name: rt.providers[id].display, URL: stepUpLoginURL(rt, a.id, rd, id, stepRule)})
 		}
 		renderPage(w, http.StatusOK, "choose", map[string]any{"Title": "Sign in", "Providers": links})
 		return
@@ -166,19 +191,32 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	p := rt.providers[pid]
 	st := &loginState{Provider: p.id, App: a.id, Return: rd, State: oidc.RandomToken(), Expires: s.now().Add(loginTTL).Unix()}
+	if su != nil {
+		st.StepUp, st.MaxAge, st.ACR = stepRule, max(su.MaxAgeSeconds(), 0), su.ACRValues
+	}
 	var target string
 	var err error
 	sameSite := http.SameSiteLaxMode
 	switch p.kind {
 	case config.ProviderOIDC:
 		st.Kind, st.Nonce, st.Verifier = config.ProviderOIDC, oidc.RandomToken(), oidc.RandomToken()
-		target, err = p.oidc.AuthURL(r.Context(), st.State, st.Nonce, st.Verifier)
+		o := oidc.AuthOptions{MaxAge: -1}
+		if su != nil {
+			o = oidc.AuthOptions{MaxAge: su.MaxAgeSeconds(), ACRValues: su.ACRValues}
+		}
+		target, err = p.oidc.AuthURLWith(r.Context(), st.State, st.Nonce, st.Verifier, o)
 	case config.ProviderSAML:
 		// The IdP answers with a cross-site POST, which carries only
 		// SameSite=None cookies. The cookie is still Secure, HttpOnly,
 		// sealed and single-use.
 		st.Kind, st.RequestID, sameSite = config.ProviderSAML, saml.NewRequestID(), http.SameSiteNoneMode
-		target, err = p.saml.AuthnRequestURL(st.RequestID, st.State)
+		// SAML has no max_age: a step-up for age forces a fresh
+		// authentication, and the AuthnInstant is checked on return.
+		var o saml.AuthnOptions
+		if su != nil {
+			o = saml.AuthnOptions{ForceAuthn: su.MaxAge > 0, ClassRefs: su.ACRValues}
+		}
+		target, err = p.saml.AuthnRequestURLWith(st.RequestID, st.State, o)
 	}
 	if err != nil {
 		s.loginFailed(w, r, rt, p.id, a.id, reasonOf(err), err)
@@ -189,12 +227,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func loginURL(rt *runtime, appID, rd, providerID string) string {
+	return stepUpLoginURL(rt, appID, rd, providerID, "")
+}
+
+// stepUpLoginURL is loginURL for a login that steps up for a path rule.
+func stepUpLoginURL(rt *runtime, appID, rd, providerID, rule string) string {
 	q := url.Values{"app": {appID}}
 	if rd != "" {
 		q.Set("rd", rd)
 	}
 	if providerID != "" {
 		q.Set("provider", providerID)
+	}
+	if rule != "" {
+		q.Set("step_up", rule)
 	}
 	return rt.cfg.PublicURL + "/login?" + q.Encode()
 }
@@ -255,6 +301,8 @@ func (s *Server) loginFailed(w http.ResponseWriter, r *http.Request, rt *runtime
 		status = http.StatusServiceUnavailable
 	case "internal_error":
 		status = http.StatusInternalServerError
+	case reasonStepUpNotMet:
+		status = http.StatusForbidden
 	}
 	s.errorPage(w, r, status, "Sign-in failed", "We couldn't complete your sign-in. Please try again; if it keeps happening, give the reference below to your administrator.", retry)
 }
@@ -286,7 +334,8 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		s.loginFailed(w, r, rt, pid, st.App, reasonOf(err), err)
 		return
 	}
-	s.finishLogin(w, r, rt, st, res.Identity, session.Extra{Refresh: res.RefreshToken, SID: res.SessionID}, http.StatusFound)
+	s.finishLogin(w, r, rt, st, res.Identity, session.Extra{Refresh: res.RefreshToken, SID: res.SessionID,
+		AuthTime: res.AuthTime, ACR: res.ACR}, http.StatusFound)
 }
 
 // handleACS finishes a SAML login: POST /saml/{provider}/acs.
@@ -320,14 +369,31 @@ func (s *Server) handleACS(w http.ResponseWriter, r *http.Request) {
 	// 303 turns the IdP's POST into a GET of the return URL.
 	// The SessionIndex is kept and indexed like an OpenID Connect sid, so a
 	// LogoutRequest naming it ends this session.
-	s.finishLogin(w, r, rt, st, res.Identity, session.Extra{NotAfter: res.SessionNotOnOrAfter, SID: res.SessionIndex}, http.StatusSeeOther)
+	s.finishLogin(w, r, rt, st, res.Identity, session.Extra{NotAfter: res.SessionNotOnOrAfter, SID: res.SessionIndex,
+		AuthTime: res.AuthnInstant, ACR: res.AuthnContextClassRef}, http.StatusSeeOther)
 }
+
+// reasonStepUpNotMet is a step-up login whose provider answered with an
+// authentication older or weaker than the rule asked for. The user gets a
+// page instead of being sent back, so a provider that ignores max_age or
+// acr_values cannot make a redirect loop.
+const reasonStepUpNotMet = "step_up_not_satisfied"
 
 // finishLogin replaces any existing session with a new one (a fresh id at
 // every login prevents session fixation) and returns the user to the app.
 // A refresh token (extra.Refresh, in the clear) is kept, sealed, only for a
-// provider that revalidates.
+// provider that revalidates. A step-up login must first satisfy what it
+// asked for, by the same test forward-auth applies.
 func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime, st *loginState, id policy.Identity, extra session.Extra, status int) {
+	if su := st.stepUp(); su != nil {
+		if ok, why := su.Satisfied(policy.Auth{Time: extra.AuthTime, ACR: extra.ACR}, s.now()); !ok {
+			s.loginFailed(w, r, rt, st.Provider, st.App, reasonStepUpNotMet,
+				fmt.Errorf("%s: the provider's answer does not meet %s of rule %s (auth_time %s, acr %q)",
+					why, su.Challenge(), st.StepUp, authTimeText(extra.AuthTime), printableASCII(extra.ACR, 64)))
+			return
+		}
+		extra.StepUp = st.StepUp
+	}
 	refresh := extra.Refresh
 	if old, _ := s.currentSession(r, rt); old != nil {
 		if _, err := s.sessions.Revoke(old.ID); err != nil {
@@ -361,6 +427,13 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, rt *runtime
 		slog.String("client_ip", ip))
 	s.m.Counter("wicket_logins_total", `result="success",reason="ok"`, "Completed logins by result.").Inc()
 	http.Redirect(w, r, st.Return, status)
+}
+
+func authTimeText(t time.Time) string {
+	if t.IsZero() {
+		return "none"
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // currentSession returns the session named by the request's cookie, or nil.

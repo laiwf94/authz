@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -255,6 +256,22 @@ func Challenge(verifier string) string {
 
 // AuthURL returns the authorization request URL.
 func (p *Provider) AuthURL(ctx context.Context, state, nonce, verifier string) (string, error) {
+	return p.AuthURLWith(ctx, state, nonce, verifier, AuthOptions{MaxAge: -1})
+}
+
+// AuthOptions asks the provider for a recent or stronger authentication
+// (Core section 3.1.2.1).
+type AuthOptions struct {
+	// MaxAge is max_age in seconds: the provider authenticates the user
+	// again when they last did longer ago. Negative leaves it out.
+	MaxAge int64
+	// ACRValues is acr_values, the classes asked for in order of
+	// preference; empty leaves it out.
+	ACRValues []string
+}
+
+// AuthURLWith is AuthURL with max_age and acr_values.
+func (p *Provider) AuthURLWith(ctx context.Context, state, nonce, verifier string, o AuthOptions) (string, error) {
 	m, err := p.Discover(ctx)
 	if err != nil {
 		return "", err
@@ -272,6 +289,12 @@ func (p *Provider) AuthURL(ctx context.Context, state, nonce, verifier string) (
 	q.Set("nonce", nonce)
 	q.Set("code_challenge", Challenge(verifier))
 	q.Set("code_challenge_method", "S256")
+	if o.MaxAge >= 0 {
+		q.Set("max_age", strconv.FormatInt(o.MaxAge, 10))
+	}
+	if len(o.ACRValues) > 0 {
+		q.Set("acr_values", strings.Join(o.ACRValues, " "))
+	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
@@ -298,6 +321,10 @@ type Result struct {
 	// Back-Channel Logout), or "" when the ID token has none. A back-channel
 	// logout token names the session by it.
 	SessionID string
+	// AuthTime is the ID token's auth_time, when the user authenticated,
+	// or zero when it has none; ACR is its acr, or "".
+	AuthTime time.Time
+	ACR      string
 }
 
 type tokenResponse struct {
@@ -388,13 +415,38 @@ func (p *Provider) Exchange(ctx context.Context, code, verifier, nonce string) (
 	if err != nil {
 		return nil, err
 	}
-	res := &Result{Identity: id, SessionID: sid}
+	authTime, acr, err := authContext(claims)
+	if err != nil {
+		return nil, err
+	}
+	res := &Result{Identity: id, SessionID: sid, AuthTime: authTime, ACR: acr}
 	// A refresh token this relying party can't keep doesn't spoil a good
 	// login: the session just has none (and revalidation treats it so).
 	if usableRefreshToken(tr.RefreshToken) {
 		res.RefreshToken = tr.RefreshToken
 	}
 	return res, nil
+}
+
+// authContext reads auth_time and acr (Core section 2). Either may be
+// absent; one that is present must be well formed, since a step-up
+// decision rests on it.
+func authContext(c *jose.Claims) (time.Time, string, error) {
+	var t time.Time
+	if raw, ok := c.Raw["auth_time"]; ok {
+		var n jose.NumericDate
+		if err := json.Unmarshal(raw, &n); err != nil || n.Time().Unix() <= 0 {
+			return t, "", fail(ReasonClaims, "auth_time is not a positive NumericDate")
+		}
+		t = n.Time()
+	}
+	acr := ""
+	if raw, ok := c.Raw["acr"]; ok {
+		if err := json.Unmarshal(raw, &acr); err != nil || !policy.ValidACR(acr) {
+			return t, "", fail(ReasonClaims, "acr must be a string of 1-%d visible ASCII characters", policy.MaxACRBytes)
+		}
+	}
+	return t, acr, nil
 }
 
 // Refreshed is a refresh the provider accepted.

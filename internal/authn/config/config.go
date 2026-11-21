@@ -169,13 +169,33 @@ type App struct {
 // the authorization engine allows (of those its allow names, when it
 // names any).
 type PathRule struct {
-	Path    string    `json:"path"`
-	Exact   bool      `json:"exact"`
-	Methods []string  `json:"methods"`
-	Public  bool      `json:"public"`
-	Deny    bool      `json:"deny"`
-	Allow   Allow     `json:"allow"`
-	Check   PathCheck `json:"check"`
+	Path    string     `json:"path"`
+	Exact   bool       `json:"exact"`
+	Methods []string   `json:"methods"`
+	Public  bool       `json:"public"`
+	Deny    bool       `json:"deny"`
+	Allow   Allow      `json:"allow"`
+	Check   PathCheck  `json:"check"`
+	StepUp  PathStepUp `json:"step_up"`
+}
+
+// PathStepUp asks a path rule's users for a recent or stronger sign-in
+// (policy.StepUp): "max_age": "15m", the longest ago they may have
+// authenticated at their provider, and "acr_values", the authentication
+// context classes that will do. A rule whose step_up sets neither has none.
+type PathStepUp struct {
+	MaxAge    Duration `json:"max_age"`
+	ACRValues []string `json:"acr_values"`
+}
+
+// Set reports whether the rule asks for a step-up.
+func (s PathStepUp) Set() bool { return s.MaxAge != 0 || s.ACRValues != nil }
+
+func (s PathStepUp) rule() *policy.StepUp {
+	if !s.Set() {
+		return nil
+	}
+	return &policy.StepUp{MaxAge: time.Duration(s.MaxAge), ACRValues: s.ACRValues}
 }
 
 // PathCheck is a path rule's relationship check (policy.CheckRule):
@@ -489,7 +509,8 @@ func (a *App) Policy() (*policy.Policy, error) {
 	for _, r := range a.Paths {
 		pa.Paths = append(pa.Paths, policy.PathRule{Path: r.Path, Exact: r.Exact, Methods: r.Methods,
 			Public: r.Public, Deny: r.Deny, AnyUser: r.Allow.AnyUser, Emails: r.Allow.Emails,
-			EmailDomains: r.Allow.EmailDomains, Groups: r.Allow.Groups, Check: r.Check.rule()})
+			EmailDomains: r.Allow.EmailDomains, Groups: r.Allow.Groups, Check: r.Check.rule(),
+			StepUp: r.StepUp.rule()})
 	}
 	return policy.CompileApp(pa)
 }

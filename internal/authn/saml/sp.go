@@ -98,6 +98,23 @@ func NewRequestID() string {
 // AuthnRequestURL builds the HTTP-Redirect binding URL for a new request
 // with this ID and relay state (SAML Bindings section 3.4).
 func (sp *SP) AuthnRequestURL(requestID, relayState string) (string, error) {
+	return sp.AuthnRequestURLWith(requestID, relayState, AuthnOptions{})
+}
+
+// AuthnOptions asks the IdP for a fresh or stronger authentication (SAML
+// Core section 3.4.1).
+type AuthnOptions struct {
+	// ForceAuthn makes the IdP authenticate the user again rather than
+	// rely on its own session.
+	ForceAuthn bool
+	// ClassRefs is a RequestedAuthnContext of these AuthnContextClassRef
+	// values, compared exactly; empty sends none.
+	ClassRefs []string
+}
+
+// AuthnRequestURLWith is AuthnRequestURL with ForceAuthn and a
+// RequestedAuthnContext.
+func (sp *SP) AuthnRequestURLWith(requestID, relayState string, o AuthnOptions) (string, error) {
 	if len(relayState) > 80 {
 		return "", errors.New("saml: RelayState longer than 80 bytes")
 	}
@@ -111,10 +128,21 @@ func (sp *SP) AuthnRequestURL(requestID, relayState string) (string, error) {
 	req.CreateAttr("Destination", sp.cfg.IdP.SSOURL)
 	req.CreateAttr("AssertionConsumerServiceURL", sp.cfg.ACSURL)
 	req.CreateAttr("ProtocolBinding", BindingPOST)
+	if o.ForceAuthn {
+		req.CreateAttr("ForceAuthn", "true")
+	}
 	req.CreateElement("saml:Issuer").SetText(sp.cfg.EntityID)
 	pol := req.CreateElement("samlp:NameIDPolicy")
 	pol.CreateAttr("Format", sp.cfg.NameIDFormat)
 	pol.CreateAttr("AllowCreate", "true")
+	// RequestedAuthnContext follows NameIDPolicy in the schema.
+	if len(o.ClassRefs) > 0 {
+		rac := req.CreateElement("samlp:RequestedAuthnContext")
+		rac.CreateAttr("Comparison", "exact")
+		for _, c := range o.ClassRefs {
+			rac.CreateElement("saml:AuthnContextClassRef").SetText(c)
+		}
+	}
 	raw, err := doc.WriteToBytes()
 	if err != nil {
 		return "", err

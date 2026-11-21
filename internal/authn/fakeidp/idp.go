@@ -32,11 +32,22 @@ type User struct {
 	Email    string
 	Name     string
 	Groups   []string
+	// OTP is the user's one-time code for a second factor, asked for when
+	// a login requests ACRMFA; a user without one cannot step up to it.
+	OTP string
 }
+
+// Authentication context classes the IdP reports, as an ID token's acr and
+// a SAML AuthnContextClassRef. A login that asks for ACRMFA (acr_values,
+// or a RequestedAuthnContext) must also give the user's OTP.
+const (
+	ACRPassword = "urn:fakeidp:acr:password"
+	ACRMFA      = "urn:fakeidp:acr:mfa"
+)
 
 // DemoUsers are the accounts used by the demo and tests.
 var DemoUsers = []User{
-	{Username: "alice", Password: "alice-pass", Email: "alice@example.org", Name: "Alice", Groups: []string{"eng", "admins"}},
+	{Username: "alice", Password: "alice-pass", Email: "alice@example.org", Name: "Alice", Groups: []string{"eng", "admins"}, OTP: "246810"},
 	{Username: "bob", Password: "bob-pass", Email: "bob@example.org", Name: "Bob", Groups: []string{"sales"}},
 	{Username: "carol", Password: "carol-pass", Email: "carol@partner.example", Name: "Carol", Groups: []string{"eng"}},
 }
@@ -83,6 +94,15 @@ type Config struct {
 	// BackchannelClient sends back-channel logout requests; nil uses
 	// http.DefaultClient.
 	BackchannelClient *http.Client
+	// IgnoreMaxAge makes the IdP behave like one that keeps its own
+	// session and ignores max_age and ForceAuthn: every login reports the
+	// time of the user's first sign-in here as auth_time and AuthnInstant.
+	// Otherwise each login is a fresh authentication.
+	IgnoreMaxAge bool
+	// IgnoreACR makes the IdP ignore acr_values and RequestedAuthnContext:
+	// it never asks for the OTP and always reports ACRPassword (SAML:
+	// PasswordProtectedTransport).
+	IgnoreACR bool
 }
 
 // IdP is the identity provider. It is safe for concurrent use.
@@ -106,6 +126,10 @@ type IdP struct {
 	pendingLogout map[string]string // IdP-initiated request ID -> SP entity id
 	logoutResults map[string]string // request ID -> the SP's status
 	received      []ReceivedLogout
+
+	firstLogin   map[string]time.Time // by username, for IgnoreMaxAge
+	ignoreMaxAge bool
+	ignoreACR    bool
 }
 
 // New generates fresh signing keys and builds the IdP.
@@ -131,7 +155,8 @@ func New(cfg Config) (*IdP, error) {
 	}
 	i := &IdP{cfg: cfg, rsaKey: rk, cert: cert, codes: map[string]*grant{}, tokens: map[string]*grant{},
 		refreshes: map[string]*grant{}, sessions: map[string]*grant{}, samlSessions: map[string]*samlSession{},
-		pendingLogout: map[string]string{}, logoutResults: map[string]string{}}
+		pendingLogout: map[string]string{}, logoutResults: map[string]string{}, firstLogin: map[string]time.Time{},
+		ignoreMaxAge: cfg.IgnoreMaxAge, ignoreACR: cfg.IgnoreACR}
 	i.mux = http.NewServeMux()
 	i.mux.HandleFunc("GET /.well-known/openid-configuration", i.discovery)
 	i.mux.HandleFunc("GET /jwks", i.jwks)
@@ -174,6 +199,45 @@ func (i *IdP) user(username, password string) (*User, bool) {
 	return nil, false
 }
 
+// authenticated records a sign-in of u at now and returns the time to
+// report as its authentication: now, or with IgnoreMaxAge the user's first
+// sign-in.
+func (i *IdP) authenticated(u *User, now time.Time) time.Time {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	first, ok := i.firstLogin[u.Username]
+	if !ok {
+		i.firstLogin[u.Username] = now
+		first = now
+	}
+	if i.ignoreMaxAge {
+		return first
+	}
+	return now
+}
+
+// SetIgnore changes IgnoreMaxAge and IgnoreACR while the IdP runs.
+func (i *IdP) SetIgnore(maxAge, acr bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.ignoreMaxAge, i.ignoreACR = maxAge, acr
+}
+
+// wantsMFA says whether a login that asked for these classes must give the
+// OTP.
+func (i *IdP) wantsMFA(classes []string) bool {
+	i.mu.Lock()
+	ignore := i.ignoreACR
+	i.mu.Unlock()
+	return !ignore && contains(classes, ACRMFA)
+}
+
+// checkOTP reports whether the second factor a login needs, if any, was
+// given.
+func checkOTP(u *User, mfa bool, otp string) bool {
+	return !mfa || (u.OTP != "" && subtle.ConstantTimeCompare([]byte(u.OTP), []byte(otp)) == 1)
+}
+
 // SelfSignedCert issues a one-year self-signed certificate for key.
 func SelfSignedCert(key *rsa.PrivateKey, cn string, now time.Time) (*x509.Certificate, error) {
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
@@ -208,6 +272,7 @@ button{margin-top:20px;width:100%;padding:11px;border:0;border-radius:6px;backgr
 {{range $k, $v := .Hidden}}<input type="hidden" name="{{$k}}" value="{{$v}}">{{end}}
 <label for="u">Username</label><input id="u" name="username" autocomplete="username" required>
 <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required>
+{{if .OTP}}<label for="o">One-time code (alice: 246810)</label><input id="o" name="otp" autocomplete="one-time-code" inputmode="numeric" required>{{end}}
 <button type="submit">Sign in</button>
 </form></body></html>`))
 
@@ -216,6 +281,7 @@ type loginView struct {
 	Protocol string
 	Error    string
 	Hidden   map[string]string
+	OTP      bool // the login asked for ACRMFA
 }
 
 func renderLogin(w http.ResponseWriter, status int, v loginView) {

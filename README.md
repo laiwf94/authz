@@ -259,6 +259,20 @@ an engine that cannot answer (or a gateway running without serve) 503
 `check_unavailable`
 ([internal/authn/policy](internal/authn/policy/check.go)).
 
+A sensitive path rule can ask for a recent or stronger sign-in:
+`"step_up": {"max_age": "10m", "acr_values": ["urn:mfa"]}`. A user the
+rule lets through whose sign-in is older than `max_age` (at least `1m`), or
+whose `acr` is not listed, is sent back to the same provider with `max_age`
+and `acr_values` (SAML: `ForceAuthn` and a `RequestedAuthnContext`), then
+returned to the original URL: a browser navigation through
+`/auth?redirect=1` is redirected, anything else gets 401
+`step_up_required` with an `insufficient_user_authentication` challenge
+and the login URL in `X-Auth-Redirect`. The provider's `auth_time` and
+`acr` (SAML `AuthnInstant` and `AuthnContextClassRef`) are checked before
+the new session is made, so a provider that ignores the request gets a
+403 page, not a redirect loop
+([internal/authn/policy](internal/authn/policy/stepup.go)).
+
 `"revalidate": {"interval": "5m"}` on an OpenID provider confirms every
 session with its refresh token at that interval and ends it when the
 provider refuses (a disabled user), or by `on_failure` (`end` or `grace`)
