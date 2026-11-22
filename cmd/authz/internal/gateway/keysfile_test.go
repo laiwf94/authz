@@ -376,9 +376,19 @@ func TestKeysFileGateway(t *testing.T) {
 }
 
 // Logins and upstream token checks under load while both rings rotate
-// every second: every cookie is sealed from the file as it stands, every
-// token is checked against a JWKS fetched at most a rotation period
-// earlier, and nothing fails.
+// every second: every cookie is sealed from the file as it stands, and
+// every token verifies against a JWKS fetched within a rotation period
+// before it was signed.
+//
+// That is the rings' guarantee: a key is published as next when the
+// rotation before it runs, and starts signing no sooner than RotateEvery
+// later. The window is measured from when the JWKS request started to when
+// the token's response arrived, which bounds the time between the JWKS
+// snapshot and the signature from above, so a token outside it says
+// nothing about the gateway (#260): a client that refetches every
+// RotateEvery can miss a key by its own request latency. Clients refetch a
+// quarter period early, so almost every check falls inside the window; one
+// outside it refetches and is counted, not failed.
 func TestKeysFileGatewayUnderLoad(t *testing.T) {
 	if testing.Short() {
 		t.Skip("rotates for several seconds")
@@ -388,10 +398,10 @@ func TestKeysFileGatewayUnderLoad(t *testing.T) {
 	g.start(part.Host{}, g.vars(nil))
 	defer g.stop()
 	var (
-		requests, failures, crossed atomic.Int64
-		mu                          sync.Mutex
-		failed                      []string
-		kidsSeen                    = map[string]bool{}
+		requests, failures, crossed, late atomic.Int64
+		mu                                sync.Mutex
+		failed                            []string
+		kidsSeen                          = map[string]bool{}
 	)
 	fail := func(f string, a ...any) {
 		failures.Add(1)
@@ -409,16 +419,17 @@ func TestKeysFileGatewayUnderLoad(t *testing.T) {
 			defer wg.Done()
 			c := &http.Client{Timeout: 5 * time.Second}
 			var ks *jose.KeySet
-			var fetched time.Time
+			var fetched time.Time // when the JWKS request started
 			cookie, sealed := "", time.Time{}
 			for time.Now().Before(deadline) {
-				if time.Since(fetched) > fast.RotateEvery {
+				if time.Since(fetched) > fast.RotateEvery*3/4 {
+					start := time.Now()
 					var err error
 					if ks, _, err = g.jwks(c); err != nil {
 						fail("jwks: %v", err)
 						return
 					}
-					fetched = time.Now()
+					fetched = start
 				}
 				// A cookie is reused for up to two rotation periods, so many
 				// requests open it under a retired key.
@@ -432,8 +443,13 @@ func TestKeysFileGatewayUnderLoad(t *testing.T) {
 					fail("auth: %v", err)
 				case code != 200:
 					fail("auth: status %d", code)
-				case !verifies(ks, tok):
+				case !verifies(ks, tok) && time.Since(fetched) <= fast.RotateEvery:
 					fail("token by %s not in a JWKS fetched %v earlier", tokenKid(t, tok), time.Since(fetched))
+				case !verifies(ks, tok):
+					// Outside the window: the key may rightly be newer
+					// than the JWKS.
+					late.Add(1)
+					fetched = time.Time{}
 				default:
 					kid := tokenKid(t, tok)
 					mu.Lock()
@@ -447,10 +463,13 @@ func TestKeysFileGatewayUnderLoad(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	t.Logf("%d requests, %d with a cookie older than a rotation, %d signing keys, %d failures",
-		requests.Load(), crossed.Load(), len(kidsSeen), failures.Load())
+	t.Logf("%d requests, %d with a cookie older than a rotation, %d signing keys, %d failures, %d tokens newer than their JWKS window",
+		requests.Load(), crossed.Load(), len(kidsSeen), failures.Load(), late.Load())
 	if failures.Load() > 0 {
 		t.Fatalf("%d failures: %v\n%s", failures.Load(), failed, g.log.String())
+	}
+	if late.Load()*10 > requests.Load() {
+		t.Fatalf("%d of %d tokens fell outside their JWKS window: the check proves little", late.Load(), requests.Load())
 	}
 	if len(kidsSeen) < 3 || crossed.Load() == 0 {
 		t.Fatalf("too few rotations seen: %d signing keys, %d crossed", len(kidsSeen), crossed.Load())
