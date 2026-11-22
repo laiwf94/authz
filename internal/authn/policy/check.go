@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/laiwf94/authz/internal/authz/check"
 	"github.com/laiwf94/authz/internal/authz/engine"
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
@@ -92,6 +93,9 @@ type CheckTrace struct {
 	// newer revision than the store has) and the check was asked again
 	// fully consistent.
 	Retried bool
+	// Trace is how the engine reached Result, when the check was
+	// explained (see AuthorizeExplain); nil otherwise.
+	Trace *check.Trace
 }
 
 type tmplSource uint8
@@ -333,6 +337,10 @@ func (p *Policy) CheckFor(m *Match, id *Identity) (req engine.CheckRequest, ok b
 // asked fully consistent instead. eng may be nil when there is no engine;
 // a relationship rule then answers CheckUnavailable.
 func (p *Policy) Authorize(ctx context.Context, m *Match, id *Identity, eng Checker, tok string) Decision {
+	return p.authorize(ctx, m, id, eng, tok, false, 0)
+}
+
+func (p *Policy) authorize(ctx context.Context, m *Match, id *Identity, eng Checker, tok string, explain bool, maxNodes int) Decision {
 	ok, reason := p.Evaluate(m, id)
 	if reason != CheckRequired {
 		return Decision{Allowed: ok, Reason: reason}
@@ -353,12 +361,20 @@ func (p *Policy) Authorize(ctx context.Context, m *Match, id *Identity, eng Chec
 	if tok != "" && len(tok) <= MaxTokenBytes {
 		tr.Request.Consistency = engine.Consistency{Mode: engine.AtLeastAsFresh, Token: tok}
 	}
-	res, err := eng.Check(ctx, tr.Request)
+	ask := eng.Check
+	if x, ok := eng.(Explainer); ok && explain {
+		ask = func(ctx context.Context, req engine.CheckRequest) (engine.CheckResult, error) {
+			res, t, err := x.Explain(ctx, req, maxNodes)
+			tr.Trace = t
+			return res, err
+		}
+	}
+	res, err := ask(ctx, tr.Request)
 	if err != nil && tr.Request.Consistency.Token != "" &&
 		(errors.Is(err, token.ErrInvalid) || errors.Is(err, engine.ErrInvalidArgument)) {
 		tr.Retried = true
 		tr.Request.Consistency = engine.Consistency{Mode: engine.FullyConsistent}
-		res, err = eng.Check(ctx, tr.Request)
+		res, err = ask(ctx, tr.Request)
 	}
 	if err != nil {
 		tr.Err = err

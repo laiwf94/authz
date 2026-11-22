@@ -473,6 +473,21 @@ func (s *Store) Lookup(secret string) (*Session, error) {
 	return &cp, nil
 }
 
+// Get returns a copy of the live session with public handle id, without
+// touching its idle timer: for the admin API, which looks at a session
+// without using it.
+func (s *Store) Get(id string) (*Session, bool) {
+	now := s.opts.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.byID[id]
+	if !ok || !s.live(sess, now) {
+		return nil, false
+	}
+	cp := *sess
+	return &cp, true
+}
+
 // Due is a session whose identity provider should be asked again.
 type Due struct {
 	ID          string

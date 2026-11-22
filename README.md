@@ -273,6 +273,19 @@ the new session is made, so a provider that ignores the request gets a
 403 page, not a redirect loop
 ([internal/authn/policy](internal/authn/policy/stepup.go)).
 
+`POST /admin/explain` on the gateway's admin listener says why a request
+would be allowed or denied, without making it:
+`{"url": "https://wiki.example.com/docs/plan", "method": "PUT", "session": "<id>"}`
+(or an `identity` such as `{"provider": "corp", "sub": "alice", "groups": ["eng"]}`
+with an optional `auth` sign-in time and `acr`, or neither for a signed-out
+user) returns the status forward-auth would answer, its decision and
+reason, every rule whose pattern matches in the order they are tried with
+the one that decided, the step-up requirement and whether the sign-in meets
+it, and for a relationship rule the check sent with the engine's explain
+trace (at most `trace_nodes`, default 1000). It touches no session, writes
+no audit record and counts no metric
+([internal/authn/server](internal/authn/server/explain.go)).
+
 `"revalidate": {"interval": "5m"}` on an OpenID provider confirms every
 session with its refresh token at that interval and ends it when the
 provider refuses (a disabled user), or by `on_failure` (`end` or `grace`)

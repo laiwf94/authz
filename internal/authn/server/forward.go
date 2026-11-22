@@ -241,6 +241,27 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 	w.WriteHeader(http.StatusOK)
 }
 
+// requester is who a request is decided for: a session's user, or, for
+// an explanation, an identity the admin API describes.
+type requester struct {
+	id *policy.Identity
+	// auth is how the user signed in, for step-up rules; stepUp and
+	// created are the session's step-up rule and creation time, for loop
+	// protection ("" and zero without a session).
+	auth    policy.Auth
+	stepUp  string
+	created time.Time
+	// token is the session's consistency token, and session its ID ("" for
+	// none): the snapshot a check read is kept there.
+	token   string
+	session string
+}
+
+func sessionRequester(sess *session.Session) requester {
+	return requester{id: &sess.Identity, auth: sess.Auth(), stepUp: sess.StepUp(), created: sess.CreatedAt,
+		token: sess.ConsistencyToken(), session: sess.ID}
+}
+
 // authorize decides a signed-in request: the path rule, then the rule's
 // step-up requirement, and for a relationship rule a check of the
 // in-process engine at least as fresh as the session's previous one. The
@@ -248,13 +269,22 @@ func (s *Server) forwardAuth(w http.ResponseWriter, r *http.Request, orig *url.U
 // rule refuses is refused before any step-up, and a user who must step up
 // is sent to do so before the engine is asked.
 func (s *Server) authorize(ctx context.Context, a *app, m *policy.Match, sess *session.Session) policy.Decision {
-	ok, reason := a.policy.Evaluate(m, &sess.Identity)
+	return s.decide(ctx, a, m, sessionRequester(sess), -1)
+}
+
+// decide is authorize for any requester. With traceNodes >= 0 it explains
+// instead: the check is traced (to at most traceNodes nodes, the default
+// when 0) when the engine can explain, and nothing is changed: no token is
+// kept and no metric counted. The decision is the same either way.
+func (s *Server) decide(ctx context.Context, a *app, m *policy.Match, q requester, traceNodes int) policy.Decision {
+	explain := traceNodes >= 0
+	ok, reason := a.policy.Evaluate(m, q.id)
 	if !ok && reason != policy.CheckRequired {
 		return policy.Decision{Allowed: false, Reason: reason}
 	}
 	if su := a.policy.StepUp(m); su != nil {
-		if fresh, why := su.Satisfied(sess.Auth(), s.now()); !fresh {
-			if sess.StepUp() == a.policy.RuleName(m.Rule) && su.IsStepUpLoop(sess.Auth(), sess.CreatedAt, s.now()) {
+		if fresh, why := su.Satisfied(q.auth, s.now()); !fresh {
+			if q.stepUp != "" && q.stepUp == a.policy.RuleName(m.Rule) && su.IsStepUpLoop(q.auth, q.created, s.now()) {
 				why = policy.StepUpLoop
 			}
 			return policy.Decision{Reason: why, StepUp: su}
@@ -272,13 +302,21 @@ func (s *Server) authorize(ctx context.Context, a *app, m *policy.Match, sess *s
 	} else {
 		eng = e
 	}
-	d := a.policy.Authorize(ctx, m, &sess.Identity, eng, sess.ConsistencyToken())
+	var d policy.Decision
+	if explain {
+		d = a.policy.AuthorizeExplain(ctx, m, q.id, eng, q.token, traceNodes)
+	} else {
+		d = a.policy.Authorize(ctx, m, q.id, eng, q.token)
+	}
 	if c := d.Check; c != nil {
 		if engErr != nil && d.Reason == policy.CheckUnavailable {
 			c.Err = engErr
 		}
-		if c.Err == nil {
-			s.sessions.SetConsistency(sess.ID, uint64(c.Result.At.Revision), c.Result.At.Token)
+		if explain {
+			return d
+		}
+		if c.Err == nil && q.session != "" {
+			s.sessions.SetConsistency(q.session, uint64(c.Result.At.Revision), c.Result.At.Token)
 		}
 		s.m.Counter("wicket_relationship_checks_total", `result="`+d.Reason+`"`, "Relationship checks made by path rules, by result.").Inc()
 	}

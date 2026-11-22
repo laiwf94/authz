@@ -161,6 +161,7 @@ required when `WICKET_ADMIN_TOKEN` is set):
 | `DELETE /admin/sessions/{id}` | Revoke one session. |
 | `POST /admin/sessions/revoke` `{"subject","provider"}` | Revoke all of a user's sessions. |
 | `POST /admin/reload` | Reload the config file; on any error the running one stays (also on `SIGHUP`). |
+| `POST /admin/explain` `{"url","method","session" or "identity"}` | Why a request would be allowed or denied: the matched rule chain, step-up and the relationship check's explain trace, with no side effects. |
 | `GET /metrics` | Prometheus metrics. |
 
 Errors are `{"error":{"code":"...","message":"...","request_id":"..."}}`.

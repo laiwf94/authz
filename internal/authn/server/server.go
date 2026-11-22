@@ -220,6 +220,7 @@ func (s *Server) routes() {
 	s.route(s.adminMux, "DELETE /admin/sessions/{id}", s.adminOnly(s.handleRevokeSession))
 	s.route(s.adminMux, "POST /admin/sessions/revoke", s.adminOnly(s.handleRevokeSubject))
 	s.route(s.adminMux, "POST /admin/reload", s.adminOnly(s.handleReload))
+	s.route(s.adminMux, "POST /admin/explain", s.adminOnly(s.handleExplain))
 	s.route(s.adminMux, "GET /metrics", s.adminOnly(s.handleMetrics))
 	s.route(s.adminMux, "GET /healthz", s.handleHealth)
 	s.route(s.adminMux, "/", func(w http.ResponseWriter, r *http.Request) {
