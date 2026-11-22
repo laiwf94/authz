@@ -28,6 +28,7 @@ TARGETS=(
   "./internal/authn/saml FuzzReadLogout 20s"
   "./internal/authn/config FuzzCheck 20s"
   "./internal/authn/policy FuzzMatch 20s"
+  "./internal/authn/policy FuzzGlob 10s"
   "./internal/platform/config FuzzCheck 20s"
   "./internal/agents/jsonrpc FuzzDecode 20s"
   "./internal/agents/schema FuzzCompileValidate 20s"

@@ -49,6 +49,16 @@ jobs:
             -group authn=$m/internal/authn,$m/internal/platform/jose,$m/internal/platform/seal,$m/internal/platform/config,$m/cmd/authz/internal/gateway,$m/cmd/authz/internal/fakeidp,$m/examples/whoami \
             -group agents=$m/internal/agents,$m/cmd/authz/internal/mcp,$m/cmd/authz/internal/mcpfake \
             coverage.out
+      # Absolute limits on single operations, a floor for every runner:
+      # a gateway decision in an app with 1,000 path and claim rules under
+      # 2 us with no allocations (#82), held against the median of five
+      # runs. Regressions against a baseline are the bench gate's (#86).
+      - name: Benchmark limits
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -run '^$' -bench '^BenchmarkDecide$' -benchmem -count 5 ./internal/authn/policy \
+            | go run scripts/bench-limit.go -limit 'BenchmarkDecide:ns=2000,allocs=0'
 
   secret-scan:
     runs-on: ubuntu-latest

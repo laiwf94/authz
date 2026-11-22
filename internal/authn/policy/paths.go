@@ -42,8 +42,8 @@ type App struct {
 // GET also covers HEAD.
 //
 // Public lets anyone through, signed in or not; Deny lets nobody through;
-// otherwise AnyUser, Emails, EmailDomains and Groups say who may, from the
-// app's providers, exactly as the app-wide rule does. Check makes it a
+// otherwise AnyUser, Emails, EmailDomains, Groups and Claims say who may,
+// from the app's providers, exactly as the app-wide rule does. Check makes it a
 // relationship rule: the authorization engine decides (see CheckRule),
 // for every user of the app's providers or, when the rule also lists who
 // may, for those it lists. StepUp asks those it lets through for a recent
@@ -61,6 +61,7 @@ type PathRule struct {
 	Emails       []string
 	EmailDomains []string
 	Groups       []string
+	Claims       []ClaimCondition
 }
 
 // MaxParams is the most {parameter} segments one pattern may have.
@@ -145,6 +146,9 @@ func (e *RuleError) Error() string { return e.Rule + ": " + e.Msg }
 func CompileApp(a App) (*Policy, error) {
 	p := &Policy{app: Compile(a.Rule)}
 	var errs []error
+	if _, err := compileClaims(a.Claims); err != nil {
+		errs = append(errs, &RuleError{Rule: "allow", Msg: err.Error()})
+	}
 	add := func(name string, pr PathRule) {
 		r, segs, err := compileRule(name, pr, a.Providers)
 		if err != nil {
@@ -216,8 +220,11 @@ func compileRule(name string, pr PathRule, providers []string) (rule, []string, 
 		return fail("a rule cannot be both public and deny")
 	}
 	who := pr.AnyUser || len(pr.Emails)+len(pr.EmailDomains)+len(pr.Groups) > 0
-	if (pr.Public || pr.Deny) && who {
-		return fail("a public or deny rule takes no allow (any_user, emails, email_domains or groups)")
+	if (pr.Public || pr.Deny) && (who || len(pr.Claims) > 0) {
+		return fail("a public or deny rule takes no allow (any_user, emails, email_domains, groups or claims)")
+	}
+	if _, err := compileClaims(pr.Claims); err != nil {
+		return fail("%v", err)
 	}
 	if (pr.Public || pr.Deny) && pr.Check != nil {
 		return fail("a public or deny rule takes no check")
@@ -296,7 +303,7 @@ func compileRule(name string, pr PathRule, providers []string) (rule, []string, 
 		// user of the app's providers.
 		anyUser := pr.AnyUser || (pr.Check != nil && !who)
 		r.allow = Compile(Rule{Providers: providers, AnyUser: anyUser, Emails: pr.Emails,
-			EmailDomains: pr.EmailDomains, Groups: pr.Groups})
+			EmailDomains: pr.EmailDomains, Groups: pr.Groups, Claims: pr.Claims})
 	}
 	if pr.Check != nil {
 		cc, err := compileCheck(pr.Check, r.params)
