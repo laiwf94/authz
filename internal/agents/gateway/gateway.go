@@ -7,10 +7,11 @@
 //  1. authentication (static key or signed token) and the agent's request rate;
 //  2. the tool exists upstream, its definition is the trusted one (not
 //     quarantined), and any Mcp-Param-* headers match the arguments;
-//  3. policy: default deny, explicit deny wins, argument constraints;
-//  4. the agent+tool rate limit;
+//  3. policy: default deny, explicit deny wins, argument constraints, time
+//     windows and conditions at the gateway's clock, relationship checks;
+//  4. the agent+tool rate limit, then the allowing rule's rate limit;
 //  5. human approval, for rules that require it;
-//  6. the agent's daily quota;
+//  6. the agent's daily quota, then the allowing rule's daily quota;
 //  7. an audit record of the decision, fsynced before anything is sent (if
 //     the audit log cannot be written, the call is refused);
 //  8. the upstream's concurrency limit; only then is an approval used up;
@@ -104,6 +105,7 @@ type Gateway struct {
 	agents    atomic.Pointer[agentSet]
 	limiter   *ratelimit.Limiter
 	quota     *ratelimit.Quota
+	ruleQuota *platformlimit.Daily // daily limits of tool rules
 	approvals *approval.Store
 	ups       map[string]*upstream
 	upNames   []string
@@ -178,6 +180,7 @@ func New(opt Options) (*Gateway, error) {
 	g := &Gateway{opt: opt, cfg: c, log: opt.Log, m: opt.Metrics, now: opt.Now, static: opt.StaticKeys,
 		limiter:   ratelimit.NewLimiter(opt.Now),
 		quota:     ratelimit.NewQuota(opt.Now),
+		ruleQuota: platformlimit.NewDaily(platformlimit.Options{Now: opt.Now}),
 		approvals: approvals,
 		ups:       map[string]*upstream{},
 	}
@@ -589,7 +592,9 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 		}
 	}
 
-	d := p.Decide(ctx, subjectOf(id), upName, toolName, args, g.engine)
+	subj := subjectOf(id)
+	subj.Session = policy.Session{Auth: id.Method, Issuer: id.Issuer, KeyID: id.KeyID, Protocol: c.Version}
+	d := p.DecideAt(ctx, start, subj, upName, toolName, args, g.engine)
 	rec["rule_id"] = d.RuleID
 	if d.ConstraintRuleID != "" {
 		rec["constraint_rule_id"] = d.ConstraintRuleID
@@ -633,6 +638,20 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 		e.RetryAfter = wait
 		return refuse("rate_limited", e)
 	}
+	// The allowing rule's own limits, counted per agent and rule. The key
+	// names the limits, so a reload that keeps them keeps the counts.
+	ruleKey := ""
+	if d.Limits != nil {
+		ruleKey = d.Limits.Key(id.AgentID)
+		if ok, wait := g.limiter.Take(ruleKey, d.Limits.Rate); !ok {
+			g.count("toolgate_rate_limited_total", `scope="rule"`, "Requests refused by a rate limit.")
+			e := rpcErr(http.StatusTooManyRequests, mcp.CodeRateLimited,
+				map[string]any{"scope": "rule", "rule_id": d.RuleID, "retry_after_ms": wait.Milliseconds()},
+				"rate limit of rule %s exceeded for %s", d.RuleID, name)
+			e.RetryAfter = wait
+			return refuse("rate_limited", e)
+		}
+	}
 
 	approvalID := ""
 	if d.RequiresApproval {
@@ -648,10 +667,27 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 		e.RetryAfter = wait
 		return refuse("quota_exceeded", e)
 	}
+	if d.Limits != nil && d.Limits.Daily > 0 {
+		if ok, wait := g.ruleQuota.Take(ruleKey, d.Limits.Daily, d.Limits.Zone); !ok {
+			g.quota.Refund(id.AgentID)
+			e := rpcErr(http.StatusTooManyRequests, mcp.CodeQuotaExceeded,
+				map[string]any{"limit": d.Limits.Daily, "rule_id": d.RuleID},
+				"daily quota of %d calls under rule %s is used up", d.Limits.Daily, d.RuleID)
+			e.RetryAfter = wait
+			return refuse("quota_exceeded", e)
+		}
+	}
+	// refund gives back the quotas of a call that was counted and not made.
+	refund := func() {
+		g.quota.Refund(id.AgentID)
+		if d.Limits != nil && d.Limits.Daily > 0 {
+			g.ruleQuota.Refund(ruleKey)
+		}
+	}
 
 	rec["stage"] = "started"
 	if err := g.audit(ctx, "tool_call", rec); err != nil {
-		g.quota.Refund(id.AgentID)
+		refund()
 		return nil, rpcErr(http.StatusServiceUnavailable, mcp.CodeAuditUnavailable, nil,
 			"the audit log is unavailable, so calls are refused")
 	}
@@ -666,7 +702,7 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 	}
 
 	if !u.sem.Acquire(ctx, slotWait) {
-		g.quota.Refund(id.AgentID)
+		refund()
 		finish("upstream_busy", nil)
 		e := rpcErr(http.StatusTooManyRequests, mcp.CodeUpstreamBusy, nil, "upstream %s is at its concurrency limit", upName)
 		e.RetryAfter = time.Second
@@ -676,7 +712,7 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 	// Use the approval only now, when nothing but the upstream itself can stop
 	// the call. Another identical call may have used it in the meantime.
 	if approvalID != "" && !g.approvals.Consume(approvalID) {
-		g.quota.Refund(id.AgentID)
+		refund()
 		finish("approval_pending", nil)
 		return nil, rpcErr(http.StatusOK, mcp.CodeApprovalPending, map[string]any{"approval_id": approvalID, "status": "used"},
 			"the approval was used by another identical call; this call needs a new approval")

@@ -112,6 +112,44 @@ answer checks itself, with `"checks": {"project:p1#edit@user:alice":
 "allowed"}` and the subject's `"owner"`, so `authz mcp policy test` needs no
 engine.
 
+Rules can also say when they apply and how often they allow:
+
+```json
+{"id": "deploy-office-hours", "effect": "allow", "agents": ["ci-bot"],
+ "upstreams": ["ops"], "tools": ["deploy"],
+ "windows": [{"zone": "Europe/Berlin", "days": ["mon", "tue", "wed", "thu", "fri"],
+              "from": "09:00", "to": "17:00"}],
+ "when": "args.env != 'prod' || session.auth == 'signed'",
+ "limits": {"rate": 0.1, "burst": 2, "daily": 20, "zone": "Europe/Berlin"}}
+```
+
+- `windows`: the rule applies only while the local time in the window's
+  IANA zone is in `[from, to)` on one of its `days` (every day when absent);
+  a `to` earlier than `from` runs overnight. Times are wall-clock, so on the
+  days the clocks change a window over the skipped hour is shorter and one
+  over the repeated hour longer.
+- `when`: a CEL expression, checked when the policy loads, over `now`
+  (a timestamp; `now.getHours("Asia/Tokyo")` takes a zone), `args`, `agent`,
+  `owner`, `upstream`, `tool`, `scopes` and `session` (`auth`, `issuer`,
+  `key_id` and `protocol`). Use `has(args.x)` for an optional argument.
+- In an allow rule a window that is closed or a condition that is false,
+  fails or cannot be decided means the rule does not allow, and a default
+  deny names it as `constraint_rule_id`. In a deny rule they say when it
+  forbids, and an error counts as true. Conditions are tested before the
+  relationship check, so a false one spares the engine.
+- `limits` (allow rules only): `rate` calls a second with a `burst` (1 when
+  absent) and `daily` calls a day, the day of `zone` (UTC when absent),
+  counted per agent and rule. A refused call gets 429 with `-31002` and
+  `"scope": "rule"` or `-31003`, both with the `rule_id` and a
+  `Retry-After` (until midnight in the zone for the daily quota). The
+  counts carry across reloads while a rule keeps its id and its limits;
+  changing the limits starts them afresh.
+
+Decisions are made at the gateway's clock. A case file gives a call case
+its time as `"now": "2026-12-05T10:00:00+01:00"` and the subject its
+`"session"`; without `now`, windows and conditions that read it are
+unknown.
+
 A policy can be tested like code. A case file lists calls and tool lists with
 the decision each should get, and `authz mcp policy test POLICY CASES` checks
 them all and prints, for each case that fails, what it expected next to what

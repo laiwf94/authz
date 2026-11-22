@@ -56,7 +56,8 @@ is audited with the rule or reason that caused it.
 
 ```text
 authenticate ─▶ agent rate ─▶ tool exists & trusted ─▶ Mcp-Param headers ─▶ policy
-   ─▶ agent+tool rate ─▶ approval ─▶ daily quota ─▶ audit "started" (fsync)
+   ─▶ agent+tool rate ─▶ rule rate ─▶ approval ─▶ daily quota ─▶ rule daily quota
+   ─▶ audit "started" (fsync)
    ─▶ upstream slot ─▶ use up approval ─▶ call upstream (timeout, size cap, gateway credential)
    ─▶ redact / truncate ─▶ audit "completed" (fsync) ─▶ reply
 ```
@@ -66,7 +67,12 @@ so a denied call costs the agent nothing and cannot drain another tool's
 bucket; the per-agent request rate, checked at authentication, still bounds
 how fast an agent can probe. Quota is taken after approval, so waiting for a
 human does not burn it, and it is refunded if the call is refused before
-reaching the upstream (audit failure, upstream busy). And the "started"
+reaching the upstream (audit failure, upstream busy); a rule's own daily
+quota is refunded with it. A rule's limits are counted under a key made of
+its id and the limits themselves, in limiters that outlive policy reloads,
+so a reload carries the counts of every rule whose limits it leaves alone.
+Time windows and `when` conditions are part of policy, decided at the
+gateway's clock. And the "started"
 record is durable before the upstream is contacted, so a crash after that
 point still leaves evidence that the call may have run. If that record
 cannot be written, the call is refused with 503 and `/healthz` reports 503.

@@ -33,6 +33,7 @@ TARGETS=(
   "./internal/agents/schema FuzzCompileValidate 20s"
   "./internal/agents/policy FuzzParse 20s"
   "./internal/agents/policy FuzzCases 20s"
+  "./internal/agents/policy FuzzConditions 20s"
   "./internal/agents/identity FuzzAuthenticate$ 20s"
   "./internal/agents/identity FuzzAuthenticateIssuers 20s"
   "./internal/agents/identity FuzzIssuerClaims 20s"

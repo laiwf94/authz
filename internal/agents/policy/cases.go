@@ -9,6 +9,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/laiwf94/authz/internal/agents/jsonrpc"
 	"github.com/laiwf94/authz/internal/authz/check"
@@ -54,6 +55,17 @@ const (
 //	 "call": {"tool": "fs.write_file", "arguments": {"project": "p1"}},
 //	 "checks": {"project:p1#edit@user:alice": "allowed"},
 //	 "expect": {"decision": "allow", "rule": "edit-projects"}}
+//
+// Rules with time windows or when expressions that read now are decided at
+// the case's now, an RFC 3339 time; without one the time is unknown, which
+// an allow rule's window does not admit and a deny rule's window counts as
+// open. The subject's session gives the session facts:
+//
+//	{"name": "deploys wait for office hours",
+//	 "subject": {"agent": "ci-bot", "session": {"auth": "signed"}},
+//	 "now": "2026-12-05T10:00:00+01:00",
+//	 "call": {"tool": "ops.deploy", "arguments": {"env": "prod"}},
+//	 "expect": {"decision": "deny", "constraint_rule": "deploy-office-hours"}}
 type caseFile struct {
 	Version int        `json:"version"`
 	Cases   []fileCase `json:"cases"`
@@ -65,13 +77,22 @@ type fileCase struct {
 	Call    *fileCall         `json:"call"`
 	List    []string          `json:"list"`
 	Checks  map[string]string `json:"checks"`
+	Now     string            `json:"now"`
 	Expect  fileExpect        `json:"expect"`
 }
 
 type fileSubject struct {
-	Agent  string   `json:"agent"`
-	Owner  string   `json:"owner"`
-	Scopes []string `json:"scopes"`
+	Agent   string       `json:"agent"`
+	Owner   string       `json:"owner"`
+	Scopes  []string     `json:"scopes"`
+	Session *fileSession `json:"session"`
+}
+
+type fileSession struct {
+	Auth     string `json:"auth"`
+	Issuer   string `json:"issuer"`
+	KeyID    string `json:"key_id"`
+	Protocol string `json:"protocol"`
 }
 
 type fileCall struct {
@@ -117,6 +138,8 @@ type Case struct {
 	// Checks answers the relationship checks of a call case, keyed by
 	// "resource#permission@subject"; unlisted checks are denied.
 	Checks map[string]string
+	// Now is the time of a call case; zero when the case gives none.
+	Now time.Time
 
 	Want Expect
 }
@@ -200,6 +223,24 @@ func compileCase(fc fileCase) (Case, error) {
 		return c, errors.New("subject owner must be at most 128 bytes with no control characters")
 	}
 	c.Subject = Subject{AgentID: s.Agent, Owner: s.Owner, Scopes: s.Scopes}
+	if ss := s.Session; ss != nil {
+		for _, v := range []string{ss.Auth, ss.Issuer, ss.KeyID, ss.Protocol} {
+			if len(v) > 256 || strings.ContainsFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+				return c, errors.New("subject session values must be at most 256 bytes with no control characters")
+			}
+		}
+		c.Subject.Session = Session{Auth: ss.Auth, Issuer: ss.Issuer, KeyID: ss.KeyID, Protocol: ss.Protocol}
+	}
+	if fc.Now != "" {
+		if fc.Call == nil {
+			return c, errors.New(`"now" applies only to call cases`)
+		}
+		t, err := time.Parse(time.RFC3339Nano, fc.Now)
+		if err != nil || t.IsZero() {
+			return c, fmt.Errorf("now %q must be an RFC 3339 time such as 2026-12-05T10:00:00+01:00", fc.Now)
+		}
+		c.Now = t
+	}
 	if fc.Checks != nil && fc.Call == nil {
 		return c, errors.New(`"checks" applies only to call cases`)
 	}
@@ -391,7 +432,7 @@ func runCase(p *Policy, ids map[string]bool, c *Case) CaseResult {
 		}
 		return res
 	}
-	d := p.Decide(context.Background(), c.Subject, c.Call.Upstream, c.Call.Tool, c.Arguments,
+	d := p.DecideAt(context.Background(), c.Now, c.Subject, c.Call.Upstream, c.Call.Tool, c.Arguments,
 		func(context.Context) (Checker, error) { return caseChecker(c.Checks), nil })
 	hidden := !d.Allowed && d.RuleID == DefaultDenyID && d.ConstraintRuleID == "" &&
 		!p.Visible(c.Subject, c.Call.Upstream, c.Call.Tool)
@@ -445,8 +486,10 @@ func describe(d Decision, hidden bool) string {
 	case d.ConstraintRuleID == "":
 	case d.Unavailable:
 		b.WriteString(" (check of " + d.ConstraintRuleID + " unavailable)")
-	case d.byCheck:
+	case d.constraint == byCheck:
 		b.WriteString(" (check of " + d.ConstraintRuleID + " failed)")
+	case d.constraint == byCondition:
+		b.WriteString(" (conditions of " + d.ConstraintRuleID + " not met)")
 	default:
 		b.WriteString(" (arguments rejected by " + d.ConstraintRuleID + ")")
 	}

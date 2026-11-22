@@ -32,10 +32,12 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/laiwf94/authz/internal/agents/guard"
 	"github.com/laiwf94/authz/internal/agents/jsonrpc"
 	"github.com/laiwf94/authz/internal/agents/schema"
+	"github.com/laiwf94/authz/internal/platform/cel"
 )
 
 // Limits on a policy document.
@@ -92,6 +94,9 @@ type fileRule struct {
 	RequiresApproval bool            `json:"requires_approval"`
 	Output           *fileOutput     `json:"output"`
 	Check            *fileCheck      `json:"check"`
+	Windows          []fileWindow    `json:"windows"`
+	When             *string         `json:"when"`
+	Limits           *fileLimits     `json:"limits"`
 }
 
 type fileOutput struct {
@@ -119,7 +124,13 @@ type Rule struct {
 	RequiresApproval bool
 	Output           *guard.Guard
 	check            *compiledCheck
+	windows          []window
+	when             *cel.Program
+	limits           *Limits
 }
+
+// conditional reports whether the rule has windows or a when expression.
+func (r *Rule) conditional() bool { return len(r.windows) > 0 || r.when != nil }
 
 // HasCheck reports whether the rule asks the authorization engine.
 func (r *Rule) HasCheck() bool { return r.check != nil }
@@ -145,6 +156,7 @@ type Subject struct {
 	AgentID string
 	Owner   string // the user behind the agent, {owner} in checks
 	Scopes  []string
+	Session Session // facts for when expressions
 }
 
 // Decision is the outcome of an evaluation.
@@ -163,9 +175,20 @@ type Decision struct {
 	// Checks are the relationship checks the call reached, in the order
 	// asked.
 	Checks []CheckTrace
-	// byCheck: ConstraintRuleID's rule failed its check, not its schema.
-	byCheck bool
+	// Limits are the allowing rule's limits, which the caller enforces;
+	// nil when it has none.
+	Limits *Limits
+	// constraint is what ConstraintRuleID's rule failed.
+	constraint constraintKind
 }
+
+type constraintKind uint8
+
+const (
+	byArguments constraintKind = iota
+	byCheck
+	byCondition
+)
 
 // Parse validates and compiles a policy document.
 func Parse(src []byte) (*Policy, error) {
@@ -287,6 +310,29 @@ func compileRule(fr fileRule) (*Rule, error) {
 	if r.Effect == Deny && (fr.RequiresApproval || fr.Output != nil) {
 		return nil, errors.New("requires_approval and output apply only to allow rules")
 	}
+	if r.Effect == Deny && fr.Limits != nil {
+		return nil, errors.New("limits apply only to allow rules")
+	}
+	if len(fr.Windows) > MaxWindows {
+		return nil, fmt.Errorf("at most %d windows", MaxWindows)
+	}
+	for i, fw := range fr.Windows {
+		w, err := compileWindow(i, fw)
+		if err != nil {
+			return nil, err
+		}
+		r.windows = append(r.windows, w)
+	}
+	if fr.When != nil {
+		if r.when, err = compileWhen(*fr.When); err != nil {
+			return nil, err
+		}
+	}
+	if fr.Limits != nil {
+		if r.limits, err = compileLimits(r.ID, fr.Limits); err != nil {
+			return nil, err
+		}
+	}
 	if fr.Check != nil {
 		if r.check, err = compileCheck(fr.Check); err != nil {
 			return nil, err
@@ -360,18 +406,26 @@ func (p *Policy) Evaluate(s Subject, upstream, tool string, args any) Decision {
 // Decide decides a tools/call, asking the engine get returns for the
 // relationship checks of the rules the call reaches. get is called at most
 // once, and only when a check has to be asked; nil means there is no
-// engine. Identical checks are asked once per call.
+// engine. Identical checks are asked once per call. Time windows and when
+// expressions are evaluated at the current time.
 func (p *Policy) Decide(ctx context.Context, s Subject, upstream, tool string, args any, get CheckEngine) Decision {
+	return p.DecideAt(ctx, time.Now(), s, upstream, tool, args, get)
+}
+
+// DecideAt is Decide at the time now. The zero time is an unknown time:
+// windows, and when expressions that read now, are then unknown.
+func (p *Policy) DecideAt(ctx context.Context, now time.Time, s Subject, upstream, tool string, args any, get CheckEngine) Decision {
 	if args == nil {
 		args = map[string]any{}
 	}
 	k := checker{ctx: ctx, get: get}
-	d := p.decide(&k, s, upstream, tool, args)
+	in := condInput{now: now, s: s, up: upstream, tool: tool, args: args}
+	d := p.decide(&k, &in, s, upstream, tool, args)
 	d.Checks = k.traces
 	return d
 }
 
-func (p *Policy) decide(k *checker, s Subject, upstream, tool string, args any) Decision {
+func (p *Policy) decide(k *checker, in *condInput, s Subject, upstream, tool string, args any) Decision {
 	cands := p.candidates(upstream)
 	for _, i := range cands {
 		r := p.Rules[i]
@@ -380,6 +434,16 @@ func (p *Policy) decide(k *checker, s Subject, upstream, tool string, args any) 
 		}
 		if r.args != nil && r.args.Validate(args) != nil {
 			continue
+		}
+		if r.conditional() {
+			// Fail closed: only a definite "false" lets the call past.
+			out, why := r.conditions(in)
+			if out == condFalse {
+				continue
+			}
+			if out == condUnknown {
+				return Decision{RuleID: r.ID, Reason: "rule " + r.ID + " forbids this call: " + why}
+			}
 		}
 		if r.check == nil {
 			return Decision{RuleID: r.ID, Reason: "rule " + r.ID + " forbids this call"}
@@ -399,7 +463,7 @@ func (p *Policy) decide(k *checker, s Subject, upstream, tool string, args any) 
 	}
 	var constraint *Rule
 	var constraintWhy string
-	var constraintByCheck bool
+	var constraintKind constraintKind
 	var unavailable *Rule
 	var unavailableErr error
 	for _, i := range cands {
@@ -415,6 +479,14 @@ func (p *Policy) decide(k *checker, s Subject, upstream, tool string, args any) 
 				continue
 			}
 		}
+		if r.conditional() {
+			if out, why := r.conditions(in); out != condTrue {
+				if constraint == nil {
+					constraint, constraintWhy, constraintKind = r, why, byCondition
+				}
+				continue
+			}
+		}
 		if r.check != nil {
 			if t := k.run(r, s, args); t.Outcome != CheckAllowed {
 				if t.Outcome == CheckUnavailable {
@@ -422,13 +494,13 @@ func (p *Policy) decide(k *checker, s Subject, upstream, tool string, args any) 
 						unavailable, unavailableErr = r, t.Err
 					}
 				} else if constraint == nil {
-					constraint, constraintWhy, constraintByCheck = r, "relationship check of rule "+r.ID+" is "+checkWhy(t), true
+					constraint, constraintWhy, constraintKind = r, "relationship check of rule "+r.ID+" is "+checkWhy(t), byCheck
 				}
 				continue
 			}
 		}
 		return Decision{Allowed: true, RuleID: r.ID, Reason: "allowed by rule " + r.ID,
-			RequiresApproval: r.RequiresApproval, Output: r.Output}
+			RequiresApproval: r.RequiresApproval, Output: r.Output, Limits: r.limits}
 	}
 	if unavailable != nil {
 		// The rule that could not ask might have allowed the call.
@@ -436,7 +508,7 @@ func (p *Policy) decide(k *checker, s Subject, upstream, tool string, args any) 
 			Reason: "rule " + unavailable.ID + ": the relationship check could not be made: " + unavailableErr.Error()}
 	}
 	if constraint != nil {
-		return Decision{RuleID: DefaultDenyID, ConstraintRuleID: constraint.ID, Reason: constraintWhy, byCheck: constraintByCheck}
+		return Decision{RuleID: DefaultDenyID, ConstraintRuleID: constraint.ID, Reason: constraintWhy, constraint: constraintKind}
 	}
 	return Decision{RuleID: DefaultDenyID, Reason: "no rule allows this call"}
 }
@@ -465,7 +537,7 @@ func (p *Policy) Visible(s Subject, upstream, tool string) bool {
 		if !r.matchesSubject(s) || !r.matchesTool(tool) {
 			continue
 		}
-		if r.Effect == Deny && r.args == nil && r.check == nil {
+		if r.Effect == Deny && r.args == nil && r.check == nil && !r.conditional() {
 			return false
 		}
 		if r.Effect == Allow {
