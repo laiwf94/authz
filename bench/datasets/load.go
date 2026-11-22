@@ -17,17 +17,49 @@ import (
 // MaxBatch is the most updates one authz write takes.
 const MaxBatch = 1000
 
+// WriteFormat is how one product's write API takes a batch of
+// relationships: the path a write is posted to, the most relationships one
+// write may carry, and how its JSON body is built. Every write must be
+// idempotent (a touch, or a write that ignores duplicates), so that a load
+// can be retried and resumed.
+type WriteFormat struct {
+	Path     string
+	MaxBatch int
+	// Begin opens a request body, Append adds one relationship (the loader
+	// puts the commas between them) and End closes the body.
+	Begin  func(b []byte) []byte
+	Append func(b []byte, r *Relationship) []byte
+	End    func(b []byte) []byte
+}
+
+// AuthzWrites is authz's POST /v1/relationships/write of touches.
+var AuthzWrites = WriteFormat{
+	Path:     "/v1/relationships/write",
+	MaxBatch: MaxBatch,
+	Begin:    func(b []byte) []byte { return append(b, `{"updates":[`...) },
+	// The tuples need no JSON escaping (see AppendOpenFGA).
+	Append: func(b []byte, r *Relationship) []byte {
+		b = append(b, `{"op":"touch","relationship":"`...)
+		return append(r.AppendTuple(b), `"}`...)
+	},
+	End: func(b []byte) []byte { return append(b, "]}"...) },
+}
+
 // Loader writes a graph into a running authz through its HTTP API: the
 // schema with PUT /v1/schema, then the relationships as touches with POST
 // /v1/relationships/write, Batch to a request, Workers requests at a time.
 // Touches are idempotent, so a load can be repeated or resumed from any
 // relationship number, and a request that fails with 429 or a 5xx status
-// is retried.
+// is retried. With Format set it writes to another product's API instead
+// (bench/products).
 type Loader struct {
 	Client *http.Client
 	URL    string // base URL, such as http://127.0.0.1:8080
 	Key    string // API key, sent as a bearer token
-	// Batch is the number of updates per write, 1 to MaxBatch (0: MaxBatch).
+	// Format is the write API; nil is AuthzWrites.
+	Format *WriteFormat
+	// Batch is the number of updates per write, 1 to the format's MaxBatch
+	// (0: its MaxBatch).
 	Batch int
 	// Workers is the number of writes in flight (0: 4).
 	Workers int
@@ -59,26 +91,32 @@ func (r LoadResult) PerSecond() float64 {
 // PutSchema writes schema.
 func (l *Loader) PutSchema(ctx context.Context, schema string) error {
 	body, _ := json.Marshal(map[string]string{"schema": schema})
-	_, err := l.send(ctx, http.MethodPut, "/v1/schema", body)
+	_, err := l.Call(ctx, http.MethodPut, "/v1/schema", body)
 	return err
 }
 
-type update struct {
-	Op           string `json:"op"`
-	Relationship string `json:"relationship"`
+// Call makes one request with the loader's key and retries, and returns
+// the 2xx answer's body. Products use it for their setup calls.
+func (l *Loader) Call(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	_, answer, err := l.send(ctx, method, path, body)
+	return answer, err
 }
 
 // Load writes the relationships numbered from..to-1 of g.
 func (l *Loader) Load(ctx context.Context, g Graph, from, to int64) (LoadResult, error) {
+	format := l.Format
+	if format == nil {
+		format = &AuthzWrites
+	}
 	batch, workers := l.Batch, l.Workers
 	if batch == 0 {
-		batch = MaxBatch
+		batch = format.MaxBatch
 	}
 	if workers == 0 {
 		workers = 4
 	}
-	if batch < 1 || batch > MaxBatch || workers < 1 {
-		return LoadResult{}, fmt.Errorf("load: batch %d (want 1 to %d) and workers %d (want at least 1)", batch, MaxBatch, workers)
+	if batch < 1 || batch > format.MaxBatch || workers < 1 {
+		return LoadResult{}, fmt.Errorf("load: batch %d (want 1 to %d) and workers %d (want at least 1)", batch, format.MaxBatch, workers)
 	}
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -95,7 +133,7 @@ func (l *Loader) Load(ctx context.Context, g Graph, from, to int64) (LoadResult,
 		go func() {
 			defer wg.Done()
 			for wr := range bodies {
-				n, err := l.send(ctx, http.MethodPost, "/v1/relationships/write", wr.body)
+				n, _, err := l.send(ctx, http.MethodPost, format.Path, wr.body)
 				retries.Add(int64(n))
 				if err != nil {
 					cancel(err)
@@ -109,15 +147,14 @@ func (l *Loader) Load(ctx context.Context, g Graph, from, to int64) (LoadResult,
 			}
 		}()
 	}
-	// Build each request body directly: a JSON array of touches whose
-	// tuples need no JSON escaping (see appendOpenFGA).
+	// Build each request body directly, without encoding/json.
 	var buf []byte
 	inBatch := 0
 	flush := func() error {
 		if inBatch == 0 {
 			return nil
 		}
-		buf = append(buf, "]}"...)
+		buf = format.End(buf)
 		select {
 		case bodies <- write{buf, inBatch}:
 		case <-ctx.Done():
@@ -128,12 +165,11 @@ func (l *Loader) Load(ctx context.Context, g Graph, from, to int64) (LoadResult,
 	}
 	err := g.EachRange(from, to, func(r *Relationship) error {
 		if inBatch == 0 {
-			buf = append(make([]byte, 0, batch*48+16), `{"updates":[`...)
+			buf = format.Begin(make([]byte, 0, batch*48+256))
 		} else {
 			buf = append(buf, ',')
 		}
-		buf = append(buf, `{"op":"touch","relationship":"`...)
-		buf = append(r.AppendTuple(buf), `"}`...)
+		buf = format.Append(buf, r)
 		if inBatch++; inBatch == batch {
 			return flush()
 		}
@@ -151,7 +187,7 @@ func (l *Loader) Load(ctx context.Context, g Graph, from, to int64) (LoadResult,
 	return res, err
 }
 
-// errStatus is an answer that is not 200.
+// errStatus is an answer that is not 2xx.
 type errStatus struct {
 	status int
 	body   string
@@ -167,34 +203,43 @@ func retryable(err error) bool {
 	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
-// send makes one request, retrying it, and returns the number of retries.
-func (l *Loader) send(ctx context.Context, method, path string, body []byte) (int, error) {
+// send makes one request, retrying it, and returns the number of retries
+// and the answer.
+func (l *Loader) send(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
 	tries := l.Retries
 	if tries == 0 {
 		tries = 5
 	}
 	wait := 50 * time.Millisecond
 	for n := 0; ; n++ {
-		err := l.once(ctx, method, path, body)
+		answer, err := l.once(ctx, method, path, body)
 		if err == nil || n == tries || !retryable(err) || ctx.Err() != nil {
 			if err != nil {
 				err = fmt.Errorf("%s %s: %w", method, path, err)
 			}
-			return n, err
+			return n, answer, err
 		}
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():
-			return n, fmt.Errorf("%s %s: %w", method, path, context.Cause(ctx))
+			return n, nil, fmt.Errorf("%s %s: %w", method, path, context.Cause(ctx))
 		}
 		wait = min(wait*2, 2*time.Second)
 	}
 }
 
-func (l *Loader) once(ctx context.Context, method, path string, body []byte) error {
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(l.URL, "/")+path, bytes.NewReader(body))
+// maxAnswer is the most of an answer once keeps: setup answers (a store,
+// a model ID) are small, and an error body only needs its start.
+const maxAnswer = 1 << 20
+
+func (l *Loader) once(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(l.URL, "/")+path, rd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+l.Key)
@@ -204,12 +249,12 @@ func (l *Loader) once(ctx context.Context, method, path string, body []byte) err
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	if resp.StatusCode != http.StatusOK {
-		return &errStatus{resp.StatusCode, strings.TrimSpace(string(b))}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxAnswer))
+	if resp.StatusCode/100 != 2 {
+		return nil, &errStatus{resp.StatusCode, strings.TrimSpace(string(b[:min(len(b), 4<<10)]))}
 	}
-	return nil
+	return b, err
 }

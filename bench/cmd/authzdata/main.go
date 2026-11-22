@@ -4,13 +4,16 @@
 //	authzdata manifest -size 1m                  counts and authzbench flags, as JSON
 //	authzdata schema [-format authz|openfga]     the dataset's schema or OpenFGA model
 //	authzdata graph -size 1m [-format tuples|openfga] [-from N -to N] [-o FILE]
-//	authzdata load -size 1m -api URL [-schema] [-batch 1000] [-workers 4] [-from N -to N]
+//	authzdata load -size 1m -api URL [-target authz|spicedb|openfga] [-schema] [-batch N] [-workers 4] [-from N -to N]
+//	authzdata crosscheck -size 1m [-n 1000] -authz URL [-spicedb URL] [-openfga URL]
 //	authzdata users -size 1m [-n N] [-format json|credentials] [-o FILE]
 //	authzdata tools [-n 100] [-calls 0] [-o FILE]
 //
 // Every subcommand takes -seed (default 1); a size and a seed name one
-// dataset everywhere. -size is 1m, 10m, 100m or a count such as 250k. The
-// load's API key comes from AUTHZBENCH_API_KEY, never a flag. The exit
+// dataset everywhere. -size is 1m, 10m, 100m or a count such as 250k.
+// Keys come from the environment, never a flag: AUTHZBENCH_API_KEY for
+// authz, AUTHZBENCH_SPICEDB_KEY and AUTHZBENCH_OPENFGA_KEY for the
+// products in bench/products. The exit
 // status is 0 on success, 1 when writing or loading failed, 2 for bad
 // arguments.
 package main
@@ -27,6 +30,7 @@ import (
 	"syscall"
 
 	"github.com/laiwf94/authz/bench/datasets"
+	"github.com/laiwf94/authz/bench/products"
 )
 
 func main() {
@@ -42,7 +46,8 @@ commands:
   manifest  print a graph's counts and the authzbench flags for it, as JSON
   schema    print the dataset's schema (-format authz) or OpenFGA model (-format openfga)
   graph     write a graph's relationships, one per line
-  load      write a graph into a running authz through its API
+  load      write a graph into a running authz, SpiceDB or OpenFGA through its API
+  crosscheck ask authz and the products the same sampled checks; fail on a disagreement
   users     write the sign-in population of a graph's users
   tools     write an MCP tool catalog, or with -calls, calls of it for authzbench
 
@@ -199,6 +204,8 @@ func command(ctx context.Context, name string, args []string, getenv func(string
 		})
 	case "load":
 		return load(ctx, args, getenv, stdout, stderr)
+	case "crosscheck":
+		return crosscheck(ctx, args, getenv, stdout, stderr)
 	case "users":
 		f := newFlags(name, stderr, true, datasets.FormatUsersJSON)
 		f.output()
@@ -253,12 +260,39 @@ func command(ctx context.Context, name string, args []string, getenv func(string
 	return usageError{fmt.Errorf("unknown command %q", name)}
 }
 
+// keyEnv is the variable each target's key is read from.
+var keyEnv = map[string]string{"authz": "AUTHZBENCH_API_KEY", "spicedb": "AUTHZBENCH_SPICEDB_KEY", "openfga": "AUTHZBENCH_OPENFGA_KEY"}
+
+// openfgaStore is the store the dataset is loaded into, so that load and
+// crosscheck find the same one.
+const openfgaStore = "authz-bench"
+
+// target returns the product at url, its key read from the environment.
+func target(name, url string, getenv func(string) string) (products.Target, error) {
+	env, ok := keyEnv[name]
+	if !ok {
+		return nil, usageError{fmt.Errorf("target %q: want authz, spicedb or openfga", name)}
+	}
+	key := getenv(env)
+	if url == "" || key == "" {
+		return nil, usageError{fmt.Errorf("%s needs its URL and the key in %s", name, env)}
+	}
+	switch name {
+	case "spicedb":
+		return products.NewSpiceDB(nil, url, key), nil
+	case "openfga":
+		return products.NewOpenFGA(nil, url, key, openfgaStore), nil
+	}
+	return products.NewAuthz(nil, url, key), nil
+}
+
 func load(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
 	f := newFlags("load", stderr, true, "")
 	f.ranges()
-	api := f.fs.String("api", "", "authorization API base URL, such as http://127.0.0.1:8080")
-	schema := f.fs.Bool("schema", false, "write the dataset's schema first")
-	batch := f.fs.Int("batch", datasets.MaxBatch, "relationships per write")
+	api := f.fs.String("api", "", "API base URL, such as http://127.0.0.1:8080")
+	name := f.fs.String("target", "authz", "the product at -api: authz, spicedb or openfga")
+	schema := f.fs.Bool("schema", false, "write the dataset's schema first (OpenFGA: the store and model, which a load always needs)")
+	batch := f.fs.Int("batch", 0, "relationships per write (0: the most the product takes: 1000, or 100 for OpenFGA)")
 	workers := f.fs.Int("workers", 4, "writes in flight")
 	if err := f.parse(args); err != nil {
 		return err
@@ -267,21 +301,76 @@ func load(ctx context.Context, args []string, getenv func(string) string, stdout
 	if err != nil {
 		return err
 	}
-	key := getenv("AUTHZBENCH_API_KEY")
-	if *api == "" || key == "" {
-		return usageError{errors.New("load needs -api and the API key in AUTHZBENCH_API_KEY")}
+	t, err := target(*name, *api, getenv)
+	if err != nil {
+		return err
 	}
-	if *batch < 1 || *batch > datasets.MaxBatch || *workers < 1 {
-		return usageError{fmt.Errorf("-batch %d -workers %d: want 1 to %d and at least 1", *batch, datasets.MaxBatch, *workers)}
+	most := datasets.MaxBatch
+	if *name == "openfga" {
+		most = products.OpenFGAMaxBatch
 	}
-	l := &datasets.Loader{URL: *api, Key: key, Batch: *batch, Workers: *workers}
-	if *schema {
-		if err := l.PutSchema(ctx, datasets.Schema); err != nil {
+	if *batch < 0 || *batch > most || *workers < 1 {
+		return usageError{fmt.Errorf("-batch %d -workers %d: want 0 to %d and at least 1", *batch, most, *workers)}
+	}
+	if *schema || *name == "openfga" {
+		if err := t.Setup(ctx); err != nil {
 			return err
 		}
 	}
+	l := t.Loader()
+	l.Batch, l.Workers = *batch, *workers
 	res, err := l.Load(ctx, g, f.from, f.to)
 	fmt.Fprintf(stdout, "loaded %d relationships in %d writes (%d retried) in %v: %.0f/s\n",
 		res.Relationships, res.Writes, res.Retries, res.Elapsed.Round(1e6), res.PerSecond())
 	return err
+}
+
+func crosscheck(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
+	f := newFlags("crosscheck", stderr, true, "")
+	n := f.fs.Int("n", 1000, "questions to ask every target")
+	workers := f.fs.Int("workers", 8, "questions in flight")
+	urls := map[string]*string{}
+	for _, name := range []string{"authz", "spicedb", "openfga"} {
+		urls[name] = f.fs.String(name, "", name+" API base URL; leave empty to skip it")
+	}
+	if err := f.parse(args); err != nil {
+		return err
+	}
+	g, err := f.graph()
+	if err != nil {
+		return err
+	}
+	if *n < 1 || *workers < 1 {
+		return usageError{fmt.Errorf("-n %d -workers %d: want at least 1 each", *n, *workers)}
+	}
+	var targets []products.Target
+	for _, name := range []string{"authz", "spicedb", "openfga"} {
+		if *urls[name] == "" {
+			continue
+		}
+		t, err := target(name, *urls[name], getenv)
+		if err != nil {
+			return err
+		}
+		if o, ok := t.(*products.OpenFGA); ok {
+			// Finds the store and model a load made (and makes them if
+			// there is none, which answers every question no).
+			if err := o.Setup(ctx); err != nil {
+				return err
+			}
+		}
+		targets = append(targets, t)
+	}
+	if len(targets) < 2 {
+		return usageError{errors.New("crosscheck needs two of -authz, -spicedb and -openfga")}
+	}
+	rep, err := products.CrossCheck(ctx, targets, products.Sample(g, *n, f.seed), *workers)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, rep)
+	if len(rep.Disagreements) > 0 {
+		return fmt.Errorf("%d of %d questions answered differently", len(rep.Disagreements), rep.Questions)
+	}
+	return nil
 }

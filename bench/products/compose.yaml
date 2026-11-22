@@ -1,0 +1,153 @@
+# The authorization products of the benchmark, each at a pinned version
+# with its recommended production settings (README.md says what each
+# setting is for), on the same CPU and memory limits:
+#
+#   docker compose -f bench/products/compose.yaml --profile spicedb up -d
+#
+# Profiles: authz, spicedb, openfga. Every image is pinned by tag and
+# digest; products_test.go fails on an image without both. Ports are bound
+# to 127.0.0.1 only. The keys below are the benchmark's own, public on
+# purpose like the dataset's passwords; set the variables to replace them.
+# BENCH_CPUS and BENCH_MEMORY set the limits of each server and each
+# database (default 2 CPUs and 4 GB).
+
+name: authz-bench
+
+x-limits: &limits
+  cpus: ${BENCH_CPUS:-2}
+  mem_limit: ${BENCH_MEMORY:-4g}
+
+# Both products' databases run the same PostgreSQL with the same settings:
+# shared_buffers a quarter of the memory limit, as PostgreSQL's own tuning
+# guide suggests, synchronous commits kept (durable writes, as in
+# production), and track_commit_timestamp, which SpiceDB's Watch API needs.
+x-postgres: &postgres
+  <<: *limits
+  image: postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+  command:
+    - postgres
+    - -c
+    - shared_buffers=1GB
+    - -c
+    - effective_cache_size=3GB
+    - -c
+    - max_connections=200
+    - -c
+    - track_commit_timestamp=on
+  environment:
+    POSTGRES_USER: bench
+    POSTGRES_PASSWORD: bench
+    POSTGRES_DB: bench
+  healthcheck:
+    test: ["CMD", "pg_isready", "-U", "bench", "-d", "bench"]
+    interval: 1s
+    timeout: 3s
+    retries: 60
+  shm_size: 1g
+
+services:
+  # authz serve, built from this checkout's Dockerfile, writing its
+  # write-ahead log to a volume: its store is inside the process, so its
+  # one container holds what the others need a database for.
+  authz:
+    <<: *limits
+    profiles: [authz]
+    build:
+      context: ../..
+    image: authz:bench
+    environment:
+      GRANTD_ADDR: ":8080"
+      GRANTD_DATA_DIR: /data
+      GRANTD_API_KEYS: ${AUTHZ_KEY:-bench-authz-key-0123456789}
+      GRANTD_TOKEN_KEY: ${AUTHZ_TOKEN_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+      GRANTD_LOG_LEVEL: warn
+    volumes:
+      - authz-data:/data
+    ports:
+      - 127.0.0.1:18080:8080
+
+  spicedb-postgres:
+    <<: *postgres
+    profiles: [spicedb]
+    volumes:
+      - spicedb-pg:/var/lib/postgresql/data
+
+  spicedb-migrate:
+    profiles: [spicedb]
+    image: authzed/spicedb:v1.57.1@sha256:9ea6df2d3cca23ed63aa7205639cf6babaaf1dc9a264ffb1f50c6455658fd6ba
+    command: [migrate, head, --datastore-engine, postgres,
+      --datastore-conn-uri, "postgres://bench:bench@spicedb-postgres:5432/bench?sslmode=disable"]
+    depends_on:
+      spicedb-postgres: {condition: service_healthy}
+    restart: on-failure:5
+
+  spicedb:
+    <<: *limits
+    profiles: [spicedb]
+    image: authzed/spicedb:v1.57.1@sha256:9ea6df2d3cca23ed63aa7205639cf6babaaf1dc9a264ffb1f50c6455658fd6ba
+    command:
+      - serve
+      - --grpc-preshared-key=${SPICEDB_KEY:-bench-spicedb-key-0123456789}
+      - --datastore-engine=postgres
+      - --datastore-conn-uri=postgres://bench:bench@spicedb-postgres:5432/bench?sslmode=disable
+      - --datastore-conn-pool-read-max-open=40
+      - --datastore-conn-pool-write-max-open=20
+      - --http-enabled
+      - --http-addr=:8443
+      - --telemetry-endpoint=
+      - --log-format=json
+      - --log-level=warn
+    depends_on:
+      spicedb-migrate: {condition: service_completed_successfully}
+    ports:
+      - 127.0.0.1:18443:8443
+
+  openfga-postgres:
+    <<: *postgres
+    profiles: [openfga]
+    volumes:
+      - openfga-pg:/var/lib/postgresql/data
+
+  openfga-migrate:
+    profiles: [openfga]
+    image: openfga/openfga:v1.23.0@sha256:2a1b4ef95f2f27e6d420f11cf14390b4f537e699de8d18b6a07d8b355e11cf02
+    command: [migrate, --datastore-engine, postgres,
+      --datastore-uri, "postgres://bench:bench@openfga-postgres:5432/bench?sslmode=disable"]
+    depends_on:
+      openfga-postgres: {condition: service_healthy}
+    restart: on-failure:5
+
+  openfga:
+    <<: *limits
+    profiles: [openfga]
+    image: openfga/openfga:v1.23.0@sha256:2a1b4ef95f2f27e6d420f11cf14390b4f537e699de8d18b6a07d8b355e11cf02
+    command:
+      - run
+      - --datastore-engine=postgres
+      - --datastore-uri=postgres://bench:bench@openfga-postgres:5432/bench?sslmode=disable
+      - --datastore-max-open-conns=60
+      - --datastore-max-idle-conns=60
+      - --authn-method=preshared
+      - --authn-preshared-keys=${OPENFGA_KEY:-bench-openfga-key-0123456789}
+      - --playground-enabled=false
+      - --check-query-cache-enabled
+      - --check-iterator-cache-enabled
+      - --list-objects-iterator-cache-enabled
+      - --cache-controller-enabled
+      - --log-format=json
+      - --log-level=warn
+    depends_on:
+      openfga-migrate: {condition: service_completed_successfully}
+    ports:
+      - 127.0.0.1:18081:8080
+
+  # The OpenFGA CLI, for verify.sh to turn the dataset's model into the
+  # JSON in openfga-model.json: docker compose run --rm openfga-cli ...
+  openfga-cli:
+    profiles: [tools]
+    image: openfga/cli:v0.9.0@sha256:7a7f9fb0a27a788a0fa7907eb5fc751c3134ca0776245578308e011606b61091
+
+volumes:
+  authz-data:
+  spicedb-pg:
+  openfga-pg:

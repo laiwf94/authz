@@ -1,0 +1,191 @@
+{
+  "schema_version": "1.1",
+  "type_definitions": [
+    {
+      "type": "user"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "member": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "relation": "member",
+                "type": "group"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "member": {
+          "this": {}
+        }
+      },
+      "type": "group"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "parent": {
+            "directly_related_user_types": [
+              {
+                "type": "folder"
+              }
+            ]
+          },
+          "view": {},
+          "viewer": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "user",
+                "wildcard": {}
+              },
+              {
+                "relation": "member",
+                "type": "group"
+              }
+            ]
+          }
+        }
+      },
+      "relations": {
+        "parent": {
+          "this": {}
+        },
+        "view": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "viewer"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "computedUserset": {
+                    "relation": "view"
+                  },
+                  "tupleset": {
+                    "relation": "parent"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "viewer": {
+          "this": {}
+        }
+      },
+      "type": "folder"
+    },
+    {
+      "metadata": {
+        "relations": {
+          "banned": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "edit": {},
+          "editor": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "relation": "member",
+                "type": "group"
+              }
+            ]
+          },
+          "owner": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "parent": {
+            "directly_related_user_types": [
+              {
+                "type": "folder"
+              }
+            ]
+          },
+          "view": {}
+        }
+      },
+      "relations": {
+        "banned": {
+          "this": {}
+        },
+        "edit": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "owner"
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "editor"
+                }
+              }
+            ]
+          }
+        },
+        "editor": {
+          "this": {}
+        },
+        "owner": {
+          "this": {}
+        },
+        "parent": {
+          "this": {}
+        },
+        "view": {
+          "difference": {
+            "base": {
+              "union": {
+                "child": [
+                  {
+                    "computedUserset": {
+                      "relation": "edit"
+                    }
+                  },
+                  {
+                    "tupleToUserset": {
+                      "computedUserset": {
+                        "relation": "view"
+                      },
+                      "tupleset": {
+                        "relation": "parent"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "subtract": {
+              "computedUserset": {
+                "relation": "banned"
+              }
+            }
+          }
+        }
+      },
+      "type": "doc"
+    }
+  ]
+}

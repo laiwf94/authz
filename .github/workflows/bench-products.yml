@@ -1,0 +1,50 @@
+# The benchmark's competitor setups, proved before anything is measured on
+# them (#86): bench/products/verify.sh checks the committed OpenFGA model
+# against the pinned OpenFGA CLI, builds authz's image, starts authz,
+# SpiceDB and OpenFGA from bench/products/compose.yaml at their pinned
+# versions and production settings, loads the same seeded dataset into
+# each, loads part of it again, and fails if any of 2,000 sampled checks
+# is answered differently. It runs when the setups, the datasets or the
+# loader change, and on demand at a larger SIZE.
+name: bench-products
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - bench/products/**
+      - bench/datasets/**
+      - bench/cmd/authzdata/**
+      - .github/workflows/bench-products.yml
+  pull_request:
+    paths:
+      - bench/products/**
+      - bench/datasets/**
+      - bench/cmd/authzdata/**
+      - .github/workflows/bench-products.yml
+  workflow_dispatch:
+    inputs:
+      size:
+        description: dataset size (100k, 1m, 10m)
+        default: 100k
+      questions:
+        description: checks to compare
+        default: "2000"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify the authorization products
+        env:
+          SIZE: ${{ inputs.size || '100k' }}
+          N: ${{ inputs.questions || '2000' }}
+        run: ./bench/products/verify.sh

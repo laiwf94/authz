@@ -248,7 +248,10 @@ func TestLoaderRetriesAndFails(t *testing.T) {
 			return
 		}
 		var body struct {
-			Updates []update `json:"updates"`
+			Updates []struct {
+				Op           string `json:"op"`
+				Relationship string `json:"relationship"`
+			} `json:"updates"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)

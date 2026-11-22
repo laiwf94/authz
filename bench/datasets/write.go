@@ -26,7 +26,7 @@ func WriteGraph(w io.Writer, g Graph, format string, from, to int64) (int64, err
 	case FormatTuples:
 		line = func(b []byte, r *Relationship) []byte { return r.AppendTuple(b) }
 	case FormatOpenFGA:
-		line = appendOpenFGA
+		line = AppendOpenFGA
 	default:
 		return 0, fmt.Errorf("format %q: want %s or %s", format, FormatTuples, FormatOpenFGA)
 	}
@@ -45,10 +45,10 @@ func WriteGraph(w io.Writer, g Graph, format string, from, to int64) (int64, err
 	return n, err
 }
 
-// appendOpenFGA appends {"user":...,"relation":...,"object":...}. Every
+// AppendOpenFGA appends {"user":...,"relation":...,"object":...}. Every
 // string is made of type names, relation names, letters, digits, '#', ':'
 // and '*', none of which JSON escapes.
-func appendOpenFGA(b []byte, r *Relationship) []byte {
+func AppendOpenFGA(b []byte, r *Relationship) []byte {
 	b = append(b, `{"user":"`...)
 	b = r.AppendSubject(b)
 	b = append(b, `","relation":"`...)

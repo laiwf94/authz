@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/laiwf94/authz/bench/datasets"
+	"github.com/laiwf94/authz/bench/products/productstest"
 	"github.com/laiwf94/authz/internal/authz/api"
 	"github.com/laiwf94/authz/internal/authz/store"
 	"github.com/laiwf94/authz/internal/authz/token"
@@ -23,7 +24,8 @@ import (
 const key = "authzdata-key-0123456789"
 
 func env(k string) string {
-	if k == "AUTHZBENCH_API_KEY" {
+	switch k {
+	case "AUTHZBENCH_API_KEY", "AUTHZBENCH_SPICEDB_KEY", "AUTHZBENCH_OPENFGA_KEY":
 		return key
 	}
 	return ""
@@ -177,6 +179,12 @@ func TestBadArguments(t *testing.T) {
 		{"load", "-size", "1k"},
 		{"load", "-size", "1k", "-api", "http://127.0.0.1:1", "-batch", "5000"},
 		{"load", "-size", "1"},
+		{"load", "-size", "1k", "-api", "http://127.0.0.1:1", "-target", "zanzibar"},
+		{"load", "-size", "1k", "-api", "http://127.0.0.1:1", "-target", "openfga", "-batch", "101"},
+		{"load", "-size", "1k", "-api", "http://127.0.0.1:1", "-batch", "-1"},
+		{"crosscheck", "-size", "1k", "-authz", "http://127.0.0.1:1"},
+		{"crosscheck", "-size", "1k", "-authz", "http://127.0.0.1:1", "-spicedb", "http://127.0.0.1:2", "-n", "0"},
+		{"crosscheck", "-size", "lots"},
 	} {
 		if code, _, _ := runCmd(t, args...); code != 2 {
 			t.Errorf("%q: exit %d, want 2", args, code)
@@ -193,5 +201,61 @@ func TestBadArguments(t *testing.T) {
 	}
 	if code, _, _ := runCmd(t, "load", "-size", "1k", "-api", "http://127.0.0.1:1", "-schema"); code != 1 {
 		t.Errorf("unreachable API: %d", code)
+	}
+}
+
+// The same dataset loaded into authz and the SpiceDB and OpenFGA fakes
+// gives the same answers; an OpenFGA that lost the group usersets fails
+// the cross-check with exit status 1.
+func TestLoadTargetsAndCrossCheck(t *testing.T) {
+	authz := httptest.NewServer(productstest.NewAPI(t, key))
+	defer authz.Close()
+	spice := httptest.NewServer(&productstest.SpiceDB{Engine: productstest.NewEngine(t, key)})
+	defer spice.Close()
+	fga := &productstest.OpenFGA{Engine: productstest.NewEngine(t, key)}
+	fgaSrv := httptest.NewServer(fga)
+	defer fgaSrv.Close()
+	for _, args := range [][]string{
+		{"-api", authz.URL, "-schema"},
+		{"-target", "spicedb", "-api", spice.URL, "-schema", "-workers", "2"},
+		{"-target", "openfga", "-api", fgaSrv.URL, "-workers", "8"},
+		// Again: the store and model are found, and the writes change nothing.
+		{"-target", "openfga", "-api", fgaSrv.URL, "-to", "500", "-batch", "50"},
+	} {
+		code, out, e := runCmd(t, append([]string{"load", "-size", "3k"}, args...)...)
+		if code != 0 || !strings.HasPrefix(out, "loaded ") {
+			t.Fatalf("load %q: %d %q %s", args, code, out, e)
+		}
+	}
+	if stores, models, _, largest := fga.Counts(); stores != 1 || models != 1 || largest != 100 {
+		t.Errorf("openfga holds %d stores and %d models, largest write %d", stores, models, largest)
+	}
+	code, out, e := runCmd(t, "crosscheck", "-size", "3k", "-n", "300",
+		"-authz", authz.URL, "-spicedb", spice.URL, "-openfga", fgaSrv.URL)
+	if code != 0 || !strings.HasPrefix(out, "300 questions, ") || !strings.Contains(out, " 0 disagreements") {
+		t.Fatalf("crosscheck: %d %q %s", code, out, e)
+	}
+
+	lossy := httptest.NewServer(&productstest.OpenFGA{Engine: productstest.NewEngine(t, key), DropUsersets: true})
+	defer lossy.Close()
+	if code, out, e := runCmd(t, "load", "-size", "3k", "-target", "openfga", "-api", lossy.URL); code != 0 {
+		t.Fatalf("lossy load: %d %q %s", code, out, e)
+	}
+	code, out, e = runCmd(t, "crosscheck", "-size", "3k", "-n", "300", "-authz", authz.URL, "-openfga", lossy.URL)
+	if code != 1 || !strings.Contains(e, "answered differently") || strings.Contains(out, " 0 disagreements") {
+		t.Errorf("crosscheck against the lossy store: %d %q %s", code, out, e)
+	}
+	// A product that refuses the check is a failed run, not a disagreement.
+	if code, _, e := runCmd(t, "crosscheck", "-size", "3k", "-n", "10", "-authz", authz.URL, "-spicedb", fgaSrv.URL); code != 1 || !strings.Contains(e, "spicedb") {
+		t.Errorf("crosscheck against the wrong API: %d %s", code, e)
+	}
+	// Setup failures exit 1.
+	if code, _, _ := runCmd(t, "crosscheck", "-size", "3k", "-authz", authz.URL, "-openfga", "http://127.0.0.1:1"); code != 1 {
+		t.Errorf("crosscheck against no openfga: %d", code)
+	}
+	noKey := func(string) string { return "" }
+	var o, eb bytes.Buffer
+	if code := run(context.Background(), []string{"load", "-size", "1k", "-target", "spicedb", "-api", spice.URL}, noKey, &o, &eb); code != 2 || !strings.Contains(eb.String(), "AUTHZBENCH_SPICEDB_KEY") {
+		t.Errorf("load without the key: %d %s", code, eb.String())
 	}
 }

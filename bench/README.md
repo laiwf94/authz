@@ -8,7 +8,8 @@ report.
 | Path | What it is |
 | --- | --- |
 | `cmd/authzbench` | Open-loop load runner for a mix of operations |
-| `cmd/authzdata` | Writes the seeded datasets and loads them into a running authz |
+| `cmd/authzdata` | Writes the seeded datasets, loads them into authz, SpiceDB or OpenFGA, and cross-checks their answers |
+| `products` | The competitors at pinned versions with their production settings, and `verify.sh`, which proves the setups give authz's answers |
 | `datasets` | Seeded generators: relationship graphs, the sign-in population, MCP tool catalogs |
 | `load` | The open-loop scheduler and its coordinated-omission correction |
 | `hdr` | High dynamic range latency histogram (standard library only) |
