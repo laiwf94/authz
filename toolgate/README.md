@@ -189,6 +189,29 @@ Results can be redacted per rule for credential shapes (AWS keys, GitHub and
 Slack tokens, private keys, bearer tokens, JWTs, or custom RE2) and truncated
 to a byte budget, and the audit log records when that happened.
 
+A rule can also refuse a result outright. `deny` takes the same built-in
+names and `deny_patterns` custom RE2, all compiled when the policy loads:
+
+```json
+{"id": "search", "effect": "allow", "agents": ["*"], "upstreams": ["web"], "tools": ["search"],
+ "output": {"redact": ["jwt"], "deny": ["github_token", "private_key"],
+            "deny_patterns": ["INTERNAL-ONLY-[0-9]+"]}}
+```
+
+Deny patterns are tried first, on the result as the upstream sent it, over
+every string and object key of the text and `structuredContent` (base64
+image, audio and blob data excepted, as for redaction). If one matches, the
+whole result is withheld and the agent gets `-31011` with
+`{"rule_id": "search", "pattern": "deny_patterns[0]"}`: the pattern is
+named by its built-in name or position, never by the matched text. When
+several match, the one listed first is named. Otherwise redaction and
+truncation run as before. An upstream error message that matches is
+withheld too (still `-31007`, with the same `rule_id` and `pattern`). The
+upstream did run the call, so a refused result counts against quotas. The
+completed audit record of a call under such a rule carries `result`
+(`allow`, `redact` or `refuse`) and, for a refusal, `result_pattern`;
+`toolgate_tool_calls_total{outcome="result_refused"}` counts refusals.
+
 The audit log is append-only JSONL. Each record carries the SHA-256 of the
 previous line and is fsynced before the call goes ahead (concurrent calls
 share an fsync). `authz mcp audit verify` finds any edit, deletion or
@@ -420,7 +443,9 @@ reserve: `-31000` unauthenticated (401), `-31001` denied by policy, `-31002`
 rate limited (429), `-31003` daily quota (429), `-31004` approval pending,
 `-31005` approval denied, `-31006` tool quarantined, `-31007` upstream error
 (502), `-31008` upstream timeout (504), `-31009` upstream busy (429), `-31010`
-audit log unavailable (503), `-31012` relationship check unavailable (503). Protocol errors use the specification's codes:
+audit log unavailable (503), `-31011` result refused by a rule's deny
+patterns (200, as a policy denial), `-31012` relationship check unavailable
+(503). Protocol errors use the specification's codes:
 `-32020` header mismatch, `-32022` unsupported version, `-32602` invalid params
 or unknown tool. Clients in a 2025 session get every JSON-RPC error with
 HTTP 200, as those revisions expect, and still get `Retry-After`.
@@ -534,7 +559,7 @@ internal/agents/ratelimit      daily quotas, upstream concurrency, the platform 
 internal/platform/ratelimit    the platform's GCRA limiter (shared)
 internal/agents/approval       human approval requests and single-use grants
 internal/agents/pins           tool definition pinning and quarantine
-internal/agents/guard          output redaction, truncation and audit previews
+internal/agents/guard          output refusal, redaction, truncation and audit previews
 internal/platform/audit        the platform's hash-chained audit log (shared)
 internal/agents/fakeserver     the tools behind `authz mcpfake`
 internal/agents/httpx          request IDs, logging, metrics, errors

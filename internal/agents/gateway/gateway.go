@@ -721,16 +721,31 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 	defer cancel()
 	res, err := u.client.CallTool(cctx, toolName, args, headers)
 	if err != nil {
-		return nil, g.upstreamFailure(upName, err, d.Output, finish)
+		return nil, g.upstreamFailure(upName, d.RuleID, err, d.Output, finish)
 	}
 	delete(res, "_meta")
 	delete(res, "resultType")
 	rep := d.Output.Apply(res)
+	if rep.Refused != "" {
+		// The upstream ran the call, so this is not refunded; the result
+		// is withheld whole, since what matched may be anywhere in it.
+		finish("result_refused", map[string]any{"result": rep.Decision(), "result_pattern": rep.Refused,
+			"response_bytes": rep.BytesBefore})
+		return nil, rpcErr(http.StatusOK, mcp.CodeResultRefused,
+			map[string]any{"rule_id": d.RuleID, "pattern": rep.Refused},
+			"the result of %s was refused by rule %s: it matched %s", name, d.RuleID, rep.Refused)
+	}
 	outcome := "ok"
 	if isErr, _ := res["isError"].(bool); isErr {
 		outcome = "tool_error"
 	}
-	finish(outcome, map[string]any{"response_bytes": rep.BytesAfter, "redactions": rep.Redactions, "truncated": rep.Truncated})
+	extra := map[string]any{"response_bytes": rep.BytesAfter, "redactions": rep.Redactions, "truncated": rep.Truncated}
+	if d.Output.Denies() {
+		// A rule with result rules records what they decided. Records under
+		// other rules keep the fields they always had.
+		extra["result"] = rep.Decision()
+	}
+	finish(outcome, extra)
 	if rep.Redactions > 0 {
 		g.m.Counter("toolgate_redactions_total", "", "Secrets redacted from tool results.").Add(uint64(rep.Redactions))
 	}
@@ -739,8 +754,9 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 
 // upstreamFailure maps an upstream error to what the agent sees. Upstream
 // error text is passed on only in short form, through the rule's redaction
-// patterns and the built-in ones.
-func (g *Gateway) upstreamFailure(up string, err error, out *guard.Guard, finish func(string, map[string]any)) *mcp.Error {
+// patterns and the built-in ones, and not at all when one of the rule's
+// deny patterns matches it.
+func (g *Gateway) upstreamFailure(up, ruleID string, err error, out *guard.Guard, finish func(string, map[string]any)) *mcp.Error {
 	g.count("toolgate_upstream_errors_total", metrics.Labels("upstream", up, "op", "tools/call"), "Failed upstream requests.")
 	var re *mcp.RPCError
 	switch {
@@ -748,6 +764,12 @@ func (g *Gateway) upstreamFailure(up string, err error, out *guard.Guard, finish
 		finish("upstream_timeout", nil)
 		return rpcErr(http.StatusGatewayTimeout, mcp.CodeUpstreamTimeout, nil, "upstream %s did not answer in time", up)
 	case errors.As(err, &re):
+		if pat := out.DeniedText(re.Err.Message); pat != "" {
+			finish("upstream_error", map[string]any{"upstream_code": re.Err.Code, "result": "refuse", "result_pattern": pat})
+			return rpcErr(http.StatusBadGateway, mcp.CodeUpstreamError,
+				map[string]any{"upstream_code": re.Err.Code, "rule_id": ruleID, "pattern": pat},
+				"upstream %s rejected the call; its message was withheld by rule %s: it matched %s", up, ruleID, pat)
+		}
 		msg := out.RedactText(truncate(re.Err.Message, 200))
 		finish("upstream_error", map[string]any{"upstream_code": re.Err.Code})
 		return rpcErr(http.StatusBadGateway, mcp.CodeUpstreamError, map[string]any{"upstream_code": re.Err.Code},

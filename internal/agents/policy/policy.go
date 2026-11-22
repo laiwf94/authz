@@ -102,6 +102,8 @@ type fileRule struct {
 type fileOutput struct {
 	Redact         []string `json:"redact"`
 	RedactPatterns []string `json:"redact_patterns"`
+	Deny           []string `json:"deny"`
+	DenyPatterns   []string `json:"deny_patterns"`
 	MaxBytes       int      `json:"max_bytes"`
 }
 
@@ -339,7 +341,9 @@ func compileRule(fr fileRule) (*Rule, error) {
 		}
 	}
 	if fr.Output != nil {
-		if r.Output, err = guard.New(fr.Output.Redact, fr.Output.RedactPatterns, fr.Output.MaxBytes); err != nil {
+		o := fr.Output
+		if r.Output, err = guard.NewRules(guard.Rules{Redact: o.Redact, RedactPatterns: o.RedactPatterns,
+			Deny: o.Deny, DenyPatterns: o.DenyPatterns, MaxBytes: o.MaxBytes}); err != nil {
 			return nil, fmt.Errorf("output: %w", err)
 		}
 	}

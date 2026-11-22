@@ -163,10 +163,15 @@ type ToolCall struct {
 	LatencyMS     int64    `json:"latency_ms,omitempty"`
 	ResponseBytes int      `json:"response_bytes,omitempty"`
 	Redactions    int      `json:"redactions,omitempty"`
-	Truncated     bool     `json:"truncated,omitempty"`
-	UpstreamCode  int      `json:"upstream_code,omitempty"`
-	Error         string   `json:"error,omitempty"`
-	RequestID     string   `json:"request_id,omitempty"`
+	// Result is what a rule with deny patterns in its output block did
+	// with what the upstream sent: allow, redact (redacted or truncated)
+	// or refuse; ResultPattern names the deny pattern behind a refusal.
+	Result        string `json:"result,omitempty"`
+	ResultPattern string `json:"result_pattern,omitempty"`
+	Truncated     bool   `json:"truncated,omitempty"`
+	UpstreamCode  int    `json:"upstream_code,omitempty"`
+	Error         string `json:"error,omitempty"`
+	RequestID     string `json:"request_id,omitempty"`
 }
 
 // ApprovalRequested is a call held for a human.
