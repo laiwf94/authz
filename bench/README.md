@@ -8,10 +8,80 @@ report.
 | Path | What it is |
 | --- | --- |
 | `cmd/authzbench` | Open-loop load runner for a mix of operations |
+| `cmd/authzdata` | Writes the seeded datasets and loads them into a running authz |
+| `datasets` | Seeded generators: relationship graphs, the sign-in population, MCP tool catalogs |
 | `load` | The open-loop scheduler and its coordinated-omission correction |
 | `hdr` | High dynamic range latency histogram (standard library only) |
 | `ops` | The operations: checks, bulk checks, lookups, writes, forward-auth, OIDC login, MCP `tools/call` |
 | `image-baseline.json` | Image size baseline for the CI image gate (week 1) |
+
+## Datasets
+
+Every product is loaded with the same data, generated from a size and a
+seed (default 1) by `bench/datasets`. Each user, group, folder and document
+draws from its own random stream seeded from the dataset seed and its
+number, so a dataset is identical on every machine and in every format,
+any range of it can be generated on its own, and nothing is held in memory.
+
+```
+go build -o authzdata ./bench/cmd/authzdata
+./authzdata manifest -size 10m                     # counts and the authzbench flags for them
+./authzdata schema > dataset.schema                # -format openfga for the OpenFGA model
+./authzdata graph -size 10m -o rels.txt            # type:id#relation@subject per line
+./authzdata graph -size 10m -format openfga -o rels.jsonl   # {"user","relation","object"} per line
+AUTHZBENCH_API_KEY=... ./authzdata load -size 10m -api http://127.0.0.1:8080 -schema
+./authzdata users -size 10m -n 10000 -format credentials -o creds.txt   # authzbench -login-credentials @creds.txt
+./authzdata users -size 10m -n 10000 -o users.jsonl                     # for provider imports
+./authzdata tools -n 200 -o catalog.json           # a tools/list result
+./authzdata tools -n 200 -calls 1000 -o calls.json # authzbench -mcp-tools @calls.json
+```
+
+**The graph** is document sharing: users in nested groups, folder trees
+with inherited viewers, documents with an owner, editors and bans
+(`datasets.Schema`; the OpenFGA model has the same relations and meaning).
+For every ten documents there is one user, for every fifty users one group,
+for every fifty documents one folder. Each user is a direct member of two
+groups drawn Zipf (s 1.1, v 10), so a few groups are large (the first holds
+about 6% of the users) and most are small; three groups in four nest in a
+lower-numbered group, two levels deep at most. Folders form one tree per
+thousand folders with eight subfolders each, four levels deep; each folder
+has one viewer: a group, one in ten a user, one in a thousand `user:*`.
+Each document has a parent folder, an owner, a user editor and a group
+editor; one in fifty bans a user.
+
+| Size | Relationships | Users | Groups | Folders | Documents |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `1m` | 999,999 | 23,466 | 469 | 4,693 | 234,660 |
+| `10m` | 9,999,998 | 234,660 | 4,693 | 46,932 | 2,346,602 |
+| `100m` | 99,999,998 | 2,346,602 | 46,932 | 469,320 | 23,466,026 |
+
+IDs follow authzbench's naming (`doc:d<n>`, `user:u<n>`, `group:g<n>`,
+`folder:f<n>`), so the manifest's `authzbench_flags` draw checks from
+exactly the objects that exist. A test pins the digest of the 100k seed 1
+dataset: a change to the generator that changes the data must change it on
+purpose. Another loads a graph into the real API and compares 600 sampled
+checks with an oracle that applies the schema's rules by hand to the
+generated tuples.
+
+**The sign-in population** is the graph's users: `u<n>` with the email
+`u<n>@bench.example`, a password derived from the seed (public by design:
+it exists so every provider signs in the same accounts) and the groups the
+user is a direct member of in the graph, so group claims and relationships
+agree.
+
+**The MCP tool catalog** has `verb_noun` tools with one to six arguments
+(strings with lengths, IDs with a pattern, bounded integers, booleans,
+enums, string lists), closed object schemas and descriptions of ten to
+forty words. Calls pick tools Zipf (s 1.2) and give every required
+argument and about half the optional ones; a test checks every call with
+the gateway's own schema validator.
+
+Generating is cheap: 100M relationships stream out in 8.8 s at 7.8 MB peak
+RSS (about 14M relationships per second on one core), 3.5 GB as tuples.
+`authzdata load` wrote the 1m graph into `authz serve` (in memory, same
+4 vCPU container) in 4.7 s, 215k relationships per second, in batches of
+1,000 with four writes in flight; touches are idempotent, so a load can be
+repeated or resumed with `-from`.
 
 ## authzbench
 
