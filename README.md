@@ -362,6 +362,7 @@ continued. The toolgate image keeps `/toolgate` and `/mcpfake` as links to
 $ go build -o authz ./cmd/authz
 $ ./authz mcp policy test toolgate/examples/policy.json toolgate/examples/policy_cases.json
 PASS 17 cases: 17 passed, 0 failed
+$ ./authz mcp policy explain toolgate/examples/policy.json call.json   # every rule a call reaches and what each found
 $ ./authz mcp audit verify audit.jsonl          # names the first line that was changed, removed or reordered
 $ ./toolgate/examples/demo.sh                   # authz mcpfake and authz mcp, every scenario end to end
 ```
@@ -610,7 +611,7 @@ cmd/authz/internal/gateway  authz gateway (formerly wicket): environment, startu
 cmd/authz/internal/fakeidp  authz fakeidp: test OIDC and SAML identity provider
 internal/authn/...          sign-on: forward-auth server, OIDC, SAML, sessions, policy
 internal/authn/golden/e2e   the gateway's end-to-end golden transcripts
-cmd/authz/internal/mcp      authz mcp (formerly toolgate): config, serve, audit verify, policy test, tokens
+cmd/authz/internal/mcp      authz mcp (formerly toolgate): config, serve, audit verify, policy test and explain, tokens
 cmd/authz/internal/auditcmd authz audit verify, prove, query, export and keygen: the platform's audit log across its segments, with schemas and signed checkpoints
 cmd/authz/internal/mcpfake  authz mcpfake: a small MCP server with a file sandbox, to try the gateway
 internal/agents/...         agent traffic: MCP and JSON-RPC, policy, approvals, pins, limits, audit chain

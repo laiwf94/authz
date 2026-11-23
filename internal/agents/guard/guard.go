@@ -153,6 +153,19 @@ func compileCustom(kind, p string) (*regexp.Regexp, error) {
 // Denies reports whether the guard has deny patterns.
 func (g *Guard) Denies() bool { return g != nil && len(g.deny) > 0 }
 
+// DenyNames lists the deny patterns in the order they are tried, by the
+// names a refusal reports: a built-in name or deny_patterns[i].
+func (g *Guard) DenyNames() []string {
+	if g == nil {
+		return nil
+	}
+	out := make([]string, len(g.deny))
+	for i, d := range g.deny {
+		out[i] = d.name
+	}
+	return out
+}
+
 // Report says what Apply did.
 type Report struct {
 	// Refused names the deny pattern that matched (a built-in name or

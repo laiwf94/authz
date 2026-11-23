@@ -216,6 +216,19 @@ naming `"*"` are merged into each upstream's list in file order), so a
 decision scans only rules that can apply. A 200-rule policy decides in about
 0.3 µs plus argument validation.
 
+An explanation (`authz mcp policy explain`, `POST /admin/explain`) is the
+same evaluation with a trace collector switched on, not a second evaluator
+kept in step with the first: `Policy.Explain` and `Policy.DecideAt` share
+one function, and every place the collector records what a rule found is
+behind a nil test, so the decision of every `tools/call` builds no reason it
+does not return. `TestDecideUntracedAllocations` holds the untraced path to
+the allocations it had before the collector existed, and
+`BenchmarkExplain` compares the two: over BenchmarkEvaluate's 201-rule
+policy a decision takes about 0.4 µs (one allocation, its reason) and its
+explanation about 9 µs, most of it the per-rule notes. When the engine runs
+in process, an explanation explains its relationship checks instead of
+checking them, so each carries the engine's trace; deciding never does.
+
 ## Identity
 
 Static keys are random strings (`authz mcp token new` makes one with 260

@@ -166,6 +166,45 @@ FAIL alice reads a note
 FAIL 17 cases: 16 passed, 1 failed
 ```
 
+A single decision can be explained. `authz mcp policy explain POLICY CALL`
+decides the call a file describes (a case without its name and
+expectations, plus an optional `"checks"` map answering relationship
+checks) and lists every rule for the upstream in the order they are tried,
+with what each found: `subject_not_matched`, `tool_not_matched`,
+`arguments_not_matched`, `conditions_false`, `conditions_unknown`,
+`check_denied` (or another check outcome), `matched` or `not_reached`. The
+rule that decided is marked `*` and the allow rule a default deny names is
+marked `!`; `-json` prints the same object as the admin API:
+
+```console
+$ cat call.json
+{"subject": {"agent": "alice-bot", "scopes": ["files:read"]},
+ "call": {"tool": "fake.read_file", "arguments": {"path": "../etc/passwd"}}}
+$ authz mcp policy explain examples/policy.json call.json
+fake.read_file: deny by default-deny
+  reason: arguments rejected by rule read-workspace: $.path: path must not contain ".." segments
+  constraint rule: read-workspace
+  at: unknown time
+  policy: d461acec378432fec4b2666a799fd6a0906bf805b91966c4353202d391152c0f
+rules (5 for this upstream, 0 for others):
+    deny  no-dotenv                arguments_not_matched: $.path: does not match the required pattern
+  ! allow read-workspace           arguments_not_matched: $.path: path must not contain ".." segments
+    allow echo                     tool_not_matched
+    allow web-allowlist            tool_not_matched
+    allow translate-needs-approval tool_not_matched
+```
+
+On a running gateway, `POST /admin/explain` takes the same body without
+`checks` and explains the call against the live policy, at the gateway's
+clock unless the body gives `now`, asking the gateway's engine for
+relationship checks (with the engine's trace of each, at most
+`trace_nodes`, default 1000, when it runs in process). It adds what the
+gateway would answer before the upstream: `outcome` (`allowed`,
+`unknown_tool`, `quarantined`, `denied` or `check_unavailable`), the
+JSON-RPC `code` and HTTP `status`, and `tool_known` from the last tool
+list. It counts no limit or quota, creates no approval, asks no upstream,
+writes no audit record and moves no tool call metric.
+
 Rules marked `requires_approval` park the call until an administrator approves
 or denies it on a separate admin API. A grant is bound to the agent, the tool
 and the SHA-256 of the exact arguments, works once and expires. The agent's
@@ -392,6 +431,7 @@ Nothing in a deployment has to change on the day it moves to authz:
 | `toolgate [serve]` | `authz mcp [serve]` | same flags, exit codes and signals (SIGHUP reloads the policy) |
 | `toolgate audit verify [-head HASH] FILE` | `authz mcp audit verify ...` | same output; logs written by toolgate verify and are continued |
 | `toolgate policy test [-v] POLICY CASES` | `authz mcp policy test ...` | case files run unchanged |
+| (new) | `authz mcp policy explain [-json] POLICY CALL` | also under the old name |
 | `toolgate token new\|hash\|mint` | `authz mcp token ...` | |
 | `mcpfake` | `authz mcpfake` | |
 | `TOOLGATE_<NAME>` | `AUTHZ_MCP_<NAME>` | either spelling; both set to different values stops the command at start |
@@ -428,6 +468,7 @@ Administrators (`TOOLGATE_ADMIN_ADDR`, default `127.0.0.1:8081`), `Authorization
 | `GET /admin/tools` | Pinned tool definitions; quarantined ones show the pending definition and hash. |
 | `POST /admin/tools/{name}/approve` | `{"hash":"<pending_hash>"}` trusts the reviewed definition (compare-and-set). |
 | `GET /admin/policy`, `POST /admin/policy/reload` | Policy hash; reload now (also on SIGHUP and when the file changes). |
+| `POST /admin/explain` | A call file (`subject`, `call`, optional `now` and `trace_nodes`) decided against the live policy without being made: every rule considered and what it found, the decision, and the `outcome`, `code` and `status` the agent would get. 400 for an invalid call, 415 without `application/json`. |
 | `GET /admin/audit/head` | Record count and head hash, to anchor the log elsewhere. |
 | `GET /admin/audit/checkpoint` | The newest signed checkpoint of the audit log (`text/plain`, a signed note), with `AUTHZ_AUDIT_SIGNING_KEY` set; 404 without it. Check a log against it with `authz audit verify -key`. |
 | `POST /admin/audit/export` | The newest signed checkpoint, as `GET /admin/audit/checkpoint` serves it, recorded as exported beside the log: with `AUTHZ_AUDIT_RETAIN_BYTES` or `AUTHZ_AUDIT_RETAIN_AGE`, retention may then remove the rotated-out segments it covers. 404 without a signing key. |
@@ -547,7 +588,7 @@ and its commands are `authz mcp` and `authz mcpfake` in the one `authz`
 binary. Paths below are relative to the repository root:
 
 ```text
-cmd/authz/internal/mcp         `authz mcp`: gateway entry point, `audit verify`, `policy test` and `token`
+cmd/authz/internal/mcp         `authz mcp`: gateway entry point, `audit verify`, `policy test`, `policy explain` and `token`
 cmd/authz/internal/mcpfake     `authz mcpfake`: a small MCP server to put behind the gateway
 internal/agents/gateway        the enforcement pipeline, upstream tool caching, admin API, configuration
 internal/agents/mcp            MCP over Streamable HTTP: dual-era server, client, header rules

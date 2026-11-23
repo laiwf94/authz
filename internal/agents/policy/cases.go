@@ -207,55 +207,21 @@ func compileCase(fc fileCase) (Case, error) {
 	if fc.Name == "" || len(fc.Name) > 200 || strings.ContainsFunc(fc.Name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return c, errors.New("name must be 1 to 200 bytes with no control characters")
 	}
-	s := fc.Subject
-	if !ValidAgentID(s.Agent) {
-		return c, fmt.Errorf("subject agent %q is not a valid agent id", s.Agent)
+	var err error
+	if c.Subject, err = compileSubject(fc.Subject); err != nil {
+		return c, err
 	}
-	if len(s.Scopes) > MaxSelectorItems {
-		return c, fmt.Errorf("subject has more than %d scopes", MaxSelectorItems)
+	if fc.Now != "" && fc.Call == nil {
+		return c, errors.New(`"now" applies only to call cases`)
 	}
-	for _, sc := range s.Scopes {
-		if !ValidScope(sc) {
-			return c, fmt.Errorf("subject scope %q is not valid", sc)
-		}
-	}
-	if len(s.Owner) > 128 || strings.ContainsFunc(s.Owner, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-		return c, errors.New("subject owner must be at most 128 bytes with no control characters")
-	}
-	c.Subject = Subject{AgentID: s.Agent, Owner: s.Owner, Scopes: s.Scopes}
-	if ss := s.Session; ss != nil {
-		for _, v := range []string{ss.Auth, ss.Issuer, ss.KeyID, ss.Protocol} {
-			if len(v) > 256 || strings.ContainsFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-				return c, errors.New("subject session values must be at most 256 bytes with no control characters")
-			}
-		}
-		c.Subject.Session = Session{Auth: ss.Auth, Issuer: ss.Issuer, KeyID: ss.KeyID, Protocol: ss.Protocol}
-	}
-	if fc.Now != "" {
-		if fc.Call == nil {
-			return c, errors.New(`"now" applies only to call cases`)
-		}
-		t, err := time.Parse(time.RFC3339Nano, fc.Now)
-		if err != nil || t.IsZero() {
-			return c, fmt.Errorf("now %q must be an RFC 3339 time such as 2026-12-05T10:00:00+01:00", fc.Now)
-		}
-		c.Now = t
+	if c.Now, err = parseNow(fc.Now); err != nil {
+		return c, err
 	}
 	if fc.Checks != nil && fc.Call == nil {
 		return c, errors.New(`"checks" applies only to call cases`)
 	}
-	if len(fc.Checks) > MaxSelectorItems {
-		return c, fmt.Errorf("checks has more than %d entries", MaxSelectorItems)
-	}
-	for k, v := range fc.Checks {
-		if _, err := parseCheckText(k); err != nil {
-			return c, fmt.Errorf("checks: %w", err)
-		}
-		switch v {
-		case CheckAllowed, CheckDenied, CheckConditional, CheckUnavailable:
-		default:
-			return c, fmt.Errorf("checks: %q must be \"allowed\", \"denied\", \"conditional\" or \"unavailable\"", k)
-		}
+	if err := validateChecks(fc.Checks); err != nil {
+		return c, err
 	}
 	c.Checks = fc.Checks
 	e := fc.Expect
@@ -268,15 +234,8 @@ func compileCase(fc fileCase) (Case, error) {
 			return c, err
 		}
 		c.Call = &ref
-		if fc.Call.Arguments != nil {
-			v, err := jsonrpc.DecodeValue(fc.Call.Arguments)
-			if err != nil {
-				return c, fmt.Errorf("arguments: %w", err)
-			}
-			if _, ok := v.(map[string]any); !ok {
-				return c, errors.New("arguments must be an object")
-			}
-			c.Arguments = v
+		if c.Arguments, err = decodeArguments(fc.Call.Arguments); err != nil {
+			return c, err
 		}
 		switch e.Decision {
 		case string(Allow):
@@ -351,6 +310,81 @@ func compileCase(fc fileCase) (Case, error) {
 		return c, errors.New(`a case needs "call" or "list"`)
 	}
 	return c, nil
+}
+
+// compileSubject validates a subject as a case or call file gives it.
+func compileSubject(s fileSubject) (Subject, error) {
+	var out Subject
+	if !ValidAgentID(s.Agent) {
+		return out, fmt.Errorf("subject agent %q is not a valid agent id", s.Agent)
+	}
+	if len(s.Scopes) > MaxSelectorItems {
+		return out, fmt.Errorf("subject has more than %d scopes", MaxSelectorItems)
+	}
+	for _, sc := range s.Scopes {
+		if !ValidScope(sc) {
+			return out, fmt.Errorf("subject scope %q is not valid", sc)
+		}
+	}
+	if len(s.Owner) > 128 || strings.ContainsFunc(s.Owner, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return out, errors.New("subject owner must be at most 128 bytes with no control characters")
+	}
+	out = Subject{AgentID: s.Agent, Owner: s.Owner, Scopes: s.Scopes}
+	if ss := s.Session; ss != nil {
+		for _, v := range []string{ss.Auth, ss.Issuer, ss.KeyID, ss.Protocol} {
+			if len(v) > 256 || strings.ContainsFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+				return out, errors.New("subject session values must be at most 256 bytes with no control characters")
+			}
+		}
+		out.Session = Session{Auth: ss.Auth, Issuer: ss.Issuer, KeyID: ss.KeyID, Protocol: ss.Protocol}
+	}
+	return out, nil
+}
+
+// parseNow parses a call's time; "" is the zero, unknown time.
+func parseNow(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil || t.IsZero() {
+		return time.Time{}, fmt.Errorf("now %q must be an RFC 3339 time such as 2026-12-05T10:00:00+01:00", s)
+	}
+	return t, nil
+}
+
+// validateChecks validates the answers a file gives relationship checks.
+func validateChecks(checks map[string]string) error {
+	if len(checks) > MaxSelectorItems {
+		return fmt.Errorf("checks has more than %d entries", MaxSelectorItems)
+	}
+	for k, v := range checks {
+		if _, err := parseCheckText(k); err != nil {
+			return fmt.Errorf("checks: %w", err)
+		}
+		switch v {
+		case CheckAllowed, CheckDenied, CheckConditional, CheckUnavailable:
+		default:
+			return fmt.Errorf("checks: %q must be \"allowed\", \"denied\", \"conditional\" or \"unavailable\"", k)
+		}
+	}
+	return nil
+}
+
+// decodeArguments decodes a call's arguments, which must be an object,
+// with numbers as json.Number; absent arguments are nil.
+func decodeArguments(raw json.RawMessage) (any, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	v, err := jsonrpc.DecodeValue(raw)
+	if err != nil {
+		return nil, fmt.Errorf("arguments: %w", err)
+	}
+	if _, ok := v.(map[string]any); !ok {
+		return nil, errors.New("arguments must be an object")
+	}
+	return v, nil
 }
 
 // Mismatch is one difference between what a case expects and what the

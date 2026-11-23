@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/laiwf94/authz/internal/authz/check"
 	"github.com/laiwf94/authz/internal/authz/engine"
 	"github.com/laiwf94/authz/internal/authz/store"
 )
@@ -82,6 +83,7 @@ type CheckTrace struct {
 	Result  engine.CheckResult  // when the engine answered
 	Err     error               // bad input, or the engine's error
 	Cached  bool                // answered by an earlier identical check of this call
+	trace   *check.Trace        // the engine's trace, when the call is explained
 }
 
 // String is the check as "resource#permission@subject: outcome".
@@ -336,6 +338,7 @@ type checker struct {
 	engErr error // why there is no engine, when eng is nil
 	seen   map[checkKey]CheckTrace
 	traces []CheckTrace
+	tr     *tracer // set when the call is explained
 }
 
 type checkKey struct {
@@ -364,7 +367,13 @@ func (k *checker) run(r *Rule, s Subject, args any) CheckTrace {
 			t.Err = errors.New("no authorization engine in this process")
 		}
 	default:
-		res, err := k.eng.Check(k.ctx, req)
+		var res engine.CheckResult
+		var err error
+		if ex, ok := k.eng.(Explainer); ok && k.tr != nil {
+			res, t.trace, err = ex.Explain(k.ctx, req, k.tr.nodes)
+		} else {
+			res, err = k.eng.Check(k.ctx, req)
+		}
 		switch {
 		case err != nil:
 			t.Outcome, t.Err = CheckUnavailable, err

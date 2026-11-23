@@ -6,6 +6,7 @@
 //	authz mcp serve -config FILE               run the gateway from the mcp section of the platform file
 //	authz mcp audit verify [-head HASH] FILE   check an audit log's hash chain
 //	authz mcp policy test [-v] POLICY CASES    check a policy against a file of expected decisions
+//	authz mcp policy explain [-json] POLICY CALL  explain how a policy decides the call a file describes
 //	authz mcp token new                        print a new static agent key and its SHA-256 for the config
 //	authz mcp token hash < key                 print the SHA-256 of a static key read from stdin
 //	authz mcp token mint -sub ID [-owner NAME] [-scope "a b"] [-ttl 15m]
@@ -60,6 +61,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -93,6 +95,7 @@ const usage = `usage: authz mcp [serve]
        authz mcp serve -config file
        authz mcp audit verify [-head HASH] FILE
        authz mcp policy test [-v] POLICY CASES
+       authz mcp policy explain [-json] POLICY CALL
        authz mcp token new | hash | mint -sub ID [-owner NAME] [-scope "a b"] [-ttl 15m]
 
 Runs the MCP gateway (formerly toolgate) with no arguments or "serve".
@@ -150,8 +153,13 @@ different values is an error:
 Logs are JSON lines on standard output. SIGHUP reloads the policy; SIGINT or
 SIGTERM drains requests and stops. Exit codes: 0 success, 1 failure (a failed
 verification or policy case, or a gateway that cannot start), 2 usage or
-unreadable input for "audit verify" and "policy test". "audit verify" checks a
-rotated log across its segments (FILE.<first record number> beside FILE).
+unreadable input for "audit verify", "policy test" and "policy explain".
+"audit verify" checks a rotated log across its segments (FILE.<first record
+number> beside FILE). "policy explain" decides the call in CALL, a JSON file
+of a subject, a call and optionally its time and check answers, and prints
+every rule it reached and what each found (-json: the same object as the
+admin API's POST /admin/explain gives for the policy); it exits 0 whatever
+the decision.
 `
 
 // Run is the "authz mcp" subcommand. It takes toolgate's arguments after
@@ -234,6 +242,8 @@ func cliAs(ctx context.Context, prog string, args []string, getenv func(string) 
 		return auditVerify(prog, args[2:], stdout, stderr)
 	case args[0] == "policy" && len(args) > 1 && args[1] == "test":
 		return policyTest(prog, args[2:], stdout, stderr)
+	case args[0] == "policy" && len(args) > 1 && args[1] == "explain":
+		return policyExplain(prog, args[2:], stdout, stderr)
 	case args[0] == "token" && len(args) > 1:
 		err = token(prog, args[1], args[2:], getenv, stdin, stdout)
 	default:
@@ -656,6 +666,50 @@ func policyTest(prog string, args []string, stdout, stderr io.Writer) int {
 	rep := policy.RunCases(p, cs)
 	rep.WriteText(stdout, *verbose)
 	if rep.Failed > 0 {
+		return 1
+	}
+	return 0
+}
+
+// policyExplain explains how a policy decides the call a file describes.
+// It exits 0 when the call is explained, whatever the decision, and 2 when
+// either file cannot be read or parsed.
+func policyExplain(prog string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("policy explain", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	asJSON := fs.Bool("json", false, "print the explanation as JSON")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 2 {
+		fmt.Fprintln(stderr, "usage: "+prog+" policy explain [-json] POLICY CALL")
+		return 2
+	}
+	src, err := readLimited(fs.Arg(0), policy.MaxBytes)
+	if err != nil {
+		fmt.Fprintln(stderr, prog+":", err)
+		return 2
+	}
+	p, err := policy.Parse(src)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %s: %v\n", prog, fs.Arg(0), err)
+		return 2
+	}
+	if src, err = readLimited(fs.Arg(1), policy.MaxCallBytes); err != nil {
+		fmt.Fprintln(stderr, prog+":", err)
+		return 2
+	}
+	c, err := policy.ParseCall(src)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %s: %v\n", prog, fs.Arg(1), err)
+		return 2
+	}
+	_, ex := p.ExplainCall(c)
+	if !*asJSON {
+		ex.WriteText(stdout)
+		return 0
+	}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(ex); err != nil {
+		fmt.Fprintln(stderr, prog+":", err)
 		return 1
 	}
 	return 0

@@ -419,10 +419,16 @@ func (p *Policy) Decide(ctx context.Context, s Subject, upstream, tool string, a
 // DecideAt is Decide at the time now. The zero time is an unknown time:
 // windows, and when expressions that read now, are then unknown.
 func (p *Policy) DecideAt(ctx context.Context, now time.Time, s Subject, upstream, tool string, args any, get CheckEngine) Decision {
+	return p.decideAt(ctx, now, s, upstream, tool, args, get, nil)
+}
+
+// decideAt is DecideAt with the trace collector tr, nil when the call is
+// not explained.
+func (p *Policy) decideAt(ctx context.Context, now time.Time, s Subject, upstream, tool string, args any, get CheckEngine, tr *tracer) Decision {
 	if args == nil {
 		args = map[string]any{}
 	}
-	k := checker{ctx: ctx, get: get}
+	k := checker{ctx: ctx, get: get, tr: tr}
 	in := condInput{now: now, s: s, up: upstream, tool: tool, args: args}
 	d := p.decide(&k, &in, s, upstream, tool, args)
 	d.Checks = k.traces
@@ -430,30 +436,62 @@ func (p *Policy) DecideAt(ctx context.Context, now time.Time, s Subject, upstrea
 }
 
 func (p *Policy) decide(k *checker, in *condInput, s Subject, upstream, tool string, args any) Decision {
+	// Every k.tr test guards what only an explanation needs, so that
+	// deciding a call builds no reasons it does not return.
 	cands := p.candidates(upstream)
 	for _, i := range cands {
 		r := p.Rules[i]
-		if r.Effect != Deny || !r.matchesSubject(s) || !r.matchesTool(tool) {
+		if r.Effect != Deny {
 			continue
 		}
-		if r.args != nil && r.args.Validate(args) != nil {
+		if !r.matchesSubject(s) || !r.matchesTool(tool) {
+			if k.tr != nil {
+				k.tr.mismatch(i, r, s)
+			}
 			continue
+		}
+		if r.args != nil {
+			if err := r.args.Validate(args); err != nil {
+				if k.tr != nil {
+					k.tr.note(i, ResultArgumentsNotMatched, err.Error())
+				}
+				continue
+			}
 		}
 		if r.conditional() {
 			// Fail closed: only a definite "false" lets the call past.
 			out, why := r.conditions(in)
 			if out == condFalse {
+				if k.tr != nil {
+					k.tr.note(i, ResultConditionsFalse, why)
+				}
 				continue
 			}
 			if out == condUnknown {
+				if k.tr != nil {
+					k.tr.note(i, ResultConditionsUnknown, why+"; a deny rule counts that as true")
+				}
 				return Decision{RuleID: r.ID, Reason: "rule " + r.ID + " forbids this call: " + why}
 			}
 		}
 		if r.check == nil {
+			if k.tr != nil {
+				k.tr.note(i, ResultMatched, "")
+			}
 			return Decision{RuleID: r.ID, Reason: "rule " + r.ID + " forbids this call"}
 		}
 		// Fail closed: only a definite "denied" lets the call past.
-		switch t := k.run(r, s, args); t.Outcome {
+		t := k.run(r, s, args)
+		if k.tr != nil {
+			res, why := ResultCheckPrefix+t.Outcome, checkWhy(t)
+			if t.Outcome == CheckAllowed {
+				res, why = ResultMatched, ""
+			} else if t.Outcome != CheckDenied {
+				why += "; a deny rule counts that as allowed"
+			}
+			k.tr.noteCheck(i, k, res, why)
+		}
+		switch t.Outcome {
 		case CheckDenied:
 			continue
 		case CheckAllowed:
@@ -472,13 +510,22 @@ func (p *Policy) decide(k *checker, in *condInput, s Subject, upstream, tool str
 	var unavailableErr error
 	for _, i := range cands {
 		r := p.Rules[i]
-		if r.Effect != Allow || !r.matchesSubject(s) || !r.matchesTool(tool) {
+		if r.Effect != Allow {
+			continue
+		}
+		if !r.matchesSubject(s) || !r.matchesTool(tool) {
+			if k.tr != nil {
+				k.tr.mismatch(i, r, s)
+			}
 			continue
 		}
 		if r.args != nil {
 			if err := r.args.Validate(args); err != nil {
 				if constraint == nil {
 					constraint, constraintWhy = r, "arguments rejected by rule "+r.ID+": "+err.Error()
+				}
+				if k.tr != nil {
+					k.tr.note(i, ResultArgumentsNotMatched, err.Error())
 				}
 				continue
 			}
@@ -487,6 +534,13 @@ func (p *Policy) decide(k *checker, in *condInput, s Subject, upstream, tool str
 			if out, why := r.conditions(in); out != condTrue {
 				if constraint == nil {
 					constraint, constraintWhy, constraintKind = r, why, byCondition
+				}
+				if k.tr != nil {
+					res := ResultConditionsFalse
+					if out == condUnknown {
+						res = ResultConditionsUnknown
+					}
+					k.tr.note(i, res, why)
 				}
 				continue
 			}
@@ -500,8 +554,16 @@ func (p *Policy) decide(k *checker, in *condInput, s Subject, upstream, tool str
 				} else if constraint == nil {
 					constraint, constraintWhy, constraintKind = r, "relationship check of rule "+r.ID+" is "+checkWhy(t), byCheck
 				}
+				if k.tr != nil {
+					k.tr.noteCheck(i, k, ResultCheckPrefix+t.Outcome, checkWhy(t))
+				}
 				continue
 			}
+			if k.tr != nil {
+				k.tr.noteCheck(i, k, ResultMatched, "")
+			}
+		} else if k.tr != nil {
+			k.tr.note(i, ResultMatched, "")
 		}
 		return Decision{Allowed: true, RuleID: r.ID, Reason: "allowed by rule " + r.ID,
 			RequiresApproval: r.RequiresApproval, Output: r.Output, Limits: r.limits}
