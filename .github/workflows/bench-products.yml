@@ -4,8 +4,10 @@
 # SpiceDB and OpenFGA from bench/products/compose.yaml at their pinned
 # versions and production settings, loads the same seeded dataset into
 # each, loads part of it again, and fails if any of 2,000 sampled checks
-# is answered differently. It runs when the setups, the datasets or the
-# loader change, and on demand at a larger SIZE.
+# is answered differently, then runs a short authzbench mix of check, bulk
+# check, lookup and write against each product's own API with no error
+# allowed. It runs when the setups, the datasets, the loader or the
+# runner change, and on demand at a larger SIZE.
 name: bench-products
 
 on:
@@ -15,12 +17,16 @@ on:
       - bench/products/**
       - bench/datasets/**
       - bench/cmd/authzdata/**
+      - bench/cmd/authzbench/**
+      - bench/ops/**
       - .github/workflows/bench-products.yml
   pull_request:
     paths:
       - bench/products/**
       - bench/datasets/**
       - bench/cmd/authzdata/**
+      - bench/cmd/authzbench/**
+      - bench/ops/**
       - .github/workflows/bench-products.yml
   workflow_dispatch:
     inputs:

@@ -9,7 +9,9 @@
 # to 127.0.0.1 only. The keys below are the benchmark's own, public on
 # purpose like the dataset's passwords; set the variables to replace them.
 # BENCH_CPUS and BENCH_MEMORY set the limits of each server and each
-# database (default 2 CPUs and 4 GB).
+# database (default 2 CPUs and 4 GB); BENCH_LOOKUP_LIMIT is the most
+# objects one OpenFGA ListObjects answers (default 100, authzbench's
+# -lookup-limit).
 
 name: authz-bench
 
@@ -134,6 +136,9 @@ services:
       - --check-iterator-cache-enabled
       - --list-objects-iterator-cache-enabled
       - --cache-controller-enabled
+      # ListObjects takes no limit in the request; the benchmark's lookups
+      # ask the other products for 100 (authzbench -lookup-limit).
+      - --listObjects-max-results=${BENCH_LOOKUP_LIMIT:-100}
       - --log-format=json
       - --log-level=warn
     depends_on:

@@ -11,6 +11,13 @@
 //	bulk_check    POST /v1/check/bulk of -bulk-items checks on -api
 //	lookup        POST /v1/lookup/resources on -api
 //	write         POST /v1/relationships/write of one touch on -api
+//
+// With -target spicedb or -target openfga, those four ask the same
+// questions of SpiceDB's HTTP gateway (/v1/permissions/check, checkbulk,
+// resources and /v1/relationships/write) or OpenFGA's API (check,
+// batch-check, list-objects and write in the -openfga-store store),
+// keyed by AUTHZBENCH_SPICEDB_KEY or AUTHZBENCH_OPENFGA_KEY.
+//
 //	forward_auth  GET -forward-url with a session cookie, as nginx asks
 //	oidc_login    a whole browser sign-in from -login-start
 //	mcp_call      a JSON-RPC tools/call on -mcp-url
@@ -44,6 +51,7 @@ import (
 	"github.com/laiwf94/authz/bench/hdr"
 	"github.com/laiwf94/authz/bench/load"
 	"github.com/laiwf94/authz/bench/ops"
+	"github.com/laiwf94/authz/bench/products"
 )
 
 func main() {
@@ -62,7 +70,7 @@ type options struct {
 	seed                                  uint64
 	out, label, cacert                    string
 	maxErrorRate                          float64
-	api, consistency                      string
+	api, consistency, target, fgaStore    string
 	keys                                  ops.Keyspace
 	permission, relation                  string
 	bulkItems, lookupLimit                int
@@ -95,6 +103,8 @@ func parse(args []string, stderr io.Writer) (*options, error) {
 
 	fs.StringVar(&o.api, "api", "", "authorization API base URL, such as http://127.0.0.1:8080")
 	fs.StringVar(&o.consistency, "consistency", "minimize_latency", "consistency mode of reads")
+	fs.StringVar(&o.target, "target", ops.ProductAuthz, "API -api speaks: authz, spicedb (its HTTP gateway) or openfga")
+	fs.StringVar(&o.fgaStore, "openfga-store", "authz-bench", "OpenFGA store the dataset was loaded into, with -target openfga")
 	fs.StringVar(&o.keys.ResourceType, "resource-type", "doc", "type of the resources checked")
 	fs.StringVar(&o.keys.ResourcePrefix, "resource-prefix", "", "resource IDs are this followed by a number")
 	fs.IntVar(&o.keys.Resources, "resources", 1000, "resource IDs are drawn from this many")
@@ -203,6 +213,14 @@ func readSessions(path string) ([]*http.Cookie, error) {
 	return out, sc.Err()
 }
 
+// apiKeyEnv is the environment variable holding each target's key, the
+// same ones authzdata reads.
+var apiKeyEnv = map[string]string{
+	ops.ProductAuthz:   "AUTHZBENCH_API_KEY",
+	ops.ProductSpiceDB: "AUTHZBENCH_SPICEDB_KEY",
+	ops.ProductOpenFGA: "AUTHZBENCH_OPENFGA_KEY",
+}
+
 // build makes the operations of the mix, signing in first if forward-auth
 // needs sessions.
 func build(ctx context.Context, o *options, getenv func(string) string, names []string, weights []int) ([]load.Weighted, error) {
@@ -210,15 +228,37 @@ func build(ctx context.Context, o *options, getenv func(string) string, names []
 	if err != nil {
 		return nil, err
 	}
-	api := &ops.API{Client: client, URL: strings.TrimSuffix(o.api, "/"), Key: getenv("AUTHZBENCH_API_KEY"), Consistency: o.consistency}
+	keyEnv, ok := apiKeyEnv[o.target]
+	if !ok {
+		return nil, fmt.Errorf("-target %q, want %s, %s or %s", o.target, ops.ProductAuthz, ops.ProductSpiceDB, ops.ProductOpenFGA)
+	}
+	api := &ops.API{Client: client, URL: strings.TrimSuffix(o.api, "/"), Key: getenv(keyEnv), Consistency: o.consistency, Product: o.target}
+	apiReady := false
 	needAPI := func(name string) error {
+		if apiReady {
+			return nil
+		}
 		if o.api == "" {
 			return fmt.Errorf("%s needs -api", name)
 		}
 		if api.Key == "" {
-			return fmt.Errorf("%s needs the API key in AUTHZBENCH_API_KEY", name)
+			return fmt.Errorf("%s needs the API key in %s", name, keyEnv)
 		}
-		return o.keys.Validate()
+		if err := o.keys.Validate(); err != nil {
+			return err
+		}
+		if o.target == ops.ProductOpenFGA {
+			fga := products.NewOpenFGA(client, api.URL, api.Key, o.fgaStore)
+			if err := fga.Find(ctx); err != nil {
+				return err
+			}
+			api.Store, api.Model = fga.Store, fga.Model
+		}
+		if err := api.Validate(); err != nil {
+			return err
+		}
+		apiReady = true
+		return nil
 	}
 	var login *ops.Login
 	loginOp := func() (*ops.Login, error) {
@@ -249,8 +289,12 @@ func build(ctx context.Context, o *options, getenv func(string) string, names []
 			if err := needAPI(name); err != nil {
 				return nil, err
 			}
-			if o.bulkItems < 1 || o.bulkItems > 100 {
-				return nil, fmt.Errorf("-bulk-items %d, want 1 to 100", o.bulkItems)
+			most := 100
+			if o.target == ops.ProductOpenFGA {
+				most = ops.OpenFGAMaxBatchCheck
+			}
+			if o.bulkItems < 1 || o.bulkItems > most {
+				return nil, fmt.Errorf("-bulk-items %d, want 1 to %d for %s", o.bulkItems, most, o.target)
 			}
 			op = &ops.BulkCheck{API: api, Keys: o.keys, Permission: o.permission, Items: o.bulkItems}
 		case "lookup":

@@ -278,7 +278,66 @@ const OpenFGAMaxBatch = 100
 // writes it. Running it again changes nothing.
 func (o *OpenFGA) Setup(ctx context.Context) error {
 	l := o.loader(nil)
-	answer, err := l.Call(ctx, http.MethodGet, "/stores?name="+url.QueryEscape(o.StoreName), nil)
+	if err := o.findStore(ctx); err != nil {
+		return err
+	}
+	if o.Store == "" {
+		body, _ := json.Marshal(map[string]string{"name": o.StoreName})
+		answer, err := l.Call(ctx, http.MethodPost, "/stores", body)
+		if err != nil {
+			return err
+		}
+		var created struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(answer, &created); err != nil || created.ID == "" {
+			return fmt.Errorf("openfga create store: no id in %q", answer)
+		}
+		o.Store = created.ID
+	}
+	if same, err := o.findModel(ctx); err != nil || same {
+		return err
+	}
+	answer, err := l.Call(ctx, http.MethodPost, "/stores/"+o.Store+"/authorization-models", OpenFGAModel)
+	if err != nil {
+		return err
+	}
+	var written struct {
+		ID string `json:"authorization_model_id"`
+	}
+	if err := json.Unmarshal(answer, &written); err != nil || written.ID == "" {
+		return fmt.Errorf("openfga write model: no authorization_model_id in %q", answer)
+	}
+	o.Model = written.ID
+	return nil
+}
+
+// Find sets Store and Model from a store Setup prepared, writing nothing:
+// the store named StoreName must exist and its newest model must be
+// OpenFGAModel. The benchmark runner uses it, so that a run against a
+// store that was never loaded fails before it starts instead of
+// measuring an empty one.
+func (o *OpenFGA) Find(ctx context.Context) error {
+	if err := o.findStore(ctx); err != nil {
+		return err
+	}
+	if o.Store == "" {
+		return fmt.Errorf("openfga: no store named %q; load the dataset first", o.StoreName)
+	}
+	same, err := o.findModel(ctx)
+	if err != nil {
+		return err
+	}
+	if !same {
+		return fmt.Errorf("openfga: the newest model of store %q is not the dataset's; load the dataset first", o.StoreName)
+	}
+	return nil
+}
+
+// findStore sets Store to the ID of the store named StoreName, or to ""
+// when there is none.
+func (o *OpenFGA) findStore(ctx context.Context) error {
+	answer, err := o.loader(nil).Call(ctx, http.MethodGet, "/stores?name="+url.QueryEscape(o.StoreName), nil)
 	if err != nil {
 		return err
 	}
@@ -298,50 +357,36 @@ func (o *OpenFGA) Setup(ctx context.Context) error {
 			break
 		}
 	}
-	if o.Store == "" {
-		body, _ := json.Marshal(map[string]string{"name": o.StoreName})
-		if answer, err = l.Call(ctx, http.MethodPost, "/stores", body); err != nil {
-			return err
-		}
-		var created struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(answer, &created); err != nil || created.ID == "" {
-			return fmt.Errorf("openfga create store: no id in %q", answer)
-		}
-		o.Store = created.ID
-	}
-	answer, err = l.Call(ctx, http.MethodGet, "/stores/"+o.Store+"/authorization-models?page_size=1", nil)
+	return nil
+}
+
+// findModel reports whether Store's newest model is OpenFGAModel, and
+// sets Model to its ID when it is.
+func (o *OpenFGA) findModel(ctx context.Context) (bool, error) {
+	answer, err := o.loader(nil).Call(ctx, http.MethodGet, "/stores/"+o.Store+"/authorization-models?page_size=1", nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var models struct {
 		Models []json.RawMessage `json:"authorization_models"`
 	}
 	if err := json.Unmarshal(answer, &models); err != nil {
-		return fmt.Errorf("openfga models: %w", err)
+		return false, fmt.Errorf("openfga models: %w", err)
 	}
 	if len(models.Models) > 0 {
 		if id, same := sameModel(models.Models[0]); same {
 			o.Model = id
-			return nil
+			return true, nil
 		}
 	}
-	if answer, err = l.Call(ctx, http.MethodPost, "/stores/"+o.Store+"/authorization-models", OpenFGAModel); err != nil {
-		return err
-	}
-	var written struct {
-		ID string `json:"authorization_model_id"`
-	}
-	if err := json.Unmarshal(answer, &written); err != nil || written.ID == "" {
-		return fmt.Errorf("openfga write model: no authorization_model_id in %q", answer)
-	}
-	o.Model = written.ID
-	return nil
+	return false, nil
 }
 
 // sameModel reports whether a model read back from OpenFGA is
-// OpenFGAModel, and its ID.
+// OpenFGAModel, and its ID. OpenFGA answers a model with every field of
+// its protobuf message, unset ones as "", null, [] or {} (module,
+// source_info, condition, metadata, an empty relations map), so both
+// sides are compared without them.
 func sameModel(raw json.RawMessage) (string, bool) {
 	var got, want struct {
 		ID      string          `json:"id"`
@@ -354,14 +399,46 @@ func sameModel(raw json.RawMessage) (string, bool) {
 	return got.ID, got.Version == want.Version && canonical(got.Types) == canonical(want.Types)
 }
 
-// canonical re-encodes JSON with sorted keys and no spaces.
+// canonical re-encodes JSON with sorted keys, no spaces and no unset
+// fields.
 func canonical(raw json.RawMessage) string {
 	var v any
 	if json.Unmarshal(raw, &v) != nil {
 		return ""
 	}
+	v, _ = prune(v, "")
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// prune drops unset values: null, "", [] and {}, except an empty object
+// under "this", which is a direct assignment and means something. It
+// reports whether v itself is set.
+func prune(v any, key string) (any, bool) {
+	switch x := v.(type) {
+	case nil:
+		return nil, false
+	case string:
+		return x, x != ""
+	case []any:
+		out := x[:0]
+		for _, e := range x {
+			if e, ok := prune(e, ""); ok {
+				out = append(out, e)
+			}
+		}
+		return out, len(out) > 0
+	case map[string]any:
+		for k, e := range x {
+			if e, ok := prune(e, k); ok {
+				x[k] = e
+			} else {
+				delete(x, k)
+			}
+		}
+		return x, len(x) > 0 || key == "this"
+	}
+	return v, true
 }
 
 // Writes is POST /stores/{store}/write of tuple keys against Model, with

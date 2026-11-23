@@ -101,6 +101,12 @@ ships.
 - `--log-format=json --log-level=warn`: structured logs, none per request.
 - `--max-tuples-per-write` stays at 100, so the loader writes 100 tuples a
   request.
+- `--listObjects-max-results=100` (`BENCH_LOOKUP_LIMIT`): ListObjects has
+  no limit in the request, and its default of 1,000 results would have it
+  answer ten times what SpiceDB and authz are asked for (authzbench's
+  `-lookup-limit`, 100). authzbench fails an answer over its limit, so the
+  two settings cannot drift apart unnoticed. `--max-checks-per-batch-check`
+  stays at 50, so a bulk check has at most 50 items.
 
 **PostgreSQL**, the same for both: `shared_buffers=1GB` (a quarter of the
 memory limit, PostgreSQL's own starting point), `effective_cache_size=3GB`,
@@ -131,7 +137,11 @@ docker compose -f bench/products/compose.yaml --profile authz --profile spicedb 
 - **OpenFGA** keeps data in a store: the loader finds the store named
   `authz-bench` or creates it, and writes `openfga-model.json` unless the
   store's newest model already is that model, so running it again changes
-  nothing. Tuples go to `POST /stores/{id}/write`, 100 a request, with
+  nothing. OpenFGA reads a model back with every unset field filled in
+  (`module`, `source_info`, `condition`, empty `relations` and
+  `metadata`), so the comparison leaves out empty values, except a direct
+  assignment's `this: {}`; `testdata/openfga-readback.json` is a model as
+  v1.23.0 answered it. Tuples go to `POST /stores/{id}/write`, 100 a request, with
   `on_duplicate: ignore`, so a write is idempotent like a touch and a load
   can be repeated or resumed with `-from`. Checks name the model.
 - **Checks**: `crosscheck` draws questions from the seed (two in three
@@ -153,7 +163,12 @@ AUTHZ_URL=http://127.0.0.1:18080 bench/products/verify.sh   # a running authz in
 It checks `openfga-model.json` against the pinned CLI's
 `fga model transform` of `authzdata schema -format openfga`, starts the
 three products on fresh volumes, loads the dataset into each, loads part of
-it again, and cross-checks. Its runs on a 4 vCPU container, with authz
+it again, and cross-checks. Last it runs `authzbench` against each
+product's own API: check 40, bulk check 20, lookup 20 and write 20 at
+`BENCH_RATE` (20 a second) for `BENCH_DURATION` (10 s), which must keep up
+with no error at all (the result files are left in the work directory
+with `KEEP=1`). That is a proof that every operation of the benchmark
+works on every product, not a measurement. Its runs on a 4 vCPU container, with authz
 running on the host (`AUTHZ_URL`) and SpiceDB, OpenFGA and their databases
 in Docker:
 
@@ -165,5 +180,22 @@ in Docker:
 SpiceDB was loaded with 8 writes in flight and OpenFGA with 16, authz with
 4. After the 1m load the containers held 83 MB (SpiceDB) and 676 MB (its
 PostgreSQL), 47 MB (OpenFGA) and 1.1 GB (its PostgreSQL). These are load
-times through each product's write API, not benchmark results: the measured numbers come from `authzbench` on these setups, with
-the collection and report of the following tasks.
+times through each product's write API, not benchmark results: the
+measured numbers come from `authzbench` on these setups, with the
+collection and report of the following tasks.
+
+The authzbench step at 100k, 20 requests a second for 10 s, Zipf 1.1 (200
+requests each, 0 errors, 0 unsent), p50 and p99 in milliseconds:
+
+| Operation | authz | SpiceDB | OpenFGA |
+| --- | ---: | ---: | ---: |
+| check | 1.5 / 2.4 | 17.4 / 300.5 | 2.5 / 5.3 |
+| bulk check (10) | 4.4 / 7.2 | 23.1 / 322.5 | 11.1 / 24.2 |
+| lookup (100) | 32.1 / 55.3 | 200.5 / 493.9 | 8.2 / 18.5 |
+| write | 1.5 / 2.8 | 5.1 / 82.2 | 3.1 / 4.4 |
+
+Too few requests for a p99 to mean much, but two things show already.
+SpiceDB's LookupResources costs about 170 ms of CPU at this size, so lookups
+at 20 a second take most of its 2 CPUs and slow its checks too; at 100
+requests a second it fell 13 s behind. authz's lookups are four times
+slower than OpenFGA's ListObjects, the first target for W11.

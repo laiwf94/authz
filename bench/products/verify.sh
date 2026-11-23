@@ -5,7 +5,9 @@
 # compose.yaml on fresh volumes, loads the same seeded dataset into each
 # through its write API, loads it a second time to show the writes are
 # idempotent, and asks all three the same sampled checks: one different
-# answer fails the run.
+# answer fails the run. Then it runs a short authzbench mix of check, bulk
+# check, lookup and write against each product's own API, which must have
+# no errors.
 #
 #   bench/products/verify.sh            # SIZE=100k N=2000
 #   SIZE=1m N=5000 bench/products/verify.sh
@@ -81,6 +83,24 @@ echo "== load again: touches and ignored duplicates change nothing"
 
 echo "== cross-check $N questions"
 "$data" crosscheck -size "$SIZE" -n "$N" -authz "$authz" -spicedb "$spicedb" -openfga "$openfga"
+
+echo "== authzbench against each: check, bulk check, lookup, write"
+# A short, slow mix, not a measurement: it proves each product answers
+# every operation of the benchmark, through its own API, without an error.
+# The rate is one every product keeps up with on 2 CPUs: SpiceDB's
+# lookups take about 170 ms each at 100k, and at 100/s it falls behind.
+go build -o "$WORK/authzbench" "$REPO/bench/cmd/authzbench"
+keyspace=$("$data" manifest -size "$SIZE" | jq -r '.authzbench_flags | join(" ")')
+bench() { # TARGET URL [FLAGS...]
+  # shellcheck disable=SC2086
+  "$WORK/authzbench" -target "$1" -api "$2" "${@:3}" $keyspace -zipf 1.1 \
+    -mix check=40,bulk_check=20,lookup=20,write=20 -rate "${BENCH_RATE:-20}" \
+    -warmup 2s -duration "${BENCH_DURATION:-10s}" -workers 16 -max-error-rate 0 \
+    -label "$1-$SIZE" -out "$WORK/bench-$1.json"
+}
+bench authz "$authz"
+bench spicedb "$spicedb"
+bench openfga "$openfga" -openfga-store authz-bench
 
 echo "== memory after the load"
 docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' \

@@ -117,6 +117,36 @@ do not speak the newer revision. Keys come from the environment only
 (`AUTHZBENCH_API_KEY`, `AUTHZBENCH_MCP_KEY`), so they never appear in a
 process list or in the result file, which records the arguments.
 
+**SpiceDB and OpenFGA.** `-target spicedb` or `-target openfga` sends the
+four authorization operations to that product's own API instead, asking
+the same questions, so one mix and one keyspace measure all three products
+(`bench/products` sets them up):
+
+| Name | SpiceDB (HTTP gateway) | OpenFGA | Counted as a success when |
+| --- | --- | --- | --- |
+| `check` | `POST /v1/permissions/check` | `POST /stores/{id}/check` | a has or has-not permissionship; a boolean `allowed` |
+| `bulk_check` | `POST /v1/permissions/checkbulk` | `POST /stores/{id}/batch-check`, at most 50 items (its default limit) | every item answered (SpiceDB: in order, for the resource asked; OpenFGA: every correlation ID), none with an error |
+| `lookup` | `POST /v1/permissions/resources` with `optionalLimit`, a stream of one result a line | `POST /stores/{id}/list-objects` | every result a has-permission answer of `-resource-type`, no error in the stream, at most `-lookup-limit` |
+| `write` | `POST /v1/relationships/write`, one `OPERATION_TOUCH` | `POST /stores/{id}/write`, one tuple with `on_duplicate: ignore` | a `writtenAt` token; 200 with an object |
+
+`-consistency` takes `minimize_latency` (SpiceDB `minimizeLatency`, OpenFGA
+`MINIMIZE_LATENCY`) or `fully_consistent` (`fullyConsistent`,
+`HIGHER_CONSISTENCY`) for them. OpenFGA's requests name the store
+`-openfga-store` (default `authz-bench`) and its newest model, found before
+the run without writing anything; a store that is missing or whose model
+is not the dataset's stops the run. ListObjects takes no limit in the
+request, so `compose.yaml` sets the server's to 100 and an answer over
+`-lookup-limit` fails rather than being compared with smaller ones. The
+keys are `AUTHZBENCH_SPICEDB_KEY` and `AUTHZBENCH_OPENFGA_KEY`, as for
+`authzdata`.
+
+```
+export AUTHZBENCH_SPICEDB_KEY=bench-spicedb-key-0123456789 AUTHZBENCH_OPENFGA_KEY=bench-openfga-key-0123456789
+flags=$(./authzdata manifest -size 1m | jq -r '.authzbench_flags | join(" ")')
+./authzbench -target spicedb -api http://127.0.0.1:18443 $flags -mix check=70,bulk_check=10,lookup=10,write=10 -rate 500
+./authzbench -target openfga -api http://127.0.0.1:18081 $flags -mix check=70,bulk_check=10,lookup=10,write=10 -rate 500
+```
+
 ### Method
 
 The load is open loop. Send times are fixed before the run from `-rate`

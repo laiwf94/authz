@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -177,20 +178,41 @@ func zipf(rng *rand.Rand, s float64, n int) int {
 }
 
 func (k Keyspace) resource(rng *rand.Rand) string {
-	return fmt.Sprintf("%s:%s%d", k.ResourceType, k.ResourcePrefix, k.draw(rng, k.Resources))
+	return k.ResourceType + ":" + k.resourceID(rng)
 }
 
 func (k Keyspace) subject(rng *rand.Rand) string {
-	return fmt.Sprintf("%s:%s%d", k.SubjectType, k.SubjectPrefix, k.draw(rng, k.Subjects))
+	return k.SubjectType + ":" + k.subjectID(rng)
 }
 
-// API is an authorization API server: its base URL (without /v1) and key.
+// resourceID and subjectID are the ID parts alone, for APIs that take an
+// object's type and ID apart.
+func (k Keyspace) resourceID(rng *rand.Rand) string {
+	return k.ResourcePrefix + strconv.Itoa(k.draw(rng, k.Resources))
+}
+
+func (k Keyspace) subjectID(rng *rand.Rand) string {
+	return k.SubjectPrefix + strconv.Itoa(k.draw(rng, k.Subjects))
+}
+
+// API is an authorization API server: its base URL and key, and which
+// product's API it speaks. Check, BulkCheck, Lookup and Write ask the same
+// question of any of them, each in the product's own requests (see
+// products.go), so one mix measures authz, SpiceDB and OpenFGA alike.
 type API struct {
 	Client *http.Client
-	URL    string
-	Key    string
-	// Consistency is the mode reads ask for; empty means minimize_latency.
+	URL    string // base URL, without /v1
+	Key    string // sent as a bearer token by every product
+	// Consistency is the mode reads ask for, in authz's names; empty means
+	// minimize_latency. SpiceDB and OpenFGA take minimize_latency and
+	// fully_consistent, translated by Validate's rules.
 	Consistency string
+	// Product is the API spoken: ProductAuthz (the default when empty),
+	// ProductSpiceDB (its HTTP gateway) or ProductOpenFGA.
+	Product string
+	// Store and Model are the OpenFGA store and authorization model IDs
+	// every OpenFGA request names.
+	Store, Model string
 }
 
 func (a *API) header() http.Header {
@@ -217,6 +239,12 @@ func (*Check) Name() string { return "check" }
 
 // Do implements load.Op.
 func (c *Check) Do(ctx context.Context, _ int, rng *rand.Rand) error {
+	switch c.API.Product {
+	case ProductSpiceDB:
+		return c.spiceDB(ctx, rng)
+	case ProductOpenFGA:
+		return c.openFGA(ctx, rng)
+	}
 	var out struct {
 		Allowed *bool `json:"allowed"`
 	}
@@ -245,6 +273,12 @@ func (*BulkCheck) Name() string { return "bulk_check" }
 
 // Do implements load.Op.
 func (b *BulkCheck) Do(ctx context.Context, _ int, rng *rand.Rand) error {
+	switch b.API.Product {
+	case ProductSpiceDB:
+		return b.spiceDB(ctx, rng)
+	case ProductOpenFGA:
+		return b.openFGA(ctx, rng)
+	}
 	items := make([]map[string]string, b.Items)
 	for i := range items {
 		items[i] = map[string]string{"resource": b.Keys.resource(rng), "permission": b.Permission, "subject": b.Keys.subject(rng)}
@@ -274,7 +308,8 @@ func (b *BulkCheck) Do(ctx context.Context, _ int, rng *rand.Rand) error {
 }
 
 // Lookup is POST /v1/lookup/resources: the ResourceType resources a drawn
-// subject has Permission on, up to Limit (0 for the server's default).
+// subject has Permission on, up to Limit (0 for the server's default). An
+// answer with more than Limit resources fails.
 type Lookup struct {
 	API        *API
 	Keys       Keyspace
@@ -287,6 +322,12 @@ func (*Lookup) Name() string { return "lookup" }
 
 // Do implements load.Op.
 func (l *Lookup) Do(ctx context.Context, _ int, rng *rand.Rand) error {
+	switch l.API.Product {
+	case ProductSpiceDB:
+		return l.spiceDB(ctx, rng)
+	case ProductOpenFGA:
+		return l.openFGA(ctx, rng)
+	}
 	var out struct {
 		IDs *[]string `json:"resource_ids"`
 	}
@@ -301,7 +342,7 @@ func (l *Lookup) Do(ctx context.Context, _ int, rng *rand.Rand) error {
 	if out.IDs == nil {
 		return errors.New("lookup answer has no resource_ids")
 	}
-	return nil
+	return l.within(len(*out.IDs))
 }
 
 // Write is POST /v1/relationships/write of one touch: a drawn resource's
@@ -317,6 +358,12 @@ func (*Write) Name() string { return "write" }
 
 // Do implements load.Op.
 func (w *Write) Do(ctx context.Context, _ int, rng *rand.Rand) error {
+	switch w.API.Product {
+	case ProductSpiceDB:
+		return w.spiceDB(ctx, rng)
+	case ProductOpenFGA:
+		return w.openFGA(ctx, rng)
+	}
 	rel := w.Keys.resource(rng) + "#" + w.Relation + "@" + w.Keys.subject(rng)
 	var out struct {
 		WrittenAt string `json:"written_at"`

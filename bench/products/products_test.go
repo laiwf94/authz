@@ -353,4 +353,66 @@ func TestOpenFGAModel(t *testing.T) {
 	if _, same := sameModel([]byte(`{"schema_version":"1.1","type_definitions":[]}`)); same {
 		t.Error("an empty model is the same as the dataset's")
 	}
+	// The model as OpenFGA v1.23.0 read it back after a write, with every
+	// unset field filled in, is the same model.
+	readback, err := os.ReadFile("testdata/openfga-readback.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, same := sameModel(readback); !same || id != "01M83A0TT19Y4VRQ13QJ06WJDP" {
+		t.Errorf("the read-back model is not the dataset's: %s %v", id, same)
+	}
+	// A direct assignment ("this": {}) taken away is a different model.
+	changed := strings.Replace(string(readback), `"member": {
+          "this": {}
+        }`, `"member": {}`, 1)
+	if changed == string(readback) {
+		t.Fatal("the fixture changed shape")
+	}
+	if _, same := sameModel([]byte(changed)); same {
+		t.Error("a model without group#member's direct assignment is the same as the dataset's")
+	}
+}
+
+// Find reads the store and model Setup prepared and writes nothing; a
+// missing store or a newer, different model fails it.
+func TestOpenFGAFind(t *testing.T) {
+	ctx := context.Background()
+	fga := &productstest.OpenFGA{Engine: productstest.NewEngine(t, key)}
+	srv := httptest.NewServer(fga)
+	defer srv.Close()
+	o := NewOpenFGA(nil, srv.URL, key, "bench")
+	if err := o.Find(ctx); err == nil || !strings.Contains(err.Error(), `no store named "bench"`) {
+		t.Fatalf("find before setup: %v", err)
+	}
+	if stores, models, _, _ := fga.Counts(); stores != 0 || models != 0 {
+		t.Fatalf("find wrote %d stores, %d models", stores, models)
+	}
+	if err := o.Setup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f := NewOpenFGA(nil, srv.URL, key, "bench")
+	if err := f.Find(ctx); err != nil || f.Store != o.Store || f.Model != o.Model {
+		t.Fatalf("find: %v, %s %s, want %s %s", err, f.Store, f.Model, o.Store, o.Model)
+	}
+	// Another model written later is the store's newest.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/stores/"+o.Store+"/authorization-models",
+		strings.NewReader(`{"schema_version":"1.1","type_definitions":[{"type":"user"}]}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("write model: %v %v", err, resp)
+	}
+	resp.Body.Close()
+	if err := f.Find(ctx); err == nil || !strings.Contains(err.Error(), "not the dataset's") {
+		t.Fatalf("find with another model: %v", err)
+	}
+	if _, models, _, _ := fga.Counts(); models != 2 {
+		t.Fatalf("%d models, want 2", models)
+	}
+	bad := NewOpenFGA(nil, "http://127.0.0.1:1", key, "bench")
+	if err := bad.Find(ctx); err == nil {
+		t.Fatal("find with no server succeeded")
+	}
 }

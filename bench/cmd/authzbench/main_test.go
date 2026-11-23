@@ -13,7 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/laiwf94/authz/bench/datasets"
 	"github.com/laiwf94/authz/bench/hdr"
+	"github.com/laiwf94/authz/bench/products"
+	"github.com/laiwf94/authz/bench/products/productstest"
 	"github.com/laiwf94/authz/internal/agents/fakeserver"
 	"github.com/laiwf94/authz/internal/authz/api"
 	"github.com/laiwf94/authz/internal/authz/store"
@@ -268,5 +271,74 @@ func TestRunMCPSessionAndCancel(t *testing.T) {
 	if code := run(ctx, []string{"-mix", "mcp_call=1", "-mcp-url", mcpURL, "-mcp-tools", "@" + tools}, env(keys), &out, &errb); code != 2 ||
 		!strings.Contains(errb.String(), "context canceled") {
 		t.Fatalf("cancelled: %d %q", code, errb.String())
+	}
+}
+
+// productServers loads one small dataset into the SpiceDB and OpenFGA
+// fakes and returns their URLs and the keyspace flags for it.
+func productServers(t *testing.T) (spiceURL, fgaURL string, flags []string) {
+	t.Helper()
+	g, err := datasets.Size(3_000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	spice := httptest.NewServer(&productstest.SpiceDB{Engine: productstest.NewEngine(t, benchKey)})
+	t.Cleanup(spice.Close)
+	fga := httptest.NewServer(&productstest.OpenFGA{Engine: productstest.NewEngine(t, benchKey), ListObjectsMaxResults: 100})
+	t.Cleanup(fga.Close)
+	for _, tg := range []products.Target{products.NewSpiceDB(nil, spice.URL, benchKey), products.NewOpenFGA(nil, fga.URL, benchKey, "bench")} {
+		if err := tg.Setup(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tg.Loader().Load(ctx, g, 0, g.Count()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return spice.URL, fga.URL, []string{"-resource-prefix", "d", "-resources", fmt.Sprint(g.Docs),
+		"-subject-prefix", "u", "-subjects", fmt.Sprint(g.Users), "-relation", "editor"}
+}
+
+// The four authorization operations against SpiceDB's and OpenFGA's APIs,
+// keyed from their own variables, with no errors.
+func TestRunProducts(t *testing.T) {
+	spiceURL, fgaURL, flags := productServers(t)
+	for _, tc := range []struct {
+		target, url, env string
+		extra            []string
+	}{
+		{"spicedb", spiceURL, "AUTHZBENCH_SPICEDB_KEY", nil},
+		{"openfga", fgaURL, "AUTHZBENCH_OPENFGA_KEY", []string{"-openfga-store", "bench", "-consistency", "fully_consistent"}},
+	} {
+		args := append([]string{"-target", tc.target, "-api", tc.url, "-mix", "check=40,bulk_check=20,lookup=20,write=20",
+			"-rate", "200", "-warmup", "100ms", "-duration", "500ms", "-workers", "8", "-bulk-items", "50"}, flags...)
+		code, stdout, stderr := runBench(t, map[string]string{tc.env: benchKey}, append(args, tc.extra...)...)
+		if code != 0 || !strings.Contains(stdout, "pass\n") || !strings.Contains(stdout, "bulk_check") {
+			t.Fatalf("%s: exit %d\n%s\n%s", tc.target, code, stdout, stderr)
+		}
+	}
+}
+
+func TestRunProductsUsage(t *testing.T) {
+	spiceURL, fgaURL, _ := productServers(t)
+	spiceKey := map[string]string{"AUTHZBENCH_SPICEDB_KEY": benchKey}
+	fgaKey := map[string]string{"AUTHZBENCH_OPENFGA_KEY": benchKey}
+	for _, tc := range []struct {
+		args []string
+		env  map[string]string
+		want string
+	}{
+		{[]string{"-target", "zanzibar"}, keys, `-target "zanzibar"`},
+		{[]string{"-target", "spicedb", "-api", spiceURL}, keys, "AUTHZBENCH_SPICEDB_KEY"},
+		{[]string{"-target", "openfga", "-api", fgaURL}, keys, "AUTHZBENCH_OPENFGA_KEY"},
+		{[]string{"-target", "spicedb", "-api", spiceURL, "-consistency", "at_least_as_fresh"}, spiceKey, "no equivalent"},
+		{[]string{"-target", "openfga", "-api", fgaURL, "-openfga-store", "missing"}, fgaKey, `no store named "missing"`},
+		{[]string{"-target", "openfga", "-api", fgaURL, "-openfga-store", "bench", "-mix", "bulk_check=1", "-bulk-items", "51"}, fgaKey, "want 1 to 50 for openfga"},
+		{[]string{"-target", "spicedb", "-api", spiceURL, "-mix", "check=1,lookup=1", "-resources", "0"}, spiceKey, "counts must be positive"},
+	} {
+		code, _, stderr := runBench(t, tc.env, tc.args...)
+		if code != 2 || !strings.Contains(stderr, tc.want) {
+			t.Errorf("%v: exit %d, stderr %q, want 2 and %q", tc.args, code, stderr, tc.want)
+		}
 	}
 }

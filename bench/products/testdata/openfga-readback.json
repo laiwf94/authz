@@ -1,0 +1,247 @@
+{
+  "id": "01M83A0TT19Y4VRQ13QJ06WJDP",
+  "schema_version": "1.1",
+  "type_definitions": [
+    {
+      "type": "user",
+      "relations": {},
+      "metadata": null
+    },
+    {
+      "type": "group",
+      "relations": {
+        "member": {
+          "this": {}
+        }
+      },
+      "metadata": {
+        "relations": {
+          "member": {
+            "directly_related_user_types": [
+              {
+                "type": "user",
+                "condition": ""
+              },
+              {
+                "type": "group",
+                "relation": "member",
+                "condition": ""
+              }
+            ],
+            "module": "",
+            "source_info": null
+          }
+        },
+        "module": "",
+        "source_info": null
+      }
+    },
+    {
+      "type": "folder",
+      "relations": {
+        "parent": {
+          "this": {}
+        },
+        "view": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "object": "",
+                  "relation": "viewer"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "object": "",
+                    "relation": "parent"
+                  },
+                  "computedUserset": {
+                    "object": "",
+                    "relation": "view"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "viewer": {
+          "this": {}
+        }
+      },
+      "metadata": {
+        "relations": {
+          "parent": {
+            "directly_related_user_types": [
+              {
+                "type": "folder",
+                "condition": ""
+              }
+            ],
+            "module": "",
+            "source_info": null
+          },
+          "view": {
+            "directly_related_user_types": [],
+            "module": "",
+            "source_info": null
+          },
+          "viewer": {
+            "directly_related_user_types": [
+              {
+                "type": "user",
+                "condition": ""
+              },
+              {
+                "type": "user",
+                "wildcard": {},
+                "condition": ""
+              },
+              {
+                "type": "group",
+                "relation": "member",
+                "condition": ""
+              }
+            ],
+            "module": "",
+            "source_info": null
+          }
+        },
+        "module": "",
+        "source_info": null
+      }
+    },
+    {
+      "type": "doc",
+      "relations": {
+        "banned": {
+          "this": {}
+        },
+        "edit": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "object": "",
+                  "relation": "owner"
+                }
+              },
+              {
+                "computedUserset": {
+                  "object": "",
+                  "relation": "editor"
+                }
+              }
+            ]
+          }
+        },
+        "editor": {
+          "this": {}
+        },
+        "owner": {
+          "this": {}
+        },
+        "parent": {
+          "this": {}
+        },
+        "view": {
+          "difference": {
+            "base": {
+              "union": {
+                "child": [
+                  {
+                    "computedUserset": {
+                      "object": "",
+                      "relation": "edit"
+                    }
+                  },
+                  {
+                    "tupleToUserset": {
+                      "tupleset": {
+                        "object": "",
+                        "relation": "parent"
+                      },
+                      "computedUserset": {
+                        "object": "",
+                        "relation": "view"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "subtract": {
+              "computedUserset": {
+                "object": "",
+                "relation": "banned"
+              }
+            }
+          }
+        }
+      },
+      "metadata": {
+        "relations": {
+          "banned": {
+            "directly_related_user_types": [
+              {
+                "type": "user",
+                "condition": ""
+              }
+            ],
+            "module": "",
+            "source_info": null
+          },
+          "edit": {
+            "directly_related_user_types": [],
+            "module": "",
+            "source_info": null
+          },
+          "editor": {
+            "directly_related_user_types": [
+              {
+                "type": "user",
+                "condition": ""
+              },
+              {
+                "type": "group",
+                "relation": "member",
+                "condition": ""
+              }
+            ],
+            "module": "",
+            "source_info": null
+          },
+          "owner": {
+            "directly_related_user_types": [
+              {
+                "type": "user",
+                "condition": ""
+              }
+            ],
+            "module": "",
+            "source_info": null
+          },
+          "parent": {
+            "directly_related_user_types": [
+              {
+                "type": "folder",
+                "condition": ""
+              }
+            ],
+            "module": "",
+            "source_info": null
+          },
+          "view": {
+            "directly_related_user_types": [],
+            "module": "",
+            "source_info": null
+          }
+        },
+        "module": "",
+        "source_info": null
+      }
+    }
+  ],
+  "conditions": {}
+}

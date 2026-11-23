@@ -24,8 +24,11 @@ import (
 )
 
 const (
-	spiceDBMaxBatch = 1000 // SpiceDB's default --write-relationships-max-updates-per-call
-	openFGAMaxBatch = 100  // OpenFGA's default --max-tuples-per-write
+	spiceDBMaxBatch  = 1000 // SpiceDB's default --write-relationships-max-updates-per-call
+	spiceDBMaxLookup = 1000 // SpiceDB's default --max-lookup-resources-limit
+	openFGAMaxBatch  = 100  // OpenFGA's default --max-tuples-per-write
+	openFGAMaxChecks = 50   // OpenFGA's default --max-checks-per-batch-check
+	openFGAMaxList   = 1000 // OpenFGA's default --listObjects-max-results
 )
 
 // Engine is a real authz API in process, holding the dataset's schema.
@@ -85,6 +88,18 @@ func (e *Engine) Check(resource, permission, subject string) (bool, int, []byte)
 	return out.Allowed, code, b
 }
 
+// Lookup is a fully consistent lookup of up to limit resources of typ
+// that subject has permission on.
+func (e *Engine) Lookup(typ, permission, subject string, limit int) ([]string, int, []byte) {
+	code, b := e.Do(http.MethodPost, "/v1/lookup/resources", map[string]any{"resource_type": typ, "permission": permission,
+		"subject": subject, "limit": limit, "consistency": map[string]string{"mode": "fully_consistent"}})
+	var out struct {
+		IDs []string `json:"resource_ids"`
+	}
+	json.Unmarshal(b, &out)
+	return out.IDs, code, b
+}
+
 // Touch writes rels (type:id#relation@subject) as touches.
 func (e *Engine) Touch(rels []string) (int, []byte) {
 	ups := make([]map[string]string, len(rels))
@@ -119,9 +134,11 @@ func reply(w http.ResponseWriter, status int, v any) {
 }
 
 // SpiceDB answers SpiceDB's HTTP gateway API (schema write, relationship
-// writes, checks) from an engine. It refuses fields SpiceDB does not have,
-// more updates than SpiceDB's default limit, and any operation but a
-// touch. Its key is the engine's.
+// writes, checks, bulk checks and LookupResources, streamed one JSON
+// message a line as the gateway does) from an engine. It refuses fields
+// SpiceDB does not have, more updates or a higher lookup limit than
+// SpiceDB's defaults allow, and any operation but a touch. Its key is the
+// engine's.
 type SpiceDB struct {
 	Engine *Engine
 	// Answer, when set, is the permissionship every check answers.
@@ -213,39 +230,122 @@ func (f *SpiceDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/v1/permissions/check":
 		var in struct {
 			Consistency map[string]bool `json:"consistency"`
-			Resource    spiceObject     `json:"resource"`
-			Permission  string          `json:"permission"`
-			Subject     spiceRef        `json:"subject"`
+			spiceCheck
 		}
 		if !decode(w, r, &in) {
 			return
 		}
-		if len(in.Consistency) != 1 || !(in.Consistency["fullyConsistent"] || in.Consistency["minimizeLatency"]) {
-			http.Error(w, "bad consistency", http.StatusBadRequest)
+		if !spiceConsistent(w, in.Consistency) {
 			return
 		}
-		ok, code, b := f.Engine.Check(in.Resource.Type+":"+in.Resource.ID, in.Permission, in.Subject.String())
+		p, ok := f.check(w, in.spiceCheck)
+		if !ok {
+			return
+		}
+		reply(w, 200, map[string]any{"checkedAt": map[string]string{"token": "GhUK"}, "permissionship": p})
+	case "/v1/permissions/checkbulk":
+		var in struct {
+			Consistency map[string]bool `json:"consistency"`
+			Items       []spiceCheck    `json:"items"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		if !spiceConsistent(w, in.Consistency) {
+			return
+		}
+		pairs := make([]map[string]any, len(in.Items))
+		for i, it := range in.Items {
+			pairs[i] = map[string]any{"request": it}
+			ok, code, b := f.Engine.Check(it.Resource.Type+":"+it.Resource.ID, it.Permission, it.Subject.String())
+			if code != http.StatusOK {
+				pairs[i]["error"] = map[string]any{"code": 9, "message": string(bytes.TrimSpace(b))}
+				continue
+			}
+			pairs[i]["item"] = map[string]string{"permissionship": permissionship(ok, f.Answer)}
+		}
+		reply(w, 200, map[string]any{"checkedAt": map[string]string{"token": "GhUK"}, "pairs": pairs})
+	case "/v1/permissions/resources":
+		var in struct {
+			Consistency map[string]bool `json:"consistency"`
+			Type        string          `json:"resourceObjectType"`
+			Permission  string          `json:"permission"`
+			Subject     spiceRef        `json:"subject"`
+			Limit       int             `json:"optionalLimit"`
+		}
+		if !decode(w, r, &in) {
+			return
+		}
+		if !spiceConsistent(w, in.Consistency) {
+			return
+		}
+		if in.Limit < 0 || in.Limit > spiceDBMaxLookup {
+			http.Error(w, "limit over --max-lookup-resources-limit", http.StatusBadRequest)
+			return
+		}
+		limit := in.Limit
+		if limit == 0 {
+			limit = spiceDBMaxLookup
+		}
+		ids, code, b := f.Engine.Lookup(in.Type, in.Permission, in.Subject.String(), limit)
 		if code != http.StatusOK {
 			http.Error(w, string(b), http.StatusBadRequest)
 			return
 		}
-		p := "PERMISSIONSHIP_NO_PERMISSION"
-		if ok {
-			p = "PERMISSIONSHIP_HAS_PERMISSION"
+		// The gateway streams: 200 and one {"result": ...} per line,
+		// nothing at all for no resources.
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		for _, id := range ids {
+			enc.Encode(map[string]any{"result": map[string]any{"lookedUpAt": map[string]string{"token": "GhUK"},
+				"resourceObjectId": id, "permissionship": "LOOKUP_PERMISSIONSHIP_HAS_PERMISSION"}})
 		}
-		if f.Answer != "" {
-			p = f.Answer
-		}
-		reply(w, 200, map[string]any{"checkedAt": map[string]string{"token": "GhUK"}, "permissionship": p})
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-// OpenFGA answers OpenFGA's HTTP API (stores, models, writes, checks)
-// from an engine, with stores and models as OpenFGA keeps them. Writes
-// must name the newest model, carry at most 100 tuples and ignore
-// duplicates; a check must name a model. The engine already has the
+// spiceCheck is one CheckPermission question.
+type spiceCheck struct {
+	Resource   spiceObject `json:"resource"`
+	Permission string      `json:"permission"`
+	Subject    spiceRef    `json:"subject"`
+}
+
+func spiceConsistent(w http.ResponseWriter, c map[string]bool) bool {
+	if len(c) != 1 || !(c["fullyConsistent"] || c["minimizeLatency"]) {
+		http.Error(w, "bad consistency", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func permissionship(ok bool, override string) string {
+	if override != "" {
+		return override
+	}
+	if ok {
+		return "PERMISSIONSHIP_HAS_PERMISSION"
+	}
+	return "PERMISSIONSHIP_NO_PERMISSION"
+}
+
+// check answers one question, writing a 400 when the engine refuses it.
+func (f *SpiceDB) check(w http.ResponseWriter, c spiceCheck) (string, bool) {
+	ok, code, b := f.Engine.Check(c.Resource.Type+":"+c.Resource.ID, c.Permission, c.Subject.String())
+	if code != http.StatusOK {
+		http.Error(w, string(b), http.StatusBadRequest)
+		return "", false
+	}
+	return permissionship(ok, f.Answer), true
+}
+
+// OpenFGA answers OpenFGA's HTTP API (stores, models, writes, checks,
+// batch checks and list objects) from an engine, with stores and models as
+// OpenFGA keeps them. Writes must name the newest model, carry at most 100
+// tuples and ignore duplicates; a check must name a model; a batch check
+// takes at most 50 checks with distinct correlation IDs, and list objects
+// answers at most ListObjectsMaxResults objects. The engine already has the
 // dataset's schema: the fake does not compile models. Its key is the
 // engine's.
 type OpenFGA struct {
@@ -253,6 +353,9 @@ type OpenFGA struct {
 	// DropUsersets ignores written tuples whose subject is a set such as
 	// group:g1#member, so that it answers some checks wrongly.
 	DropUsersets bool
+	// ListObjectsMaxResults is --listObjects-max-results; 0 is OpenFGA's
+	// default, 1000.
+	ListObjectsMaxResults int
 
 	mu       sync.Mutex
 	stores   map[string]string // name -> id
@@ -358,23 +461,15 @@ func (f *OpenFGA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]any{})
 	case len(parts) == 3 && parts[0] == "stores" && parts[2] == "check":
 		var in struct {
-			Model       string `json:"authorization_model_id"`
-			Consistency string `json:"consistency"`
-			Tuple       struct {
-				User     string `json:"user"`
-				Relation string `json:"relation"`
-				Object   string `json:"object"`
-			} `json:"tuple_key"`
+			Model       string   `json:"authorization_model_id"`
+			Consistency string   `json:"consistency"`
+			Tuple       fgaTuple `json:"tuple_key"`
 		}
 		if !f.known(parts[1]) {
 			http.Error(w, "no store", http.StatusNotFound)
 			return
 		}
-		if !decode(w, r, &in) {
-			return
-		}
-		if in.Model == "" || (in.Consistency != "HIGHER_CONSISTENCY" && in.Consistency != "MINIMIZE_LATENCY") {
-			http.Error(w, "bad check", http.StatusBadRequest)
+		if !decode(w, r, &in) || !fgaRead(w, in.Model, in.Consistency) {
 			return
 		}
 		ok, code, b := f.Engine.Check(in.Tuple.Object, in.Tuple.Relation, in.Tuple.User)
@@ -383,9 +478,87 @@ func (f *OpenFGA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reply(w, 200, map[string]any{"allowed": ok, "resolution": ""})
+	case len(parts) == 3 && parts[0] == "stores" && parts[2] == "batch-check":
+		var in struct {
+			Model       string `json:"authorization_model_id"`
+			Consistency string `json:"consistency"`
+			Checks      []struct {
+				Tuple fgaTuple `json:"tuple_key"`
+				ID    string   `json:"correlation_id"`
+			} `json:"checks"`
+		}
+		if !f.known(parts[1]) {
+			http.Error(w, "no store", http.StatusNotFound)
+			return
+		}
+		if !decode(w, r, &in) || !fgaRead(w, in.Model, in.Consistency) {
+			return
+		}
+		if len(in.Checks) == 0 || len(in.Checks) > openFGAMaxChecks {
+			http.Error(w, `{"code":"validation_error","message":"batchCheck received too many checks"}`, http.StatusBadRequest)
+			return
+		}
+		result := map[string]any{}
+		for _, c := range in.Checks {
+			if _, dup := result[c.ID]; dup || c.ID == "" {
+				http.Error(w, `{"code":"validation_error","message":"bad correlation id"}`, http.StatusBadRequest)
+				return
+			}
+			ok, code, b := f.Engine.Check(c.Tuple.Object, c.Tuple.Relation, c.Tuple.User)
+			if code != http.StatusOK {
+				result[c.ID] = map[string]any{"error": map[string]string{"input_error": "validation_error", "message": string(bytes.TrimSpace(b))}}
+				continue
+			}
+			result[c.ID] = map[string]any{"allowed": ok}
+		}
+		reply(w, 200, map[string]any{"result": result})
+	case len(parts) == 3 && parts[0] == "stores" && parts[2] == "list-objects":
+		var in struct {
+			Model       string `json:"authorization_model_id"`
+			Consistency string `json:"consistency"`
+			Type        string `json:"type"`
+			Relation    string `json:"relation"`
+			User        string `json:"user"`
+		}
+		if !f.known(parts[1]) {
+			http.Error(w, "no store", http.StatusNotFound)
+			return
+		}
+		if !decode(w, r, &in) || !fgaRead(w, in.Model, in.Consistency) {
+			return
+		}
+		limit := f.ListObjectsMaxResults
+		if limit == 0 {
+			limit = openFGAMaxList
+		}
+		ids, code, b := f.Engine.Lookup(in.Type, in.Relation, in.User, limit)
+		if code != http.StatusOK {
+			http.Error(w, string(b), http.StatusBadRequest)
+			return
+		}
+		objects := make([]string, len(ids))
+		for i, id := range ids {
+			objects[i] = in.Type + ":" + id
+		}
+		reply(w, 200, map[string]any{"objects": objects})
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+type fgaTuple struct {
+	User     string `json:"user"`
+	Relation string `json:"relation"`
+	Object   string `json:"object"`
+}
+
+// fgaRead refuses a read that names no model or an unknown consistency.
+func fgaRead(w http.ResponseWriter, model, consistency string) bool {
+	if model == "" || (consistency != "HIGHER_CONSISTENCY" && consistency != "MINIMIZE_LATENCY") {
+		http.Error(w, "bad read", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 func (f *OpenFGA) known(id string) bool {
