@@ -89,7 +89,6 @@ type harnessOpts struct {
 	adminToken   string
 	loginRate    int
 	cfgMutate    func(cfg map[string]any)
-	users        []fakeidp.User // nil: fakeidp.DemoUsers
 }
 
 const clientSecret = "test-client-secret-value"
@@ -122,7 +121,7 @@ func newHarness(t testing.TB, o harnessOpts) *harness {
 	if o.signRequests {
 		sp.RequestCert = h.spCert
 	}
-	h.idp, err = fakeidp.New(fakeidp.Config{Issuer: issuer, Now: h.clk.Now, Users: o.users,
+	h.idp, err = fakeidp.New(fakeidp.Config{Issuer: issuer, Now: h.clk.Now,
 		Clients: []fakeidp.Client{{ID: "wicket", Secret: clientSecret, RedirectURIs: []string{h.public + "/callback/corp"},
 			PostLogoutRedirectURIs: []string{h.public + "/logged-out"}}},
 		ServiceProviders: []fakeidp.ServiceProvider{sp}})

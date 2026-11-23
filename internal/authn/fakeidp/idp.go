@@ -209,9 +209,21 @@ func (i *IdP) Certificate() *x509.Certificate { return i.cert }
 // SigningKey returns the RSA key that signs ID tokens and SAML messages.
 func (i *IdP) SigningKey() *rsa.PrivateKey { return i.rsaKey }
 
+// SetUsers replaces the accounts, for logins from now on; sign-ins
+// already made keep the account they were made with.
+func (i *IdP) SetUsers(users []User) {
+	users = append([]User(nil), users...)
+	i.mu.Lock()
+	i.cfg.Users = users
+	i.mu.Unlock()
+}
+
 func (i *IdP) user(username, password string) (*User, bool) {
-	for k := range i.cfg.Users {
-		u := &i.cfg.Users[k]
+	i.mu.Lock()
+	users := i.cfg.Users
+	i.mu.Unlock()
+	for k := range users {
+		u := &users[k]
 		if subtle.ConstantTimeCompare([]byte(u.Username), []byte(username)) == 1 &&
 			subtle.ConstantTimeCompare([]byte(u.Password), []byte(password)) == 1 {
 			return u, true

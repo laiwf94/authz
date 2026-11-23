@@ -43,7 +43,8 @@ func claimRules(cfg map[string]any) {
 }
 
 func TestForwardAuthClaimConditions(t *testing.T) {
-	h := newHarness(t, harnessOpts{cfgMutate: claimRules, users: claimUsers(), adminToken: strings.Repeat("t", 32)})
+	h := newHarness(t, harnessOpts{cfgMutate: claimRules, adminToken: strings.Repeat("t", 32)})
+	h.idp.SetUsers(claimUsers())
 	alice, bob, carol := h.browser(), h.browser(), h.browser()
 	alice.loginOIDC("alice", "alice-pass", "")
 	bob.loginOIDC("bob", "bob-pass", "")
