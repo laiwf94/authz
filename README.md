@@ -247,6 +247,21 @@ refused with 403 `bad_path`; an app without `public` or `paths` never
 looks at the path. Matching order and checks are in
 [internal/authn/policy](internal/authn/policy/paths.go).
 
+An `allow` (the app's or a path rule's) can also hold claim conditions on
+the sign-in's OpenID Connect claims or SAML attributes:
+`"allow": {"groups": ["staff"], "claims": [{"claim": "department", "in": ["it", "sec"]}, {"claim": "clearance", "matches": "level-?"}]}`.
+Each condition has one of `equals`, `in` or `matches` (a glob: `*`, `?`,
+and `\` before a literal one); every condition must hold, together with
+the lists, and an `allow` with conditions and no lists lets through every
+user of the app's providers who meets them. A multi-valued claim passes
+when any value does, and a number or boolean claim compares as its JSON
+text (`"42"`, `"true"`). `sub`, `idp`, `email`, `name` and `groups` read
+the identity the gateway verified, never a raw claim. A sign-in keeps in
+its session only the claims that the conditions of the apps accepting its
+provider name (at most 64, 16 KiB together), so a reload that names a new
+claim denies with `claims_not_matched` until the user signs in again
+([internal/authn/policy](internal/authn/policy/claims.go)).
+
 A path rule can ask the authorization engine instead:
 `{"path": "/docs/{id}", "methods": ["PUT"], "check": {"resource": "doc:{path.id}", "permission": "edit"}}`
 lets a user through when `user:{claims.sub}` (or the rule's `subject`,
@@ -276,11 +291,12 @@ the new session is made, so a provider that ignores the request gets a
 `POST /admin/explain` on the gateway's admin listener says why a request
 would be allowed or denied, without making it:
 `{"url": "https://wiki.example.com/docs/plan", "method": "PUT", "session": "<id>"}`
-(or an `identity` such as `{"provider": "corp", "sub": "alice", "groups": ["eng"]}`
+(or an `identity` such as `{"provider": "corp", "sub": "alice", "groups": ["eng"], "claims": {"department": ["sec"]}}`
 with an optional `auth` sign-in time and `acr`, or neither for a signed-out
 user) returns the status forward-auth would answer, its decision and
 reason, every rule whose pattern matches in the order they are tried with
-the one that decided, the step-up requirement and whether the sign-in meets
+the one that decided and each rule's claim conditions with whether they
+hold, the step-up requirement and whether the sign-in meets
 it, and for a relationship rule the check sent with the engine's explain
 trace (at most `trace_nodes`, default 1000). It touches no session, writes
 no audit record and counts no metric

@@ -3,6 +3,7 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // ClaimCondition is a condition on one claim of the sign-in: an OpenID
@@ -66,23 +67,33 @@ type claimCond struct {
 	equals string
 	in     map[string]struct{}
 	glob   []globTok
+	source ClaimCondition // as written, for explanations
 }
 
+// claimError is a problem with a rule's claim conditions: Field is
+// "claims[2]" for one condition, "claims" for the list.
+type claimError struct {
+	Field string
+	Msg   string
+}
+
+func (e *claimError) Error() string { return e.Field + ": " + e.Msg }
+
 // compileClaims checks a rule's claim conditions. Every problem is
-// reported, each naming the condition ("claims[2]").
+// reported, joined, each a *claimError naming the condition ("claims[2]").
 func compileClaims(list []ClaimCondition) ([]claimCond, error) {
 	if len(list) == 0 {
 		return nil, nil
 	}
 	if len(list) > MaxClaimConditions {
-		return nil, fmt.Errorf("claims: at most %d conditions, not %d", MaxClaimConditions, len(list))
+		return nil, &claimError{Field: "claims", Msg: fmt.Sprintf("at most %d conditions, not %d", MaxClaimConditions, len(list))}
 	}
 	var errs []error
 	out := make([]claimCond, 0, len(list))
 	for i, c := range list {
 		cc, err := compileClaim(c)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("claims[%d]: %w", i, err))
+			errs = append(errs, &claimError{Field: fmt.Sprintf("claims[%d]", i), Msg: err.Error()})
 			continue
 		}
 		out = append(out, cc)
@@ -94,14 +105,12 @@ func compileClaims(list []ClaimCondition) ([]claimCond, error) {
 }
 
 func compileClaim(c ClaimCondition) (claimCond, error) {
-	cc := claimCond{name: c.Claim}
+	cc := claimCond{name: c.Claim, source: ClaimCondition{Claim: c.Claim, Equals: c.Equals, In: slices.Clone(c.In), Matches: c.Matches}}
 	if c.Claim == "" || len(c.Claim) > maxClaimNameBytes {
 		return cc, fmt.Errorf("a claim name is 1 to %d bytes", maxClaimNameBytes)
 	}
-	for i := 0; i < len(c.Claim); i++ {
-		if c.Claim[i] < 0x21 || c.Claim[i] >= 0x7f {
-			return cc, fmt.Errorf("claim name %q may only contain visible ASCII", c.Claim)
-		}
+	if !validClaimName(c.Claim) {
+		return cc, fmt.Errorf("claim name %q may only contain visible ASCII", c.Claim)
 	}
 	switch c.Claim {
 	case "sub":

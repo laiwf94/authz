@@ -208,12 +208,39 @@ type PathCheck struct {
 	Subject    string `json:"subject"`
 }
 
-// Allow is an app's access rule. Nothing is allowed by default.
+// Allow is an app's access rule. Nothing is allowed by default. Claims
+// are conditions every user it lets through must meet, together with
+// the lists; with no lists they let through every user of the app's
+// providers who meets them.
 type Allow struct {
-	AnyUser      bool     `json:"any_user"`
-	Emails       []string `json:"emails"`
-	EmailDomains []string `json:"email_domains"`
-	Groups       []string `json:"groups"`
+	AnyUser      bool             `json:"any_user"`
+	Emails       []string         `json:"emails"`
+	EmailDomains []string         `json:"email_domains"`
+	Groups       []string         `json:"groups"`
+	Claims       []ClaimCondition `json:"claims"`
+}
+
+// ClaimCondition is a condition on one OpenID Connect claim or SAML
+// attribute of the sign-in (policy.ClaimCondition), with exactly one of
+// equals, in (membership) and matches (a glob: '*', '?' and '\'
+// escaping the next byte). The gateway keeps the claims an app's
+// conditions name in each session of its providers.
+type ClaimCondition struct {
+	Claim   string   `json:"claim"`
+	Equals  string   `json:"equals"`
+	In      []string `json:"in"`
+	Matches string   `json:"matches"`
+}
+
+func (al Allow) claims() []policy.ClaimCondition {
+	if len(al.Claims) == 0 {
+		return nil
+	}
+	out := make([]policy.ClaimCondition, len(al.Claims))
+	for i, c := range al.Claims {
+		out[i] = policy.ClaimCondition{Claim: c.Claim, Equals: c.Equals, In: c.In, Matches: c.Matches}
+	}
+	return out
 }
 
 // ReadFile reads a configuration file, refusing anything larger than
@@ -453,7 +480,7 @@ func (c *Config) validateApps(providers map[string]int, pc *Result) (map[string]
 func validateAllow(pc *Result, path string, al Allow, warnEmpty bool) {
 	if n := len(al.Emails) + len(al.EmailDomains) + len(al.Groups); n > maxListEntries {
 		pc.Errorf(path, "allow lists have more than %d entries", maxListEntries)
-	} else if n == 0 && !al.AnyUser && warnEmpty {
+	} else if n == 0 && !al.AnyUser && len(al.Claims) == 0 && warnEmpty {
 		pc.Warnf(path, "nobody is allowed: set any_user or list emails, email_domains or groups")
 	} else if n > 0 && al.AnyUser {
 		pc.Warnf(path, "any_user allows everyone from the app's providers; the other lists have no effect")
@@ -498,18 +525,26 @@ func validatePaths(pc *Result, path string, a *App) {
 			pc.Errorf(path, "%v", e)
 			continue
 		}
-		pc.Errorf(path+"."+re.Rule, "%s", re.Msg)
+		at := path + "." + re.Rule
+		if re.Field != "" {
+			// Claim conditions sit in a rule's allow.
+			if re.Rule != "allow" {
+				at += ".allow"
+			}
+			at += "." + re.Field
+		}
+		pc.Errorf(at, "%s", re.Msg)
 	}
 }
 
 // Policy compiles the app's access policy.
 func (a *App) Policy() (*policy.Policy, error) {
 	pa := policy.App{Rule: policy.Rule{Providers: a.Providers, AnyUser: a.Allow.AnyUser, Emails: a.Allow.Emails,
-		EmailDomains: a.Allow.EmailDomains, Groups: a.Allow.Groups}, Public: a.Public}
+		EmailDomains: a.Allow.EmailDomains, Groups: a.Allow.Groups, Claims: a.Allow.claims()}, Public: a.Public}
 	for _, r := range a.Paths {
 		pa.Paths = append(pa.Paths, policy.PathRule{Path: r.Path, Exact: r.Exact, Methods: r.Methods,
 			Public: r.Public, Deny: r.Deny, AnyUser: r.Allow.AnyUser, Emails: r.Allow.Emails,
-			EmailDomains: r.Allow.EmailDomains, Groups: r.Allow.Groups, Check: r.Check.rule(),
+			EmailDomains: r.Allow.EmailDomains, Groups: r.Allow.Groups, Claims: r.Allow.claims(), Check: r.Check.rule(),
 			StepUp: r.StepUp.rule()})
 	}
 	return policy.CompileApp(pa)

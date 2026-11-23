@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/laiwf94/authz/internal/authn/policy"
 	"github.com/laiwf94/authz/internal/platform/storage/wal"
 )
 
@@ -267,6 +268,9 @@ func validate(rec record) error {
 		}
 		if !validAuth(rec.ACR, rec.StepUp) {
 			return errors.New("create with a malformed acr or step-up rule")
+		}
+		if policy.CheckClaims(rec.Session.Identity.Claims) != nil {
+			return errors.New("create with malformed claims")
 		}
 	case opTouch, opRevoke:
 		if len(rec.ID) != 32 {

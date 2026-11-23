@@ -248,12 +248,14 @@ func (i *IdP) token(w http.ResponseWriter, r *http.Request) {
 	i.sessions[g.sid] = &grant{client: clientID, user: g.user, sid: g.sid}
 	i.mu.Unlock()
 	atHash := sha256.Sum256([]byte(access))
-	idToken, err := i.SignJWT(map[string]any{
+	claims := map[string]any{
 		"iss": i.cfg.Issuer, "sub": g.user.Username, "aud": clientID, "exp": now.Add(tokenTTL).Unix(),
 		"iat": now.Unix(), "nonce": g.nonce, "sid": g.sid, "email": g.user.Email, "email_verified": true,
 		"name": g.user.Name, "groups": g.user.Groups, "auth_time": g.authTime.Unix(), "acr": g.acr,
 		"at_hash": base64.RawURLEncoding.EncodeToString(atHash[:16]),
-	})
+	}
+	addClaims(claims, g.user.Claims)
+	idToken, err := i.SignJWT(claims)
 	if err != nil {
 		tokenError(w, http.StatusInternalServerError, "server_error", "signing failed")
 		return
@@ -297,8 +299,10 @@ func (i *IdP) userinfo(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, http.StatusUnauthorized, "invalid_token", "unknown or expired access token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sub": g.user.Username, "email": g.user.Email,
-		"email_verified": true, "name": g.user.Name, "groups": g.user.Groups})
+	info := map[string]any{"sub": g.user.Username, "email": g.user.Email,
+		"email_verified": true, "name": g.user.Name, "groups": g.user.Groups}
+	addClaims(info, g.user.UserinfoClaims)
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (i *IdP) endSession(w http.ResponseWriter, r *http.Request) {

@@ -306,6 +306,9 @@ func (sp *SP) checkAssertion(a *etree.Element, requestID string, now time.Time) 
 			return nil, fail(ReasonAttributes, "%v", err)
 		}
 	}
+	if id.Claims, err = policy.SelectClaims(attrs, sp.cfg.Claims); err != nil {
+		return nil, fail(ReasonAttributes, "%v", err)
+	}
 	return &Result{Identity: id, SessionNotOnOrAfter: sessionEnd, SessionIndex: sessionIndex,
 		AuthnInstant: authnInstant, AuthnContextClassRef: classRef}, nil
 }

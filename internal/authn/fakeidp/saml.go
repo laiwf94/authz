@@ -16,8 +16,10 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -361,6 +363,11 @@ func (i *IdP) SAMLResponseDoc(o ResponseOptions) (*etree.Document, error) {
 	addAttr("email", o.User.Email)
 	addAttr("displayName", o.User.Name)
 	addAttr("groups", o.User.Groups...)
+	for _, name := range slices.Sorted(maps.Keys(o.User.Claims)) {
+		if name != "email" && name != "displayName" && name != "groups" {
+			addAttr(name, o.User.Claims[name]...)
+		}
+	}
 	if o.BeforeSign != nil {
 		o.BeforeSign(a)
 	}

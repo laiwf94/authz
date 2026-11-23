@@ -4,6 +4,7 @@
 package oidc
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -57,9 +58,13 @@ type Config struct {
 	GroupsClaim      string
 	UseUserinfo      bool
 	TrustedAudiences []string
-	Skew             time.Duration
-	HTTPClient       *http.Client
-	Now              func() time.Time
+	// Claims names the claims a login keeps in Identity.Claims, for the
+	// claim conditions of the apps that accept this provider
+	// (policy.Policy.ClaimNames). Others are not kept.
+	Claims     []string
+	Skew       time.Duration
+	HTTPClient *http.Client
+	Now        func() time.Time
 }
 
 // Metadata is the subset of the discovery document this relying party uses.
@@ -597,7 +602,7 @@ func (p *Provider) mergeUserinfo(ctx context.Context, m *Metadata, accessToken s
 	if sub != claims.Subject {
 		return fail(ReasonUserinfo, "userinfo sub does not match the ID token")
 	}
-	for _, name := range []string{p.cfg.EmailClaim, "email_verified", p.cfg.NameClaim, p.cfg.GroupsClaim} {
+	for _, name := range append([]string{p.cfg.EmailClaim, "email_verified", p.cfg.NameClaim, p.cfg.GroupsClaim}, p.cfg.Claims...) {
 		if _, have := claims.Raw[name]; !have {
 			if v, ok := info[name]; ok {
 				claims.Raw[name] = v
@@ -621,7 +626,74 @@ func (p *Provider) identity(c *jose.Claims) (policy.Identity, error) {
 	if id.Groups, err = CleanGroups(groups); err != nil {
 		return id, fail(ReasonClaims, "%v", err)
 	}
+	if len(p.cfg.Claims) > 0 {
+		kept := make(map[string][]string, len(p.cfg.Claims))
+		for _, name := range p.cfg.Claims {
+			if raw, ok := c.Raw[name]; ok {
+				kept[name] = claimValues(raw)
+			}
+		}
+		if id.Claims, err = policy.CleanClaims(kept); err != nil {
+			return id, fail(ReasonClaims, "%v", err)
+		}
+	}
 	return id, nil
+}
+
+// claimValues reads a claim for claim conditions: a string is its value,
+// a number or boolean its JSON text ("42", "true"), and an array the
+// values of its strings, numbers and booleans. Anything else (null, an
+// object, a nested array) has no value a condition could compare with.
+func claimValues(raw json.RawMessage) []string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil
+	}
+	if raw[0] == '[' {
+		var list []json.RawMessage
+		if json.Unmarshal(raw, &list) != nil {
+			return nil
+		}
+		var out []string
+		for _, e := range list {
+			if v, ok := scalarClaim(e); ok {
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	if v, ok := scalarClaim(raw); ok {
+		return []string{v}
+	}
+	return nil
+}
+
+func scalarClaim(raw json.RawMessage) (string, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return "", false
+	}
+	switch c := raw[0]; {
+	case c == '"':
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return "", false
+		}
+		return s, true
+	case c == 't' || c == 'f':
+		var b bool
+		if json.Unmarshal(raw, &b) != nil {
+			return "", false
+		}
+		return strconv.FormatBool(b), true
+	case c == '-' || (c >= '0' && c <= '9'):
+		var n json.Number
+		if json.Unmarshal(raw, &n) != nil {
+			return "", false
+		}
+		return n.String(), true
+	}
+	return "", false
 }
 
 // NormalizeEmail returns a lower-cased address, or "" if it doesn't look

@@ -37,6 +37,37 @@ type Candidate struct {
 	Selected bool `json:"selected"`
 	// Params are the values its {parameters} would take.
 	Params map[string]string `json:"params,omitempty"`
+	// Claims are the rule's claim conditions, in the order written.
+	Claims []ClaimResult `json:"claims,omitempty"`
+}
+
+// ClaimResult is one claim condition of a rule, as written, and whether
+// it holds for the identity explained.
+type ClaimResult struct {
+	Claim   string   `json:"claim"`
+	Equals  string   `json:"equals,omitempty"`
+	In      []string `json:"in,omitempty"`
+	Matches string   `json:"matches,omitempty"`
+	// Holds is absent when no identity is explained.
+	Holds *bool `json:"holds,omitempty"`
+}
+
+// claimResults describes conditions for an explanation, with whether each
+// holds for id when id is not nil.
+func claimResults(c *Compiled, id *Identity) []ClaimResult {
+	if c == nil || len(c.claims) == 0 {
+		return nil
+	}
+	out := make([]ClaimResult, len(c.claims))
+	for i := range c.claims {
+		cc := &c.claims[i]
+		out[i] = ClaimResult{Claim: cc.source.Claim, Equals: cc.source.Equals, In: cc.source.In, Matches: cc.source.Matches}
+		if id != nil {
+			h := cc.holds(id)
+			out[i].Holds = &h
+		}
+	}
+	return out
 }
 
 // Candidates matches a request as Match does and also returns every rule
@@ -47,6 +78,13 @@ type Candidate struct {
 // the list is then empty. It allocates, and is meant for explanations,
 // not for deciding requests.
 func (p *Policy) Candidates(method, rawPath string) (Match, []Candidate) {
+	return p.CandidatesFor(method, rawPath, nil)
+}
+
+// CandidatesFor is Candidates for an identity: each rule's claim
+// conditions say whether they hold for id. With a nil id they are listed
+// without an answer.
+func (p *Policy) CandidatesFor(method, rawPath string, id *Identity) (Match, []Candidate) {
 	m := p.Match(method, rawPath)
 	if m.Bad {
 		return m, nil
@@ -66,7 +104,7 @@ func (p *Policy) Candidates(method, rawPath string) (Match, []Candidate) {
 		r := &p.rules[f.rule]
 		c := Candidate{Rule: r.name, Pattern: r.pattern, Exact: r.exact, Methods: methodNames(r.methods),
 			Kind: r.kind(), StepUp: r.stepUp != nil, MethodMatches: r.methods == methodAny || r.methods&bit != 0,
-			Selected: f.rule == m.Rule}
+			Selected: f.rule == m.Rule, Claims: claimResults(r.allow, id)}
 		if len(r.params) > 0 {
 			c.Params = make(map[string]string, len(r.params))
 			for i, n := range r.params {
@@ -75,7 +113,8 @@ func (p *Policy) Candidates(method, rawPath string) (Match, []Candidate) {
 		}
 		out = append(out, c)
 	}
-	out = append(out, Candidate{Rule: "allow", Kind: KindAllow, MethodMatches: true, Selected: m.Rule < 0})
+	out = append(out, Candidate{Rule: "allow", Kind: KindAllow, MethodMatches: true, Selected: m.Rule < 0,
+		Claims: claimResults(p.app, id)})
 	return m, out
 }
 

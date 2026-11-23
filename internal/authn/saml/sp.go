@@ -40,9 +40,13 @@ type Config struct {
 	EmailAttr    string
 	NameAttr     string
 	GroupsAttr   string
-	Skew         time.Duration
-	Now          func() time.Time
-	Replay       *ReplayCache
+	// Claims names the attributes a login keeps in Identity.Claims, for
+	// the claim conditions of the apps that accept this provider
+	// (policy.Policy.ClaimNames). Others are not kept.
+	Claims []string
+	Skew   time.Duration
+	Now    func() time.Time
+	Replay *ReplayCache
 }
 
 // SP is a configured service provider. It is safe for concurrent use.

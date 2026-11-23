@@ -35,6 +35,27 @@ type User struct {
 	// OTP is the user's one-time code for a second factor, asked for when
 	// a login requests ACRMFA; a user without one cannot step up to it.
 	OTP string
+	// Claims are further claims of the ID token and attributes of the
+	// SAML assertion: one value is a string claim, several an array.
+	// UserinfoClaims are claims the userinfo endpoint alone returns.
+	// Neither may name a claim the IdP sets itself.
+	Claims         map[string][]string
+	UserinfoClaims map[string][]string
+}
+
+// addClaims adds extra claims to a token or userinfo body, leaving the
+// IdP's own claims as they are.
+func addClaims(dst map[string]any, extra map[string][]string) {
+	for k, v := range extra {
+		if _, own := dst[k]; own {
+			continue
+		}
+		if len(v) == 1 {
+			dst[k] = v[0]
+		} else {
+			dst[k] = v
+		}
+	}
 }
 
 // Authentication context classes the IdP reports, as an ID token's acr and

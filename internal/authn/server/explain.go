@@ -174,6 +174,9 @@ func (s *Server) explainInput(req *explainRequest) (*url.URL, requester, string)
 			len(id.Groups) > maxExplainGroups || slices.ContainsFunc(id.Groups, func(g string) bool { return len(g) > 512 }) {
 			return nil, q, "identity is too large"
 		}
+		if err := policy.CheckClaims(id.Claims); err != nil {
+			return nil, q, "identity.claims: " + err.Error()
+		}
 		q.id = id
 		if a := req.Auth; a != nil {
 			if a.ACR != "" && !policy.ValidACR(a.ACR) {
@@ -199,7 +202,7 @@ func (s *Server) explain(r *http.Request, orig *url.URL, appID, method string, q
 		return out
 	}
 	out.App = a.id
-	m, cands := a.policy.Candidates(method, orig.EscapedPath())
+	m, cands := a.policy.CandidatesFor(method, orig.EscapedPath(), q.id)
 	out.Path = m.Path
 	if cands != nil {
 		out.Rules = cands

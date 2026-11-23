@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/netip"
 	"sort"
 	"strings"
@@ -87,6 +88,14 @@ type Session struct {
 	stepUp   string
 }
 
+// copy returns a copy of s that shares no slice or map with it, so a
+// caller cannot change the store's session or race with it.
+func (s *Session) copy() Session {
+	cp := *s
+	cp.Identity = s.Identity.Clone()
+	return cp
+}
+
 // Auth returns when and how the user authenticated at the provider.
 func (s *Session) Auth() policy.Auth { return policy.Auth{Time: s.authTime, ACR: s.acr} }
 
@@ -95,6 +104,10 @@ func (s *Session) StepUp() string { return s.stepUp }
 
 // MaxStepUpBytes bounds the rule name a session keeps.
 const MaxStepUpBytes = 64
+
+// ErrBadClaims is an identity whose claims break the limits of
+// policy.CleanClaims.
+var ErrBadClaims = errors.New("session: claims are not clean or too large")
 
 // ErrBadAuth is an acr or step-up rule name the store cannot keep.
 var ErrBadAuth = errors.New("session: acr must be a valid authentication context class and step-up rule at most 64 printable ASCII characters")
@@ -399,6 +412,11 @@ func (s *Store) CreateWith(id policy.Identity, e Extra) (string, *Session, error
 	if !validAuth(e.ACR, e.StepUp) {
 		return "", nil, ErrBadAuth
 	}
+	if err := policy.CheckClaims(id.Claims); err != nil {
+		return "", nil, fmt.Errorf("%w: %v", ErrBadClaims, err)
+	}
+	// The store keeps its own copy: the caller's slices and maps are its own.
+	id = id.Clone()
 	var raw [secretBytes]byte
 	_, _ = rand.Read(raw[:])
 	secret := base64.RawURLEncoding.EncodeToString(raw[:])
@@ -442,7 +460,7 @@ func (s *Store) CreateWith(id policy.Identity, e Extra) (string, *Session, error
 		s.unindex(e)
 	}
 	s.index(sess)
-	cp := *sess
+	cp := sess.copy()
 	return secret, &cp, nil
 }
 
@@ -469,7 +487,7 @@ func (s *Store) Lookup(secret string) (*Session, error) {
 			sess.persistedSeen = now
 		}
 	}
-	cp := *sess
+	cp := sess.copy()
 	return &cp, nil
 }
 
@@ -484,7 +502,7 @@ func (s *Store) Get(id string) (*Session, bool) {
 	if !ok || !s.live(sess, now) {
 		return nil, false
 	}
-	cp := *sess
+	cp := sess.copy()
 	return &cp, true
 }
 
@@ -657,7 +675,7 @@ func (s *Store) UserSessions(provider, subject string) []Session {
 	var out []Session
 	for id := range s.bySubject[subjectKey(provider, subject)] {
 		if sess := s.byID[id]; s.live(sess, now) {
-			out = append(out, *sess)
+			out = append(out, sess.copy())
 		}
 	}
 	s.mu.Unlock()
@@ -696,7 +714,7 @@ func (s *Store) List(subject string, limit int) []Session {
 		if !s.live(sess, now) || (subject != "" && sess.Identity.Subject != subject) {
 			continue
 		}
-		out = append(out, *sess)
+		out = append(out, sess.copy())
 		if limit > 0 && len(out) >= limit {
 			break
 		}

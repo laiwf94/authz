@@ -135,11 +135,39 @@ func methodBit(m string) uint16 {
 // RuleError is a problem with one rule of an App. CompileApp joins them
 // with errors.Join.
 type RuleError struct {
-	Rule string // "paths[2]" or "public[0]"
-	Msg  string
+	Rule string // "paths[2]", "public[0]" or "allow" for the app-wide rule
+	// Field is the part of the rule at fault, when it is a claim
+	// condition: "claims[1]", or "claims" for the list as a whole.
+	Field string
+	Msg   string
 }
 
-func (e *RuleError) Error() string { return e.Rule + ": " + e.Msg }
+func (e *RuleError) Error() string {
+	if e.Field != "" {
+		return e.Rule + ": " + e.Field + ": " + e.Msg
+	}
+	return e.Rule + ": " + e.Msg
+}
+
+// ruleErrors turns compileClaims' errors into RuleErrors of rule.
+func ruleErrors(rule string, err error) []error {
+	var list []error
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		list = j.Unwrap()
+	} else {
+		list = []error{err}
+	}
+	out := make([]error, 0, len(list))
+	for _, e := range list {
+		var ce *claimError
+		if errors.As(e, &ce) {
+			out = append(out, &RuleError{Rule: rule, Field: ce.Field, Msg: ce.Msg})
+		} else {
+			out = append(out, &RuleError{Rule: rule, Msg: e.Error()})
+		}
+	}
+	return out
+}
 
 // CompileApp checks and compiles an app policy. Every problem is reported,
 // joined, each naming the rule ("paths[2]" or "public[0]").
@@ -147,12 +175,16 @@ func CompileApp(a App) (*Policy, error) {
 	p := &Policy{app: Compile(a.Rule)}
 	var errs []error
 	if _, err := compileClaims(a.Claims); err != nil {
-		errs = append(errs, &RuleError{Rule: "allow", Msg: err.Error()})
+		errs = append(errs, ruleErrors("allow", err)...)
 	}
 	add := func(name string, pr PathRule) {
 		r, segs, err := compileRule(name, pr, a.Providers)
 		if err != nil {
-			errs = append(errs, err)
+			if j, ok := err.(interface{ Unwrap() []error }); ok {
+				errs = append(errs, j.Unwrap()...)
+			} else {
+				errs = append(errs, err)
+			}
 			return
 		}
 		if p.root == nil {
@@ -224,7 +256,7 @@ func compileRule(name string, pr PathRule, providers []string) (rule, []string, 
 		return fail("a public or deny rule takes no allow (any_user, emails, email_domains, groups or claims)")
 	}
 	if _, err := compileClaims(pr.Claims); err != nil {
-		return fail("%v", err)
+		return rule{}, nil, errors.Join(ruleErrors(name, err)...)
 	}
 	if (pr.Public || pr.Deny) && pr.Check != nil {
 		return fail("a public or deny rule takes no check")

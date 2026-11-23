@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -60,6 +61,26 @@ func buildRuntime(ctx context.Context, cfg *config.Config, o buildOptions) (*run
 	rt := &runtime{cfg: cfg, public: cfg.Public, providers: map[string]*provider{}, apps: map[string]*app{},
 		appsByHost: map[string]*app{}}
 	skew := time.Duration(cfg.ClockSkew)
+	// The apps first: a provider's logins keep the claims that the claim
+	// conditions of the apps accepting it read, and no others.
+	pols := make([]*policy.Policy, len(cfg.Apps))
+	claims := map[string][]string{}
+	for i := range cfg.Apps {
+		ac := &cfg.Apps[i]
+		pol, err := ac.Policy()
+		if err != nil {
+			return nil, fmt.Errorf("app %s: %w", ac.ID, err)
+		}
+		pols[i] = pol
+		names := pol.ClaimNames()
+		for _, pid := range ac.Providers {
+			for _, n := range names {
+				if !slices.Contains(claims[pid], n) {
+					claims[pid] = append(claims[pid], n)
+				}
+			}
+		}
+	}
 	for i := range cfg.Providers {
 		pc := &cfg.Providers[i]
 		client, err := providerClient(pc, o)
@@ -74,11 +95,11 @@ func buildRuntime(ctx context.Context, cfg *config.Config, o buildOptions) (*run
 				ClientAuth: pc.ClientAuth, RedirectURL: cfg.PublicURL + "/callback/" + pc.ID, Scopes: pc.Scopes,
 				Algorithms: pc.Algorithms, EmailClaim: pc.EmailClaim, NameClaim: pc.NameClaim,
 				GroupsClaim: pc.GroupsClaim, UseUserinfo: pc.Userinfo, TrustedAudiences: pc.TrustedAudiences,
-				Skew: skew, HTTPClient: client, Now: o.now,
+				Claims: claims[pc.ID], Skew: skew, HTTPClient: client, Now: o.now,
 			})
 			p.reval = revalidationOf(pc.Revalidate)
 		case config.ProviderSAML:
-			p.saml, err = buildSAML(ctx, cfg, pc, client, skew, o)
+			p.saml, err = buildSAML(ctx, cfg, pc, client, skew, claims[pc.ID], o)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("provider %s: %w", pc.ID, err)
@@ -86,12 +107,8 @@ func buildRuntime(ctx context.Context, cfg *config.Config, o buildOptions) (*run
 		rt.providers[pc.ID] = p
 	}
 	var hosts []string
-	for _, ac := range cfg.Apps {
-		pol, err := ac.Policy()
-		if err != nil {
-			return nil, fmt.Errorf("app %s: %w", ac.ID, err)
-		}
-		a := &app{id: ac.ID, providers: ac.Providers, defaultURL: ac.DefaultURL, policy: pol}
+	for i, ac := range cfg.Apps {
+		a := &app{id: ac.ID, providers: ac.Providers, defaultURL: ac.DefaultURL, policy: pols[i]}
 		rt.apps[a.id] = a
 		for _, h := range ac.Hosts {
 			rt.appsByHost[h] = a
@@ -128,7 +145,7 @@ func providerClient(pc *config.Provider, o buildOptions) (*http.Client, error) {
 	return oidc.NewHTTPClient(tr), nil
 }
 
-func buildSAML(ctx context.Context, cfg *config.Config, pc *config.Provider, client *http.Client, skew time.Duration, o buildOptions) (*saml.SP, error) {
+func buildSAML(ctx context.Context, cfg *config.Config, pc *config.Provider, client *http.Client, skew time.Duration, claims []string, o buildOptions) (*saml.SP, error) {
 	var md *saml.IdPMetadata
 	var err error
 	if pc.IdPMetadataFile != "" {
@@ -165,7 +182,7 @@ func buildSAML(ctx context.Context, cfg *config.Config, pc *config.Provider, cli
 		ProviderID: pc.ID, EntityID: entityID, ACSURL: cfg.PublicURL + "/saml/" + pc.ID + "/acs", IdP: md,
 		SLOURL: cfg.PublicURL + "/saml/" + pc.ID + "/slo", Key: key, Cert: cert,
 		SignRequests: pc.SignRequests, NameIDFormat: pc.NameIDFormat,
-		EmailAttr: emailAttr, NameAttr: pc.NameAttribute, GroupsAttr: groupsAttr, Skew: skew, Now: o.now,
+		EmailAttr: emailAttr, NameAttr: pc.NameAttribute, GroupsAttr: groupsAttr, Claims: claims, Skew: skew, Now: o.now,
 		Replay: o.replay,
 	})
 }
