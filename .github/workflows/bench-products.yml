@@ -6,10 +6,11 @@
 # each, loads part of it again, and fails if any of 2,000 sampled checks
 # is answered differently, then runs a short authzbench mix of check, bulk
 # check, lookup and write against each product's own API with no error
-# allowed. bench/products/verify-identity.sh starts Keycloak and
-# oauth2-proxy, imports the sign-in population, reads it back, checks the
-# groups oauth2-proxy asserts for a signed-in user, and runs sign-ins and
-# forward-auth decisions with no error allowed. It runs when the setups,
+# allowed. bench/products/verify-identity.sh starts Keycloak,
+# oauth2-proxy and Zitadel, imports the sign-in population into both
+# providers, reads it back, checks the groups oauth2-proxy asserts for a
+# signed-in user and the roles in Zitadel's ID tokens, and runs sign-ins
+# and forward-auth decisions with no error allowed. It runs when the setups,
 # the datasets, the loader or the runner change, and on demand at a
 # larger SIZE.
 name: bench-products

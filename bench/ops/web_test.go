@@ -448,3 +448,128 @@ func TestMCPCallAnswers(t *testing.T) {
 }
 
 func jsonDecode(r *http.Request, v any) error { return json.NewDecoder(r.Body).Decode(v) }
+
+// twoPageIdP is a provider that asks for the name on one page and the
+// password on the next, as Zitadel's login does, checks the Origin and
+// Referer of each submitted form, and ends at a redirect URI nothing
+// answers at.
+func twoPageIdP(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	var origins atomic.Int64
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := func(body string) {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, body)
+		}
+		sameSite := func(from string) bool {
+			if r.Header.Get("Origin") != srv.URL || r.Header.Get("Referer") != srv.URL+from {
+				http.Error(w, "cross-site form", http.StatusForbidden)
+				return false
+			}
+			origins.Add(1)
+			return true
+		}
+		switch r.URL.Path {
+		case "/authorize":
+			http.SetCookie(w, &http.Cookie{Name: "agent", Value: "a-1"})
+			http.Redirect(w, r, "/ui/login/login?authRequestID=r1", http.StatusFound)
+		case "/ui/login/login":
+			page(`<form action="/ui/login/loginname" method="POST"><input type="hidden" name="authRequestID" value="r1">
+<input type="text" name="loginName"><button name="register" value="true">Register</button></form>`)
+		case "/ui/login/loginname":
+			r.ParseForm()
+			if !sameSite("/ui/login/login?authRequestID=r1") {
+				return
+			}
+			if r.Form.Get("loginName") == "nobody" {
+				page(`<form action="/ui/login/loginname" method="POST"><input type="text" name="loginName"></form>`)
+				return
+			}
+			page(`<form action="/ui/login/password" method="POST"><input type="hidden" name="authRequestID" value="r1">
+<input type="text" name="loginName" value="` + r.Form.Get("loginName") + `" class="hidden"><input type="password" name="password"></form>`)
+		case "/ui/login/password":
+			r.ParseForm()
+			if !sameSite("/ui/login/loginname") {
+				return
+			}
+			if c, err := r.Cookie("agent"); err != nil || c.Value != "a-1" || r.Form.Get("password") != r.Form.Get("loginName")+"-pass" {
+				page(`<form action="/ui/login/password" method="POST"><input type="password" name="password"></form>`)
+				return
+			}
+			http.Redirect(w, r, "/oauth/v2/authorize/callback?id=r1", http.StatusFound)
+		case "/oauth/v2/authorize/callback":
+			if r.Header.Get("Referer") != "" {
+				http.Error(w, "a redirect carries no referer here", http.StatusBadRequest)
+				return
+			}
+			q := "code=c-1&state=s"
+			if r.URL.Query().Get("deny") != "" {
+				q = "error=access_denied&error_description=no+grant"
+			}
+			http.Redirect(w, r, "http://127.0.0.1:1/callback?"+q, http.StatusFound)
+		case "/no-code":
+			http.Redirect(w, r, "http://127.0.0.1:1/callback?state=s", http.StatusFound)
+		case "/early":
+			http.Redirect(w, r, "http://127.0.0.1:1/callback?code=c-0", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &origins
+}
+
+func TestLoginTwoPages(t *testing.T) {
+	srv, origins := twoPageIdP(t)
+	c, _ := NewClient(2, "")
+	ctx, r := context.Background(), rng()
+	l := &Login{Client: c, Start: srv.URL + "/authorize", UserField: "loginName", DoneURL: "http://127.0.0.1:1/callback",
+		Credentials: []Credential{{"u1", "u1-pass"}, {"u2", "u2-pass"}}}
+	for range 5 {
+		if err := l.Do(ctx, 0, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := l.SignIn(ctx, Credential{"u3", "u3-pass"})
+	if err != nil || res.Done == nil || res.Done.Query().Get("code") != "c-1" || res.Session != nil {
+		t.Fatalf("SignIn: %+v %v", res, err)
+	}
+	if got := origins.Load(); got != 12 {
+		t.Errorf("%d forms came with the page's Origin and Referer, want 12", got)
+	}
+	// Session needs a cookie, which a sign-in ending at DoneURL has not set.
+	if _, err := l.Session(ctx, r); err == nil || !strings.Contains(err.Error(), "cookie was set") {
+		t.Errorf("session without a cookie: %v", err)
+	}
+	withCookie := *l
+	withCookie.SessionCookie = "agent"
+	if s, err := withCookie.Session(ctx, r); err != nil || s.Value != "a-1" {
+		t.Errorf("session cookie set before DoneURL: %v %v", s, err)
+	}
+
+	for _, tc := range []struct {
+		start, user, pass, want string
+	}{
+		{"/authorize", "u1", "wrong", "u1 was refused"},
+		{"/authorize", "nobody", "x", "nobody was refused"},
+		{"/oauth/v2/authorize/callback?deny=1", "u1", "u1-pass", "answered access_denied: no grant"},
+		{"/no-code", "u1", "u1-pass", "without a code"},
+		{"/early", "u1", "u1-pass", "before a password was asked for"},
+	} {
+		bad := *l
+		bad.Start = srv.URL + tc.start
+		bad.Credentials = []Credential{{tc.user, tc.pass}}
+		if err := bad.Do(ctx, 0, r); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s as %s: %v, want %q", tc.start, tc.user, err, tc.want)
+		}
+	}
+	// A bad action on the name page is reported as one.
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<form method="post" action="http://[::1"><input name="loginName"></form>`)
+	}))
+	defer bad.Close()
+	l.Start = bad.URL
+	if err := l.Do(ctx, 0, r); err == nil || !strings.Contains(err.Error(), "bad form action") {
+		t.Errorf("bad action: %v", err)
+	}
+}

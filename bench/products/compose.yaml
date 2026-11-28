@@ -4,8 +4,9 @@
 #
 #   docker compose -f bench/products/compose.yaml --profile spicedb up -d
 #
-# Profiles: authz, spicedb, openfga (authorization) and keycloak (Keycloak
-# with oauth2-proxy in front of it, for sign-ins and forward-auth). Every
+# Profiles: authz, spicedb, openfga (authorization), keycloak (Keycloak
+# with oauth2-proxy in front of it, for sign-ins and forward-auth) and
+# zitadel (sign-ins). Every
 # image is pinned by tag and digest, and an image built here is built
 # from pinned images; products_test.go fails on an image without both. Ports are bound
 # to 127.0.0.1 only. The keys below are the benchmark's own, public on
@@ -244,6 +245,93 @@ services:
       timeout: 3s
       retries: 60
 
+  # Zitadel, the second identity provider of the sign-in benchmark, on its
+  # own PostgreSQL. start-from-init creates its database and user with the
+  # admin account below, sets up the first instance and serves. Zitadel
+  # finds the instance by the request's host, so it is reached as
+  # localhost:18280, its external address, from the host and the
+  # benchmark alike. The first instance's machine user is an instance
+  # administrator; its personal access token goes to
+  # /bootstrap/admin.pat on the zitadel-bootstrap volume, which
+  # verify-identity.sh copies out (docker compose cp). Instance policies
+  # are set by the DEFAULTINSTANCE variables before the instance exists;
+  # README.md says why each one is set.
+  zitadel-postgres:
+    <<: *postgres
+    profiles: [zitadel]
+    volumes:
+      - zitadel-pg:/var/lib/postgresql/data
+
+  # The image has no shell, so the token's directory is made writable for
+  # Zitadel's user by a one-shot container of the PostgreSQL image.
+  zitadel-bootstrap:
+    profiles: [zitadel]
+    image: postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+    entrypoint: ["sh", "-c", "chown 1000:1000 /bootstrap && chmod 700 /bootstrap"]
+    volumes:
+      - zitadel-bootstrap:/bootstrap
+
+  zitadel:
+    <<: *limits
+    profiles: [zitadel]
+    image: ghcr.io/zitadel/zitadel:v4.20.6@sha256:169179455987c52d89c6c719bcd2871d6797e8a8df7c44396cd96d34eec56363
+    user: "1000:1000"
+    command: [start-from-init, --masterkeyFromEnv, --tlsMode, disabled]
+    environment:
+      ZITADEL_MASTERKEY: ${ZITADEL_MASTERKEY:-bench-zitadel-masterkey-01234567}
+      ZITADEL_EXTERNALDOMAIN: localhost
+      ZITADEL_EXTERNALPORT: "18280"
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_DATABASE_POSTGRES_HOST: zitadel-postgres
+      ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS: "20"
+      ZITADEL_DATABASE_POSTGRES_MAXIDLECONNS: "20"
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: bench
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: bench
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_EXISTINGDATABASE: bench
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: bench
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: bench-owner
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ZITADEL_OWNER_PASSWORD:-bench-zitadel-owner-0123456789}
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: bench-admin
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: bench admin
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2030-01-01T00:00:00Z"
+      ZITADEL_FIRSTINSTANCE_PATPATH: /bootstrap/admin.pat
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "false"
+      ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_ALGORITHM: argon2id
+      ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_TIME: "2"
+      ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_MEMORY: "19456"
+      ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_THREADS: "1"
+      ZITADEL_DEFAULTINSTANCE_PASSWORDCOMPLEXITYPOLICY_MINLENGTH: "12"
+      ZITADEL_DEFAULTINSTANCE_PASSWORDCOMPLEXITYPOLICY_HASLOWERCASE: "false"
+      ZITADEL_DEFAULTINSTANCE_PASSWORDCOMPLEXITYPOLICY_HASUPPERCASE: "false"
+      ZITADEL_DEFAULTINSTANCE_PASSWORDCOMPLEXITYPOLICY_HASNUMBER: "false"
+      ZITADEL_DEFAULTINSTANCE_PASSWORDCOMPLEXITYPOLICY_HASSYMBOL: "false"
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_ALLOWREGISTER: "false"
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_ALLOWEXTERNALIDP: "false"
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_PASSWORDLESSTYPE: "0"
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_IGNOREUNKNOWNUSERNAMES: "true"
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_MFAINITSKIPLIFETIME: 0s
+      ZITADEL_DEFAULTINSTANCE_LOCKOUTPOLICY_MAXPASSWORDATTEMPTS: "10"
+      ZITADEL_LOG_LEVEL: warn
+    healthcheck:
+      test: ["CMD", "/app/zitadel", "ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+      start_period: 10s
+    volumes:
+      - zitadel-bootstrap:/bootstrap
+    depends_on:
+      zitadel-postgres: {condition: service_healthy}
+      zitadel-bootstrap: {condition: service_completed_successfully}
+    ports:
+      - 127.0.0.1:18280:8080
+
   # The OpenFGA CLI, for verify.sh to turn the dataset's model into the
   # JSON in openfga-model.json: docker compose run --rm openfga-cli ...
   openfga-cli:
@@ -255,3 +343,5 @@ volumes:
   spicedb-pg:
   openfga-pg:
   keycloak-pg:
+  zitadel-pg:
+  zitadel-bootstrap:

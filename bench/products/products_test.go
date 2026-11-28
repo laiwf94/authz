@@ -322,7 +322,7 @@ func TestComposePinned(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"authz:bench", "authzed/spicedb", "openfga/openfga", "openfga/cli", "postgres",
-		"keycloak/keycloak", "quay.io/oauth2-proxy/oauth2-proxy", "redis"} {
+		"keycloak/keycloak", "quay.io/oauth2-proxy/oauth2-proxy", "redis", "ghcr.io/zitadel/zitadel"} {
 		if !images[want] {
 			t.Errorf("compose.yaml runs no %s image", want)
 		}

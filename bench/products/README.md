@@ -5,18 +5,19 @@ version with its recommended production settings, all taking the same
 seeded dataset (`bench/datasets`) and answering the same checks.
 
 This directory holds the authorization products (authz, SpiceDB and
-OpenFGA) and the first identity products: Keycloak, and oauth2-proxy
-signing in through it, which the gateway's sign-ins and forward-auth
-decisions are compared with. Zitadel and the MCP gateways (agentgateway,
-Kong) are the next tasks of week 5.
+OpenFGA) and the identity products: Keycloak, oauth2-proxy signing in
+through it, and Zitadel, which the gateway's sign-ins and forward-auth
+decisions are compared with. The MCP gateways (agentgateway, Kong) are the
+next task of week 5.
 
 | Path | What it is |
 | --- | --- |
 | `compose.yaml` | Every product and its database, pinned by version and digest, on the same limits |
 | `verify.sh` | Brings the authorization products up, loads one dataset into each and fails on any differing answer |
-| `verify-identity.sh` | Brings Keycloak and oauth2-proxy up, imports the sign-in population and proves sign-ins and forward-auth on them |
+| `verify-identity.sh` | Brings Keycloak, oauth2-proxy and Zitadel up, imports the sign-in population and proves sign-ins and forward-auth on them |
 | `keycloak/Dockerfile` | Keycloak's optimized production image, built from the pinned release |
 | `keycloak.go` | The realm, client and user import through Keycloak's admin API |
+| `zitadel.go` | The project, application, roles and user import through Zitadel's APIs, and a sign-in that reads the ID token |
 | `openfga-model.json` | The dataset's model as OpenFGA's API takes it, made by the pinned OpenFGA CLI |
 | `products.go` | The Go side: setup, write formats and checks for each product's HTTP API |
 | `crosscheck.go` | Sampled questions and the cross-check |
@@ -33,10 +34,11 @@ Kong) are the next tasks of week 5.
 | Keycloak | `keycloak/keycloak:26.8.2`, built into `authz-bench-keycloak:26.8.2` | PostgreSQL | sign-in |
 | oauth2-proxy | `quay.io/oauth2-proxy/oauth2-proxy:v7.15.6` | Redis, for sessions | sign-in through Keycloak, forward-auth |
 | Redis | `redis:8.12.0-alpine` | | oauth2-proxy's session store |
+| Zitadel | `ghcr.io/zitadel/zitadel:v4.20.6` | PostgreSQL | sign-in |
 
 Each image is pinned by tag and digest in `compose.yaml` (the digest of the
 multi-platform index, read from the registry on 2026-11-22, and on
-2026-11-28 for Keycloak, oauth2-proxy and Redis). Keycloak is run from an
+2026-11-28 for Keycloak, oauth2-proxy, Redis and Zitadel). Keycloak is run from an
 image built by `keycloak/Dockerfile`, whose every `FROM` is pinned the same
 way. A test fails when an image there is not pinned that way or this table
 does not name its version. The versions were each product's newest release
@@ -51,10 +53,11 @@ Every server and every database gets the same `BENCH_CPUS` (default 2) and
 its one container holds what SpiceDB and OpenFGA split between their server
 and a PostgreSQL container: the comparison gives the competitors twice the
 resources, and the report says so next to each number. The same holds for
-sign-ins: Keycloak runs with its own PostgreSQL, and oauth2-proxy with its
-own Redis. Ports are bound to 127.0.0.1 only: 18080 authz, 18443 SpiceDB's
-HTTP gateway, 18081 OpenFGA's HTTP API, 18180 Keycloak (19000 its
-management port, with health and metrics), 14180 oauth2-proxy.
+sign-ins: Keycloak and Zitadel each run with their own PostgreSQL, and
+oauth2-proxy with its own Redis. Ports are bound to 127.0.0.1 only: 18080
+authz, 18443 SpiceDB's HTTP gateway, 18081 OpenFGA's HTTP API, 18180
+Keycloak (19000 its management port, with health and metrics), 14180
+oauth2-proxy, 18280 Zitadel.
 
 ## Production settings
 
@@ -178,11 +181,66 @@ ships.
 - `--request-logging=false --auth-logging=false --standard-logging=false`:
   no log line for each request.
 
+**Zitadel** (`zitadel`), configured by environment variables as its
+self-hosting guide does, following its production checklist where it
+applies to one node:
+
+- `start-from-init --masterkeyFromEnv --tlsMode disabled`: one process that
+  creates its database and user (with the admin account of its
+  PostgreSQL), sets up the first instance and serves, the guide's
+  single-node start; the master key comes from the environment, not the
+  command line. TLS is off for the same reason as Keycloak's: the benchmark
+  measures every product without TLS.
+- `ZITADEL_EXTERNALDOMAIN=localhost`, `ZITADEL_EXTERNALPORT=18280`,
+  `ZITADEL_EXTERNALSECURE=false`: Zitadel picks the instance by the host a
+  request names, so the external address is the one the benchmark's
+  browser and the import use, and the issuer is `http://localhost:18280`.
+- `ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS=20` and `MAXIDLECONNS=20`: a
+  fixed pool, as for Keycloak, instead of the default 10 open and 5 idle.
+- The first instance has the organization `bench` and a machine user
+  `bench-admin`, an instance administrator, whose personal access token
+  Zitadel writes to `/bootstrap/admin.pat` (`ZITADEL_FIRSTINSTANCE_PATPATH`),
+  the guide's way to automate an instance. The image has no shell, so a
+  one-shot `zitadel-bootstrap` container makes that volume writable for
+  Zitadel's user (1000) first.
+- `ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED=false`, and the
+  application asks for login v1: the login Zitadel serves itself. v4's
+  new login is a separate Next.js service, and the comparison is of one
+  identity server each. Login v1 asks for the name and the password on two
+  pages; `ops.Login` fills both, as a browser does.
+- Passwords are hashed with argon2id at 19 MiB, 2 iterations and 1 thread
+  (`ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_*`), OWASP's first
+  recommendation for argon2id, instead of Zitadel's default bcrypt at cost
+  14, which takes about a second of CPU a sign-in. Keycloak also hashes
+  with Argon2 by default, so both sign-ins measure a modern hash of about
+  the same cost, not the products' different defaults.
+- The password policy asks for 12 characters and no character classes
+  (`PASSWORDCOMPLEXITYPOLICY_*`), as NIST SP 800-63B recommends; the
+  dataset's passwords have no capital letters, which Zitadel's default
+  policy requires.
+- The login policy allows no self-registration, no external identity
+  providers and no passwordless sign-in, does not tell unknown user names
+  apart (`IGNOREUNKNOWNUSERNAMES`), and does not prompt to set up a second
+  factor (`MFAINITSKIPLIFETIME=0s`), the same as the Keycloak realm, which
+  offers none. Ten wrong passwords lock an account
+  (`LOCKOUTPOLICY_MAXPASSWORDATTEMPTS`), as brute-force detection does in
+  Keycloak; the benchmark signs in only with right passwords.
+- `ZITADEL_LOG_LEVEL=warn`: no log line for each request.
+
+Zitadel has no groups, so the import makes each graph group a role of the
+project `bench` (its key is the group's ID, `g12`) and gives each user one
+user grant of its groups' roles. The project asserts its roles, and the
+application `bench-login` puts them and the userinfo claims in the ID
+token, so `urn:zitadel:iam:org:project:roles` there is keyed by the user's
+groups in the graph. The application is a web application with PKCE and no
+secret (auth method none), the authorization code flow only, in
+development mode, which allows the benchmark's `http://` redirect URI.
+
 **Redis**, oauth2-proxy's session store: no persistence (`--save ""
 --appendonly no`), as for a cache, and `noeviction`, so that a full store
 refuses new sessions instead of dropping signed-in ones.
 
-**PostgreSQL**, the same for all three: `shared_buffers=1GB` (a quarter of the
+**PostgreSQL**, the same for every product that has one: `shared_buffers=1GB` (a quarter of the
 memory limit, PostgreSQL's own starting point), `effective_cache_size=3GB`,
 `max_connections=200`, `track_commit_timestamp=on` (SpiceDB's Watch API needs
 it) and synchronous commits, so that a write is durable when it is answered,
@@ -301,6 +359,27 @@ about 50 to 60 users a second (2,000 users in 32 s). A group is named by
 its graph ID (`g12`), the value of the `groups` claim, so the groups a
 provider asserts are the user's direct groups in the graph.
 
+With `-target zitadel`, the import reads the instance administrator's
+token from `AUTHZBENCH_ZITADEL_TOKEN`, creates the project and the
+application (or brings them back to these settings), prints the
+application's client ID, adds a role for each group the users are in, and
+then writes each user with its password, a verified email and its user
+grant, 8 at a time: Zitadel takes one user per request. A user that exists
+and a grant that exists are skipped, so an import can be repeated or
+resumed. Zitadel's reads trail its writes, so `-verify` reads a user again
+for up to 30 s until it shows. `authzdata signin` then signs sampled users
+in through the application as a browser does (the authorization code flow
+with PKCE), redeems the code and fails unless the ID token names the user,
+the user's email and exactly the user's groups as roles.
+
+```
+docker compose -f bench/products/compose.yaml --profile zitadel up -d
+docker compose -f bench/products/compose.yaml --profile zitadel cp zitadel:/bootstrap/admin.pat admin.pat
+export AUTHZBENCH_ZITADEL_TOKEN=$(cat admin.pat)
+./authzdata import -target zitadel -size 1m -n 5000 -api http://localhost:18280
+./authzdata signin -target zitadel -size 1m -n 5000 -api http://localhost:18280
+```
+
 ## verify-identity.sh
 
 ```
@@ -308,14 +387,18 @@ bench/products/verify-identity.sh                # SIZE=100k USERS=500
 SIZE=1m USERS=5000 bench/products/verify-identity.sh
 ```
 
-It starts Keycloak and oauth2-proxy on fresh volumes, imports `USERS`
-users, imports them again (every user and group must be skipped) and reads
-every one back. Then it signs `u0` in through oauth2-proxy with curl and
-checks that `/oauth2/auth` accepts the session and asserts the user's email
-and exactly the user's groups in the graph. Last it runs `authzbench` with
-no error allowed: sign-ins straight at Keycloak (which end at its account
-page with the `KEYCLOAK_IDENTITY` cookie set) and through oauth2-proxy
-(ending with its session cookie), both at `LOGIN_RATE` (10 a second), and
+It starts Keycloak, oauth2-proxy and Zitadel on fresh volumes, imports
+`USERS` users into Keycloak and into Zitadel, imports them again (every
+user, group and role must be skipped) and reads every one back. Then it
+signs `u0` in through oauth2-proxy with curl and checks that
+`/oauth2/auth` accepts the session and asserts the user's email and
+exactly the user's groups in the graph, and signs 5 users in through
+Zitadel with `authzdata signin`, which checks the same of each ID token.
+Last it runs `authzbench` with no error allowed: sign-ins straight at
+Keycloak (which end at its account page with the `KEYCLOAK_IDENTITY`
+cookie set), through oauth2-proxy (ending with its session cookie) and
+straight at Zitadel (ending at the redirect with the code, `-login-done`),
+each at `LOGIN_RATE` (10 a second), and
 forward-auth decisions of oauth2-proxy at `BENCH_RATE` (200 a second) with
 20 signed-in sessions (202) and with none (401), each for `BENCH_DURATION`
 (10 s). A run on the 4 vCPU container, everything in Docker at 2 CPUs a
@@ -332,5 +415,7 @@ container, at 100k with 500 users:
 | forward-auth, no session (401) | 2,000, 0 errors, p50 1.1 ms, p99 1.8 ms |
 
 Afterwards Keycloak held 715 MB, its PostgreSQL 126 MB, oauth2-proxy 9 MB
-and Redis 6 MB. As for the authorization products, these runs prove the
+and Redis 6 MB. Zitadel's image cannot be pulled where that run was made,
+so its part of the script is proved by the bench-products workflow, which
+runs the whole script on every change to these setups. As for the authorization products, these runs prove the
 setups; the measured numbers come from the collection and report tasks.

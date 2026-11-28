@@ -19,7 +19,8 @@
 // keyed by AUTHZBENCH_SPICEDB_KEY or AUTHZBENCH_OPENFGA_KEY.
 //
 //	forward_auth  GET -forward-url with a session cookie, as nginx asks
-//	oidc_login    a whole browser sign-in from -login-start
+//	oidc_login    a whole browser sign-in from -login-start, ended by the
+//	              redirect to -login-done when that is set
 //	mcp_call      a JSON-RPC tools/call on -mcp-url
 //
 // Requests go out at -rate per second for -warmup (not recorded) and then
@@ -79,6 +80,7 @@ type options struct {
 	sessionsFile                          string
 	loginStart, loginCreds, loginCookie   string
 	loginUserField, loginPassField        string
+	loginDone                             string
 	mcpURL, mcpTools, mcpProtocol         string
 }
 
@@ -129,6 +131,7 @@ func parse(args []string, stderr io.Writer) (*options, error) {
 	fs.StringVar(&o.loginCookie, "login-cookie", "__Host-wicket", "session cookie a successful sign-in sets")
 	fs.StringVar(&o.loginUserField, "login-user-field", "username", "user name input of the sign-in form")
 	fs.StringVar(&o.loginPassField, "login-password-field", "password", "password input of the sign-in form")
+	fs.StringVar(&o.loginDone, "login-done", "", "redirect URI that ends a sign-in with an authorization code, not followed (a sign-in at the provider alone)")
 
 	fs.StringVar(&o.mcpURL, "mcp-url", "", "MCP endpoint, such as http://127.0.0.1:8080/mcp")
 	fs.StringVar(&o.mcpTools, "mcp-tools", "", `JSON list of tools to call, [{"name":..., "arguments":{...}}], or @FILE`)
@@ -273,7 +276,7 @@ func build(ctx context.Context, o *options, getenv func(string) string, names []
 			return nil, err
 		}
 		login = &ops.Login{Client: client, Start: o.loginStart, Credentials: creds, SessionCookie: o.loginCookie,
-			UserField: o.loginUserField, PasswordField: o.loginPassField}
+			UserField: o.loginUserField, PasswordField: o.loginPassField, DoneURL: o.loginDone}
 		return login, nil
 	}
 	var mix []load.Weighted

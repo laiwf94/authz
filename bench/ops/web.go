@@ -74,7 +74,19 @@ type Credential struct{ User, Password string }
 // page that is not a redirect. It succeeds when the answers on the way set
 // a non-empty SessionCookie: for authz gateway, Start is
 // /login?app=APP&provider=PROVIDER and the cookie is __Host-wicket.
-// Keycloak and Zitadel logins work the same way with their own field names.
+// Keycloak's login works the same way with its own field names.
+//
+// A provider that asks for the user name and the password on two pages
+// (Zitadel's) is signed in to the same way: while no page has had the
+// password, a form with the user field and no password field is filled
+// with the user name and submitted. A form is submitted with the Origin
+// and Referer a browser sends, so a provider's CSRF checks of them pass.
+//
+// When DoneURL is set, a redirect to an address that starts with it ends
+// the login without being followed: one whose query carries an
+// authorization code after the password was submitted succeeds, any other
+// fails. That measures a sign-in at a provider on its own, with a redirect
+// URI nothing has to answer at, and needs no SessionCookie.
 type Login struct {
 	Client      *http.Client
 	Start       string
@@ -83,6 +95,7 @@ type Login struct {
 	// "username" and "password".
 	UserField, PasswordField string
 	SessionCookie            string
+	DoneURL                  string
 	// MaxSteps bounds the requests in one login; 0 means 20.
 	MaxSteps int
 }
@@ -92,16 +105,57 @@ func (*Login) Name() string { return "oidc_login" }
 
 // Do implements load.Op.
 func (l *Login) Do(ctx context.Context, _ int, rng *rand.Rand) error {
-	_, err := l.Session(ctx, rng)
+	_, err := l.draw(ctx, rng)
 	return err
 }
 
 // Session signs in once and returns the session cookie it set.
 func (l *Login) Session(ctx context.Context, rng *rand.Rand) (*http.Cookie, error) {
-	if len(l.Credentials) == 0 {
-		return nil, errors.New("login: no credentials")
+	res, err := l.draw(ctx, rng)
+	if err == nil && res.Session == nil {
+		// Only a sign-in that ended at DoneURL gets here.
+		return nil, fmt.Errorf("login: no %q cookie was set", l.SessionCookie)
 	}
-	cred := l.Credentials[rng.IntN(len(l.Credentials))]
+	return res.Session, err
+}
+
+func (l *Login) draw(ctx context.Context, rng *rand.Rand) (LoginResult, error) {
+	if len(l.Credentials) == 0 {
+		return LoginResult{}, errors.New("login: no credentials")
+	}
+	return l.SignIn(ctx, l.Credentials[rng.IntN(len(l.Credentials))])
+}
+
+// LoginResult is how a sign-in ended: the session cookie it set, if any,
+// and, when it ended at DoneURL, the address it was redirected to (which
+// carries the authorization code).
+type LoginResult struct {
+	Session *http.Cookie
+	Done    *url.URL
+}
+
+// Browser returns a function that signs a user in from a start address
+// with a Login of client and userField, ended by the redirect to done; it
+// is a products.Browser.
+func Browser(client *http.Client, userField string) func(ctx context.Context, start, done, user, password string) (*url.URL, error) {
+	return func(ctx context.Context, start, done, user, password string) (*url.URL, error) {
+		l := &Login{Client: client, Start: start, UserField: userField, DoneURL: done}
+		// With no session cookie to look for, a sign-in succeeds only at
+		// the redirect to done.
+		res, err := l.SignIn(ctx, Credential{User: user, Password: password})
+		return res.Done, err
+	}
+}
+
+// SignIn signs cred in once, ignoring Credentials.
+func (l *Login) SignIn(ctx context.Context, cred Credential) (LoginResult, error) {
+	s, done, err := l.signIn(ctx, cred)
+	return LoginResult{Session: s, Done: done}, err
+}
+
+// signIn signs in once. The cookie it returns is nil when the sign-in
+// ended at DoneURL before a session cookie was set.
+func (l *Login) signIn(ctx context.Context, cred Credential) (*http.Cookie, *url.URL, error) {
 	userField, passField := l.UserField, l.PasswordField
 	if userField == "" {
 		userField = "username"
@@ -116,18 +170,26 @@ func (l *Login) Session(ctx context.Context, rng *rand.Rand) (*http.Cookie, erro
 	jar := map[string]map[string]*http.Cookie{} // host -> name -> cookie
 	var session *http.Cookie
 	method, target, body := http.MethodGet, l.Start, ""
-	submitted := false
+	var referer *url.URL // the page a form was submitted from
+	submitted, userSubmitted := false, false
 	for range steps {
 		u, err := url.Parse(target)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		req, err := http.NewRequestWithContext(ctx, method, u.String(), strings.NewReader(body))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if method == http.MethodPost {
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		if referer != nil {
+			req.Header.Set("Referer", referer.String())
+			if method == http.MethodPost {
+				req.Header.Set("Origin", referer.Scheme+"://"+referer.Host)
+			}
+			referer = nil
 		}
 		req.Header.Set("Accept", "text/html")
 		for _, c := range jar[u.Host] {
@@ -135,7 +197,7 @@ func (l *Login) Session(ctx context.Context, rng *rand.Rand) (*http.Cookie, erro
 		}
 		resp, err := l.Client.Do(req)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, c := range resp.Cookies() {
 			if jar[u.Host] == nil {
@@ -154,6 +216,9 @@ func (l *Login) Session(ctx context.Context, rng *rand.Rand) (*http.Cookie, erro
 			resp.Body.Close()
 			// The client has already refused a Location that does not parse.
 			next, _ := u.Parse(loc)
+			if l.DoneURL != "" && strings.HasPrefix(next.String(), l.DoneURL) {
+				return session, next, l.done(next, submitted, cred.User)
+			}
 			method, target, body = http.MethodGet, next.String(), ""
 			continue
 		}
@@ -161,43 +226,75 @@ func (l *Login) Session(ctx context.Context, rng *rand.Rand) (*http.Cookie, erro
 		if err != nil {
 			if session != nil {
 				// Signed in; the page the login returns to is not ours to judge.
-				return session, nil
+				return session, nil, nil
 			}
-			return nil, fmt.Errorf("login: %s %s: %w", method, u.Redacted(), err)
+			return nil, nil, fmt.Errorf("login: %s %s: %w", method, u.Redacted(), err)
 		}
 		f, ok := findForm(page, passField)
+		if !ok && !submitted && !userSubmitted {
+			// The first page of a two-page sign-in asks for the name only.
+			if f, ok = findForm(page, userField); ok {
+				action, err := u.Parse(f.action)
+				if err != nil {
+					return nil, nil, fmt.Errorf("login: bad form action %q: %w", f.action, err)
+				}
+				f.values.Set(userField, cred.User)
+				userSubmitted, referer = true, u
+				method, target, body = f.submit(action)
+				continue
+			}
+		}
 		if !ok || submitted {
 			if session != nil {
-				return session, nil
+				return session, nil, nil
 			}
-			if submitted {
-				return nil, fmt.Errorf("login: %s was refused or did not sign in", cred.User)
+			if submitted || userSubmitted {
+				return nil, nil, fmt.Errorf("login: %s was refused or did not sign in", cred.User)
 			}
-			return nil, fmt.Errorf("login: %s has no form with a %q field", u.Redacted(), passField)
+			return nil, nil, fmt.Errorf("login: %s has no form with a %q field", u.Redacted(), passField)
 		}
 		action, err := u.Parse(f.action)
 		if err != nil {
-			return nil, fmt.Errorf("login: bad form action %q: %w", f.action, err)
+			return nil, nil, fmt.Errorf("login: bad form action %q: %w", f.action, err)
 		}
 		f.values.Set(userField, cred.User)
 		f.values.Set(passField, cred.Password)
-		submitted = true
-		if f.method == http.MethodGet {
-			action.RawQuery = f.values.Encode()
-			method, target, body = http.MethodGet, action.String(), ""
-		} else {
-			method, target, body = http.MethodPost, action.String(), f.values.Encode()
-		}
+		submitted, referer = true, u
+		method, target, body = f.submit(action)
 	}
 	if session != nil {
-		return session, nil
+		return session, nil, nil
 	}
-	return nil, fmt.Errorf("login: no session after %d requests", steps)
+	return nil, nil, fmt.Errorf("login: no session after %d requests", steps)
+}
+
+// done judges the redirect to DoneURL that ended a sign-in.
+func (l *Login) done(to *url.URL, submitted bool, user string) error {
+	q := to.Query()
+	switch {
+	case q.Get("error") != "":
+		return fmt.Errorf("login: %s: the provider answered %s: %s", user, q.Get("error"), q.Get("error_description"))
+	case q.Get("code") == "":
+		return fmt.Errorf("login: %s: redirected to %s without a code", user, l.DoneURL)
+	case !submitted:
+		return fmt.Errorf("login: %s: redirected to %s before a password was asked for", user, l.DoneURL)
+	}
+	return nil
 }
 
 type form struct {
 	method, action string
 	values         url.Values
+}
+
+// submit returns the request that submits f to action, as a browser sends
+// it.
+func (f form) submit(action *url.URL) (method, target, body string) {
+	if f.method == http.MethodGet {
+		action.RawQuery = f.values.Encode()
+		return http.MethodGet, action.String(), ""
+	}
+	return http.MethodPost, action.String(), f.values.Encode()
 }
 
 var (

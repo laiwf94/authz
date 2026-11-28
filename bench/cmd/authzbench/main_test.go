@@ -342,3 +342,32 @@ func TestRunProductsUsage(t *testing.T) {
 		}
 	}
 }
+
+// -login-done: a two-page sign-in at a provider alone, ended by the
+// redirect to a URI nothing answers at.
+func TestRunLoginDone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		switch r.URL.Path {
+		case "/signin":
+			fmt.Fprint(w, `<form method="post" action="/signin/name"><input name="user"></form>`)
+		case "/signin/name":
+			fmt.Fprintf(w, `<form method="post" action="/signin/password"><input type="hidden" name="user" value="%s"><input type="password" name="password"></form>`, r.Form.Get("user"))
+		case "/signin/password":
+			if r.Form.Get("password") != r.Form.Get("user")+"-pass" {
+				fmt.Fprint(w, "refused")
+				return
+			}
+			http.Redirect(w, r, "http://127.0.0.1:1/cb?code=c&state=s", http.StatusFound)
+		}
+	}))
+	defer srv.Close()
+	args := []string{"-mix", "oidc_login=1", "-rate", "50", "-warmup", "0s", "-duration", "300ms", "-max-error-rate", "0",
+		"-login-start", srv.URL + "/signin", "-login-user-field", "user", "-login-done", "http://127.0.0.1:1/cb"}
+	if code, stdout, stderr := runBench(t, keys, append(args, "-login-credentials", "ann:ann-pass")...); code != 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, stdout, stderr)
+	}
+	if code, stdout, _ := runBench(t, keys, append(args, "-login-credentials", "ann:wrong")...); code != 1 {
+		t.Fatalf("wrong password: exit %d\n%s", code, stdout)
+	}
+}

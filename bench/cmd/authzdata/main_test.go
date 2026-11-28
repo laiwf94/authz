@@ -26,7 +26,7 @@ const key = "authzdata-key-0123456789"
 func env(k string) string {
 	switch k {
 	case "AUTHZBENCH_API_KEY", "AUTHZBENCH_SPICEDB_KEY", "AUTHZBENCH_OPENFGA_KEY",
-		"AUTHZBENCH_KEYCLOAK_ADMIN_PASSWORD", "AUTHZBENCH_KEYCLOAK_CLIENT_SECRET":
+		"AUTHZBENCH_KEYCLOAK_ADMIN_PASSWORD", "AUTHZBENCH_KEYCLOAK_CLIENT_SECRET", "AUTHZBENCH_ZITADEL_TOKEN":
 		return key
 	}
 	return ""
@@ -320,11 +320,11 @@ func TestImport(t *testing.T) {
 	}
 
 	for _, args := range [][]string{
-		{"-api", srv.URL, "-target", "zitadel"},
 		{"-api", srv.URL, "-n", "-2"},
 		{"-api", srv.URL, "-n", "100000"},
 		{"-api", srv.URL, "-batch", "0"},
-		{"-api", srv.URL, "-workers", "0"},
+		{"-api", srv.URL, "-workers", "-1"},
+		{"-api", srv.URL, "-target", "other"},
 		{"-api", srv.URL, "-verify", "-2"},
 		{"-size", "nope", "-api", srv.URL},
 		{"-n", "5"},
@@ -344,5 +344,95 @@ func TestImport(t *testing.T) {
 	if code := run(context.Background(), []string{"import", "-size", "100k", "-api", srv.URL}, noSecret, &out2, &errOut2); code != 2 ||
 		!strings.Contains(errOut2.String(), "AUTHZBENCH_KEYCLOAK_CLIENT_SECRET") {
 		t.Errorf("no client secret: %d %s", code, errOut2.String())
+	}
+}
+
+// import -target zitadel sets the project and application up, imports and
+// reads back; signin signs users in through it and checks the ID tokens.
+func TestImportZitadel(t *testing.T) {
+	fake := &productstest.Zitadel{Token: key, Lag: 2}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	code, out, errOut := runCmd(t, "import", "-target", "zitadel", "-size", "100k", "-n", "60", "-api", srv.URL, "-verify", "-1")
+	if code != 0 || !strings.Contains(out, "imported 60 users in") || !strings.Contains(out, " 0 skipped") ||
+		!strings.Contains(out, "verified 60 users") || !strings.Contains(out, "client ID ") {
+		t.Fatalf("import: %d %s %s", code, out, errOut)
+	}
+	p := fake.Project("bench")
+	if p == nil || len(p.Apps) != 1 || p.Apps[0].Name != "bench-login" || fake.Users() != 60 {
+		t.Fatalf("after import: %+v, %d users", p, fake.Users())
+	}
+	if uris, _ := p.Apps[0].Config["redirectUris"].([]any); len(uris) != 1 || uris[0] != zitadelRedirect {
+		t.Errorf("redirect URIs %v", uris)
+	}
+	code, out, _ = runCmd(t, "import", "-target", "zitadel", "-size", "100k", "-n", "60", "-api", srv.URL, "-verify", "0")
+	if code != 0 || !strings.Contains(out, ": 0 added, ") || strings.Contains(out, "verified") {
+		t.Errorf("second import: %d %q", code, out)
+	}
+	code, out, errOut = runCmd(t, "signin", "-target", "zitadel", "-size", "100k", "-n", "60", "-sample", "4", "-api", srv.URL)
+	if code != 0 || !strings.Contains(out, "signed in 4 users") || !strings.Contains(out, "u0: subject u0, email u0@bench.example, roles ") {
+		t.Fatalf("signin: %d %s %s", code, out, errOut)
+	}
+	if fake.SignIns != 4 {
+		t.Errorf("%d sign-ins", fake.SignIns)
+	}
+	// A user whose roles are not the graph's groups fails.
+	fake.User("u0").Grants[p.ID] = []string{"g0", "g1", "g2"}
+	if code, _, errOut := runCmd(t, "signin", "-target", "zitadel", "-size", "100k", "-n", "60", "-sample", "1", "-api", srv.URL); code != 1 ||
+		!strings.Contains(errOut, "the graph has u0@bench.example and groups") {
+		t.Errorf("wrong roles: %d %s", code, errOut)
+	}
+	g, _ := datasets.Size(100_000, 1)
+	fake.User("u0").Grants[p.ID] = g.User(0).Groups
+	// A user that was never imported cannot sign in.
+	if code, _, errOut := runCmd(t, "signin", "-target", "zitadel", "-size", "100k", "-n", "2000", "-sample", "2", "-api", srv.URL); code != 1 ||
+		!strings.Contains(errOut, "was refused") {
+		t.Errorf("missing user: %d %s", code, errOut)
+	}
+	fake.SetFail(func(*http.Request) int { return http.StatusForbidden })
+	for _, cmd := range []string{"import", "signin"} {
+		if code, _, _ := runCmd(t, cmd, "-target", "zitadel", "-size", "100k", "-n", "5", "-api", srv.URL); code != 1 {
+			t.Errorf("refused %s: %d", cmd, code)
+		}
+	}
+	fake.SetFail(nil)
+	fake.SetFail(func(r *http.Request) int {
+		if r.URL.Path == "/v2/users/human" {
+			return http.StatusForbidden
+		}
+		return 0
+	})
+	if code, out, _ := runCmd(t, "import", "-target", "zitadel", "-size", "100k", "-n", "80", "-api", srv.URL); code != 1 || !strings.Contains(out, "imported 80 users") {
+		t.Errorf("refused users: %d %s", code, out)
+	}
+	fake.SetFail(nil)
+	for _, args := range [][]string{
+		{"-target", "keycloak", "-api", srv.URL},
+		{"-target", "other", "-api", srv.URL},
+		{"-target", "zitadel"},
+		{"-target", "zitadel", "-api", srv.URL, "-n", "0"},
+		{"-target", "zitadel", "-api", srv.URL, "-sample", "0"},
+		{"-target", "zitadel", "-api", srv.URL, "-size", "nope"},
+		{"-target", "zitadel", "-api", srv.URL, "extra"},
+	} {
+		if code, _, _ := runCmd(t, append([]string{"signin", "-size", "100k"}, args...)...); code != 2 {
+			t.Errorf("signin %v: status %d, want 2", args, code)
+		}
+	}
+	noToken := func(k string) string {
+		if k == "AUTHZBENCH_ZITADEL_TOKEN" {
+			return ""
+		}
+		return env(k)
+	}
+	var o, eb bytes.Buffer
+	if code := run(context.Background(), []string{"import", "-target", "zitadel", "-size", "100k", "-api", srv.URL}, noToken, &o, &eb); code != 2 ||
+		!strings.Contains(eb.String(), "AUTHZBENCH_ZITADEL_TOKEN") {
+		t.Errorf("no token: %d %s", code, eb.String())
+	}
+	// Other redirect URIs are kept as given.
+	if code, _, _ := runCmd(t, "import", "-target", "zitadel", "-size", "100k", "-n", "1", "-api", srv.URL, "-verify", "0",
+		"-redirect-uris", "http://127.0.0.1:18089/a,http://127.0.0.1:18089/b"); code != 0 || len(p.Apps[0].Config["redirectUris"].([]any)) != 2 {
+		t.Errorf("redirect URIs: %d %v", code, p.Apps[0].Config["redirectUris"])
 	}
 }
