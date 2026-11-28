@@ -1,0 +1,39 @@
+# docs/proxies.md's Traefik configuration, with TLS, in front of echo.py.
+tls:
+  certificates:
+    - certFile: /etc/proxy-certs/tls.pem
+      keyFile: /etc/proxy-certs/tls-key.pem
+http:
+  middlewares:
+    strip-identity:
+      headers:
+        customRequestHeaders:
+          X-Auth-User: ""
+          X-Auth-Email: ""
+          X-Auth-Groups: ""
+          X-Auth-Provider: ""
+          X-Auth-Token: ""
+    gateway:
+      forwardAuth:
+        address: "http://host.docker.internal:4180/auth?redirect=1"
+        trustForwardHeader: false
+        authResponseHeaders: ["X-Auth-User", "X-Auth-Email", "X-Auth-Groups", "X-Auth-Provider", "X-Auth-Token"]
+    gateway-prefix:
+      stripPrefix:
+        prefixes: ["/_wicket"]
+  routers:
+    myapp:
+      rule: "Host(`localhost`)"
+      middlewares: ["strip-identity", "gateway"]
+      service: myapp
+      tls: {}
+    gateway:
+      rule: "Host(`localhost`) && PathPrefix(`/_wicket`)"
+      middlewares: ["gateway-prefix"]
+      service: gateway
+      tls: {}
+  services:
+    myapp:
+      loadBalancer: {servers: [{url: "http://host.docker.internal:8081"}]}
+    gateway:
+      loadBalancer: {servers: [{url: "http://host.docker.internal:4180"}]}

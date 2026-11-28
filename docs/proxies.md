@@ -134,16 +134,18 @@ location / {
   auth_request_set $auth_user     $upstream_http_x_auth_user;
   auth_request_set $auth_email    $upstream_http_x_auth_email;
   auth_request_set $auth_groups   $upstream_http_x_auth_groups;
+  auth_request_set $auth_provider $upstream_http_x_auth_provider;
   auth_request_set $auth_token    $upstream_http_x_auth_token;
   auth_request_set $auth_redirect $upstream_http_x_auth_redirect;
   error_page 401 = @login;
 
   # Set unconditionally: an empty value removes the header, so a client's
   # own X-Auth-User never reaches the app.
-  proxy_set_header X-Auth-User   $auth_user;
-  proxy_set_header X-Auth-Email  $auth_email;
-  proxy_set_header X-Auth-Groups $auth_groups;
-  proxy_set_header X-Auth-Token  $auth_token;
+  proxy_set_header X-Auth-User     $auth_user;
+  proxy_set_header X-Auth-Email    $auth_email;
+  proxy_set_header X-Auth-Groups   $auth_groups;
+  proxy_set_header X-Auth-Provider $auth_provider;
+  proxy_set_header X-Auth-Token    $auth_token;
   proxy_pass http://myapp:8080;
 }
 
@@ -157,7 +159,8 @@ location @login {
 Traefik passes a non-2xx answer from the auth server straight to the client,
 so the gateway can redirect browsers itself (`?redirect=1`); API calls (no
 `text/html` in `Accept`, `X-Requested-With` set, or a non-GET method) still
-get a 401 JSON error. Traefik sets `X-Forwarded-Method/-Proto/-Host/-Uri`.
+get a 401 JSON error. Traefik sets `X-Forwarded-Method/-Proto/-Host/-Uri`
+itself, from the request as the client sent it.
 
 ```yaml
 http:
@@ -199,11 +202,16 @@ host listed in the gateway's config.
 
 ## Envoy (`ext_authz`, HTTP service)
 
-Envoy appends the original path to `path_prefix` and keeps the original
-`Host`, so the endpoint is `/auth/envoy/<original path>`. Denied answers
-(including the gateway's 302) go to the client.
+Envoy appends the original path to `path_prefix`, keeps the original
+`Host` and method, so the endpoint is `/auth/envoy/<original path>`.
+Denied answers (including the gateway's 302) go to the client. These are
+fields of the `HttpConnectionManager`; `normalize_path` and `merge_slashes`
+make Envoy resolve `.`, `..` and `//` before both the gateway and the app
+see the path (see [Public paths and path rules](#public-paths-and-path-rules)).
 
 ```yaml
+normalize_path: true
+merge_slashes: true
 http_filters:
 # Runs first, so a client's own identity headers are gone before ext_authz
 # adds the gateway's.
@@ -255,9 +263,90 @@ Route-level `request_headers_to_remove` would not work here: the router
 applies it after ext_authz, so it would delete the gateway's headers too. Filters
 run in order, which is why the stripping is a filter placed before ext_authz.
 
-The nginx configuration is exercised live by the demo. The Traefik and Envoy
-snippets follow those proxies' documented forward-auth behavior; the gateway's side
-of both (`?redirect=1` and `/auth/envoy/`) is covered by the end-to-end tests.
+All three configurations run live. The demo runs nginx's, and
+`wicket/examples/proxies.sh` runs each of them in turn (the files are in
+`wicket/examples/proxies/`, with TLS added) at pinned versions, nginx
+1.27.3, Traefik 3.3.4 and Envoy 1.33.2, in front of an app that echoes what
+reached it, and checks what the table at the end of the next section
+shows. CI runs it in
+the end-to-end job, and `TestProxySnippetsStripIdentity` checks that every
+snippet here and every tested file strips and forwards each `X-Auth-*`
+header the gateway sends.
+
+## Public paths and path rules
+
+An app's `public` prefixes and `paths` rules (see the README) are decided
+by the gateway, like the rest of its policy, so the proxy configuration
+above does not change when they do. What the proxy must get right:
+
+**Send every request through forward-auth, public ones included.** Don't
+give `/static` a `location` without `auth_request`, or a router without the
+gateway middleware. The rules would then live in two places; a narrower
+rule under the public prefix (a `deny`, a rule with `methods`) would never
+run; a signed-in user would not be named on the public page; and the
+stripping of `X-Auth-*` headers would be skipped there, so a client's own
+headers would reach the app.
+
+**A public page is answered 200, with or without an identity.** A visitor
+who is not signed in gets 200 and no `X-Auth-*` headers. A signed-in user
+of a provider the app accepts gets the usual headers and token, so a public
+page can greet them. Because every snippet sets or removes each identity
+header on every request, the app sees the gateway's identity or none,
+never one the client sent. An app should treat a request without
+`X-Auth-Token` on a public path as anonymous, not as an error.
+
+**Send the method.** Rules can name methods (`"methods": ["GET"]`). The
+gateway reads `X-Forwarded-Method`, then `X-Original-Method`, then the
+method of the auth request itself. Traefik sets `X-Forwarded-Method` and
+Envoy sends the auth request with the original method. nginx's auth
+subrequest is always a GET, so the `proxy_set_header X-Forwarded-Method
+$request_method` line is required: without it every request is judged as
+a GET, and a POST to a path that is public only for GET is let through.
+
+**Send the path as the client sent it.** nginx must send `$request_uri`,
+not `$uri`, which nginx has already decoded and resolved. Traefik sends
+the raw path in `X-Forwarded-Uri`, and Envoy appends it to `path_prefix`.
+The gateway percent-decodes the path, resolves `.`, `..` and repeated
+slashes, and only then matches the rules, so `/static/../admin` is judged
+as `/admin`, not as part of the public `/static`. It refuses, with 403
+`bad_path` and no login redirect, signed in or not, a path that two servers
+could read differently: an encoded `/` or `\`, a `\`, a `;`, a control
+byte or a bad escape.
+
+**The app must read the path the same way.** nginx (with a `proxy_pass`
+that has no URI part, as above) and Traefik pass the client's path to the
+app unchanged, `.`, `..` and `//` included. The gateway judged the
+resolved path, so the app must resolve dot segments as RFC 3986 does,
+which is what most servers and frameworks do. With Envoy, set
+`normalize_path` and `merge_slashes`, as in the snippet: Envoy then
+resolves the path once, and the gateway and the app see the same one.
+Leave `path_with_escaped_slashes_action` at its default, so that an
+encoded slash reaches the gateway and is refused.
+
+**Step-up and API clients.** A step-up answer is 401 `step_up_required`
+with an `insufficient_user_authentication` challenge in `WWW-Authenticate`
+and the login URL in `X-Auth-Redirect`, or a 302 for a browser navigation
+through `?redirect=1` and the Envoy endpoint. Traefik and Envoy pass the
+401 to API clients. nginx's `error_page 401 = @login` sends every 401 to
+the login page; for API clients, a `location` without that line returns
+the 401, and nginx copies the gateway's `WWW-Authenticate` onto it.
+
+What `wicket/examples/proxies.sh` sees with the app of
+`wicket/examples/proxies/wicket.json`, where `/static` and GET `/wiki` are
+public, `/admin` needs the `admins` group, `DELETE /admin/audit` is
+refused and every other path needs a sign-in:
+
+| Request | nginx | Traefik | Envoy |
+|---|---|---|---|
+| `GET /wiki/home`, signed out, with a forged `X-Auth-User` | 200; the app sees no identity | same | same |
+| `GET /wiki/home`, signed in as bob | 200; the app sees bob and a token | same | same |
+| `POST /wiki/home`, signed out | 302 to the login page | 401 | 401 |
+| `GET /static/../admin/users`, signed out | 302 to the login page | same | same |
+| `GET /static/../admin//users`, as alice: path the app gets | `/static/../admin//users` | same as nginx | `/admin/users` |
+| `GET /static%2F..%2Fadmin/users`, `/static/..;/admin` | 403 `bad_path` | same | same |
+| `GET /admin%zz` | 400 from nginx | stream reset by Traefik (HTTP/2) | 400 from Envoy |
+| `GET /admin/users`, as bob / as alice | 403 / 200 | same | same |
+| `DELETE /admin/audit`, as alice | 403 | same | same |
 
 ## Correlation IDs and `traceparent`
 

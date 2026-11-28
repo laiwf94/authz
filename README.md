@@ -226,6 +226,7 @@ $ export WICKET_COOKIE_KEYS=$(./authz gateway genkey)
 $ ./authz gateway check -online wicket.json    # your config: file checks, then each provider
 $ WICKET_CONFIG=wicket.json ./authz gateway     # :4180, admin API on 127.0.0.1:4181
 $ ./wicket/examples/demo.sh                     # nginx in Docker, OIDC and SAML logins, end to end
+$ ./wicket/examples/proxies.sh                  # public paths and path rules through nginx, Traefik and Envoy
 ```
 
 `WICKET_KEYS_FILE` (or `keys_file` in the gateway section) moves the cookie
@@ -245,7 +246,11 @@ decides the rest. Paths are decoded and `.`/`..` resolved before matching,
 and a path servers could read differently (an encoded `/` or `\`, a `;`) is
 refused with 403 `bad_path`; an app without `public` or `paths` never
 looks at the path. Matching order and checks are in
-[internal/authn/policy](internal/authn/policy/paths.go).
+[internal/authn/policy](internal/authn/policy/paths.go). Public paths still
+go through forward-auth, so the gateway can name a signed-in user and strip
+a client's own `X-Auth-*` headers; what each proxy must send (the method
+and the raw path) is in
+[docs/proxies.md](docs/proxies.md#public-paths-and-path-rules).
 
 An `allow` (the app's or a path rule's) can also hold claim conditions on
 the sign-in's OpenID Connect claims or SAML attributes:

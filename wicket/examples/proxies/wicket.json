@@ -1,0 +1,30 @@
+{
+  "public_url": "https://localhost:8443/_wicket",
+  "session": {"idle_timeout": "1h", "absolute_timeout": "8h"},
+  "providers": [
+    {
+      "id": "corp",
+      "type": "oidc",
+      "display_name": "Corporate SSO (OpenID Connect)",
+      "issuer": "https://localhost:9443",
+      "client_id": "wicket-demo",
+      "client_secret_env": "DEMO_CLIENT_SECRET",
+      "ca_file": "certs/ca.pem",
+      "userinfo": true
+    }
+  ],
+  "apps": [
+    {
+      "id": "wiki",
+      "hosts": ["localhost:8443"],
+      "providers": ["corp"],
+      "allow": {"any_user": true},
+      "public": ["/static"],
+      "paths": [
+        {"path": "/wiki", "methods": ["GET"], "public": true},
+        {"path": "/admin", "allow": {"groups": ["admins"]}},
+        {"path": "/admin/audit", "methods": ["DELETE"], "deny": true}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+# Traefik's static configuration for proxies.sh: one TLS entry point and
+# the file provider with docs/proxies.md's routers and middlewares.
+entryPoints:
+  websecure:
+    address: ":8443"
+providers:
+  file:
+    filename: /etc/proxy/traefik-dynamic.yml
+log:
+  level: WARN

@@ -173,6 +173,12 @@ jobs:
         run: |
           go test -count=1 -v -run '^TestGoldenGateway$' ./cmd/authz/internal/gateway
           ./wicket/examples/demo.sh
+      # docs/proxies.md's nginx, Traefik and Envoy configurations, each in
+      # Docker at a pinned version in front of an app that echoes what
+      # reached it: public paths, path rules, forged identity headers,
+      # traversal and ambiguous paths (#82).
+      - name: Proxies (authn)
+        run: ./wicket/examples/proxies.sh
       # toolgate's policy cases and its demo, which compares every decision
       # with a recording made by the old binary.
       - name: Policy cases (agents)

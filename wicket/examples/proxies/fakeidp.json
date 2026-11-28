@@ -1,0 +1,10 @@
+{
+  "issuer": "https://localhost:9443",
+  "clients": [
+    {
+      "id": "wicket-demo",
+      "secret_env": "DEMO_CLIENT_SECRET",
+      "redirect_uris": ["https://localhost:8443/_wicket/callback/corp"]
+    }
+  ]
+}

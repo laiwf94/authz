@@ -1,0 +1,78 @@
+# docs/proxies.md's Envoy configuration, with TLS, in front of echo.py.
+static_resources:
+  listeners:
+  - name: app
+    address: {socket_address: {address: 0.0.0.0, port_value: 8443}}
+    filter_chains:
+    - transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            tls_certificates:
+            - certificate_chain: {filename: /etc/proxy-certs/tls.pem}
+              private_key: {filename: /etc/proxy-certs/tls-key.pem}
+      filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: app
+          normalize_path: true
+          merge_slashes: true
+          http_filters:
+          - name: envoy.filters.http.header_mutation
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+              mutations:
+                request_mutations:
+                - remove: x-auth-user
+                - remove: x-auth-email
+                - remove: x-auth-groups
+                - remove: x-auth-provider
+                - remove: x-auth-token
+          - name: envoy.filters.http.ext_authz
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+              transport_api_version: V3
+              http_service:
+                server_uri: {uri: "gateway:4180", cluster: gateway, timeout: 2s}
+                path_prefix: /auth/envoy
+                authorization_request:
+                  allowed_headers:
+                    patterns: [{exact: cookie}, {exact: accept}, {exact: x-requested-with}, {exact: x-forwarded-proto}]
+                authorization_response:
+                  allowed_upstream_headers:
+                    patterns: [{prefix: x-auth-}]
+                  allowed_client_headers:
+                    patterns: [{exact: location}, {exact: content-type}, {exact: x-auth-redirect}]
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+          route_config:
+            virtual_hosts:
+            - name: app
+              domains: ["localhost:8443", "localhost"]
+              routes:
+              - match: {prefix: "/_wicket/"}
+                route: {cluster: gateway, prefix_rewrite: "/"}
+                typed_per_filter_config:
+                  envoy.filters.http.ext_authz:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                    disabled: true
+              - match: {prefix: "/"}
+                route: {cluster: myapp}
+  clusters:
+  - name: gateway
+    type: STRICT_DNS
+    load_assignment:
+      cluster_name: gateway
+      endpoints:
+      - lb_endpoints:
+        - endpoint: {address: {socket_address: {address: host.docker.internal, port_value: 4180}}}
+  - name: myapp
+    type: STRICT_DNS
+    load_assignment:
+      cluster_name: myapp
+      endpoints:
+      - lb_endpoints:
+        - endpoint: {address: {socket_address: {address: host.docker.internal, port_value: 8081}}}
