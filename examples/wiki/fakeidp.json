@@ -1,0 +1,10 @@
+{
+  "issuer": "https://localhost:9443",
+  "clients": [
+    {
+      "id": "wiki",
+      "secret_env": "WIKI_CLIENT_SECRET",
+      "redirect_uris": ["https://localhost:4180/callback/corp"]
+    }
+  ]
+}

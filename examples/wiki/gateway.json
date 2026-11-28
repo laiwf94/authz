@@ -1,0 +1,32 @@
+{
+  "public_url": "https://localhost:4180",
+  "session": {"idle_timeout": "1h", "absolute_timeout": "8h"},
+  "providers": [
+    {
+      "id": "corp",
+      "type": "oidc",
+      "display_name": "Corporate SSO",
+      "issuer": "https://localhost:9443",
+      "client_id": "wiki",
+      "client_secret_env": "WIKI_CLIENT_SECRET",
+      "ca_file": "certs/ca.pem"
+    }
+  ],
+  "apps": [
+    {
+      "id": "wiki",
+      "hosts": ["localhost:8443"],
+      "providers": ["corp"],
+      "allow": {"any_user": true},
+      "public": ["/static"],
+      "paths": [
+        {"path": "/pages", "methods": ["GET"], "public": true},
+        {"path": "/pages/{id}", "methods": ["PUT", "DELETE"],
+         "check": {"resource": "page:{path.id}", "permission": "edit"}},
+        {"path": "/admin", "allow": {"groups": ["admins"]},
+         "step_up": {"max_age": "15m", "acr_values": ["urn:fakeidp:acr:mfa"]}},
+        {"path": "/admin/audit", "methods": ["DELETE"], "deny": true}
+      ]
+    }
+  ]
+}

@@ -179,6 +179,13 @@ jobs:
       # traversal and ambiguous paths (#82).
       - name: Proxies (authn)
         run: ./wicket/examples/proxies.sh
+      # A wiki behind the gateway through the built binary, under
+      # `authz run -parts serve,gateway`: public pages, a relationship rule
+      # answered by serve's engine in process, an admin area that needs a
+      # step-up to a one-time code sign-in, a denied action, and
+      # POST /admin/explain agreeing with forward-auth (#82).
+      - name: Wiki (authn)
+        run: ./examples/wiki/demo.sh
       # toolgate's policy cases and its demo, which compares every decision
       # with a recording made by the old binary.
       - name: Policy cases (agents)

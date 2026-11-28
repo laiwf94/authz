@@ -1,0 +1,12 @@
+// The wiki's pages: an owner and editors, who may be groups.
+definition user {}
+
+definition group {
+  relation member: user | group#member
+}
+
+definition page {
+  relation owner: user
+  relation editor: user | group#member
+  permission edit = owner + editor
+}

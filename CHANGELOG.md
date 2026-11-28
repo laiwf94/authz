@@ -399,6 +399,47 @@ link the roadmap issue they come from.
   24h, the grace at most 24h, and `revalidate` on a SAML provider is an
   error. `authz fakeidp` now issues rotating refresh tokens.
 
+- **Route rules backed by relationship checks, with step-up** ([#82](https://github.com/laiwf94/authz/issues/82)).
+  - An app can list `public` path prefixes and `paths` rules (`path`,
+    optional `exact` and `methods`, then `public`, `deny` or an `allow`),
+    where a `{name}` segment matches any one segment. The most specific
+    rule that covers the method decides, and rules that would tie are
+    refused at load. Paths are decoded and resolved before matching, and
+    an ambiguous path (an encoded `/` or `\`, a `;`) is refused with 403
+    `bad_path`. An app without `public` or `paths` behaves as before.
+    Forward-auth reads the method from `X-Forwarded-Method`, then
+    `X-Original-Method`, then the request's own (Envoy).
+  - `allow.claims` holds conditions on OpenID Connect claims and SAML
+    attributes with `equals`, `in` or `matches` (a glob). Sessions keep the
+    claims the conditions name, across restarts. New reason
+    `claims_not_matched`.
+  - A path rule's `check` asks the authorization engine
+    (`{"resource": "doc:{path.id}", "permission": "edit"}`). Under
+    `authz run` the check is in process and each session carries its
+    consistency token. New reasons `check_denied`, `check_bad_input`,
+    `check_conditional` and 503 `check_unavailable`; new metric
+    `wicket_relationship_checks_total{result}`. A gateway without a serve
+    part warns at startup for each app with check rules.
+  - A path rule's `step_up` (`max_age`, `acr_values`) sends users back to
+    their provider and returns them to the original URL; API clients get
+    401 `step_up_required` with an RFC 9470 challenge. A provider that
+    ignores the request gets 403 `step_up_not_satisfied`, and a step-up
+    that cannot succeed 403 `step_up_loop`. New metric
+    `wicket_step_ups_total{reason}`. `authz fakeidp` issues `auth_time`
+    and `acr` and asks for a one-time code for `urn:fakeidp:acr:mfa`.
+  - `POST /admin/explain` on the admin listener says what forward-auth
+    would answer for a URL and method, for a live session, a synthetic
+    identity or a signed-out user: the rule chain, claim conditions,
+    step-up and the engine's check trace, with no side effects.
+  - docs/proxies.md explains public paths and path rules for nginx,
+    Traefik and Envoy. The nginx snippet now strips `X-Auth-Provider`, and
+    the Envoy snippet sets `normalize_path` and `merge_slashes`. Envoy
+    forward-auth requests with `.` or `..` in the path are now decided
+    instead of redirected ([#264](https://github.com/laiwf94/authz/issues/264)).
+  - `examples/wiki/demo.sh` runs a wiki with all of this end to end under
+    `authz run`, and `wicket/examples/proxies.sh` runs the proxy
+    configurations live; both run in CI.
+
 ### Agent gateway (agents)
 
 - **Agent tokens from authorization servers** ([#84](https://github.com/laiwf94/authz/issues/84)).

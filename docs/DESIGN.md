@@ -536,6 +536,81 @@ cannot name another's. Ending the current session clears the cookie
 locally; `/logout` remains the way to also sign out at the provider. Each
 ended session is a `session_revoked` audit record with `by: "user"`.
 
+### Route rules (#82)
+
+An app's access used to be one rule: who, by email, domain or group. Since
+week 4 it is an `App` compiled into a `policy.Policy` at load
+([internal/authn/policy](../internal/authn/policy)): public prefixes,
+per-path and per-method rules, claim conditions, relationship checks and
+step-up. A reload compiles the new config completely before it replaces
+the running one, so a bad rule never half-applies.
+
+**Matching.** Paths are percent-decoded, then `.`, `..` and repeated
+slashes are resolved, before anything is matched; a path that two servers
+could read differently (an encoded `/` or `\`, a `\`, a `;`, control
+bytes, a bad escape) is refused with 403 `bad_path` whether or not the
+caller is signed in. The rules sit in a segment trie, with literal
+children in a map and one `{param}` child per node. The most specific rule
+that covers the method wins: more segments, then exact over prefix, then a
+literal over a parameter at the first difference, then a rule listing the
+method over one listing none; GET covers HEAD. Two rules that would tie
+are refused at load, so the order never depends on how the file is
+written. Matching a clean path allocates nothing, and the trie is checked
+against a naive matcher on random rule sets (`paths_test.go`) and by
+`FuzzMatch`. `BenchmarkDecide` holds a decision among 1,000 path and claim
+rules under 2 µs with no allocations in CI's "Benchmark limits" step
+(about 250 ns here).
+
+**Decision order.** For the selected rule: `public` lets anyone through,
+naming the user only when they are signed in with one of the app's
+providers; `deny` refuses everyone; otherwise the user must be signed in,
+pass the rule's lists and every claim condition, then meet its `step_up`,
+and only then is the engine asked for a `check` rule. So a user the rule
+refuses gets 403 without being sent to sign in again, and a user who must
+step up does so before a check is spent on them.
+
+**Claims.** `sub`, `idp`, `email`, `name` and `groups` always read the
+identity the gateway verified; any other name reads the claims kept in the
+session. A sign-in keeps only the claims some condition of an app
+accepting its provider names, within fixed limits, in the session log, so
+a restart keeps them and a reload naming a new claim denies until the user
+signs in again. The glob matcher backtracks only to the last star, so it
+is linear in value times pattern and cannot be made to blow up.
+
+**Relationship checks.** A `check` builds the resource and subject from
+`{path.<name>}`, `{claims.sub}` and `{claims.idp}` templates compiled at
+load. Under `authz run` it is a call into serve's `engine.Local`, with no
+network hop. Each session keeps the consistency token of its newest check
+in memory and sends the next one `at_least_as_fresh` with it, so a user
+never sees an older state than they already have; a token the engine
+refuses is retried once fully consistent. An engine that cannot answer is
+503 `check_unavailable`, logged as an error and not audited as a denial.
+
+**Step-up.** `max_age` and `acr_values` are sent to the provider (SAML:
+`ForceAuthn` and `RequestedAuthnContext`) and checked again at the
+callback, before the new session replaces the old one: a provider that
+ignores the request gets a 403 page, not a loop. A session made by a
+step-up that fails its own rule within a minute (a reload made the rule
+stricter, or the provider answered differently from what was checked) is
+403 `step_up_loop`. Browsers are redirected through `/auth?redirect=1` and
+come back to the original URL with its query; anything else gets 401 with
+an RFC 9470 `insufficient_user_authentication` challenge.
+
+**Explain.** `POST /admin/explain` runs the same `decide` as forward-auth
+in an explain mode: the candidate chain is collected by a second walk of
+the trie only when an explanation is asked for, and the check goes through
+`engine.Local.Explain`, which reads past the result cache so the trace
+shows the reasoning. It touches no session, consistency token, audit
+record or metric. `TestExplainAgreesWithForwardAuth` compares the two over
+every kind of answer, and `examples/wiki/demo.sh` does the same through
+the built binary under `authz run`.
+
+**End to end.** `examples/wiki/demo.sh` (CI's "Wiki (authn)" step) is a
+wiki with public pages, a page-edit relationship rule, an admin area that
+needs a step-up to a one-time code sign-in and a denied action, signed in
+to over OpenID Connect with `authz fakeidp`; `wicket/examples/proxies.sh`
+runs the public-path rules through nginx, Traefik and Envoy in Docker.
+
 ### Key rings in the gateway
 
 Without a keys file the gateway keeps wicket's two key lists.

@@ -178,10 +178,10 @@ serve's engine in process (`part.Host.Engine` hands it to them): no network
 hop, the same check cache, and the same consistency tokens as the HTTP API,
 so a token from a `/v1/relationships/write` is good for an in-process check
 and the other way round. In-process checks show in
-`grantd_check_duration_seconds` on every `/metrics`. Gateway route rules
-and MCP tool rules that make such checks come with the sign-on and agent
-roadmap weeks ([#82](https://github.com/laiwf94/authz/issues/82),
-[#87](https://github.com/laiwf94/authz/issues/87)).
+`grantd_check_duration_seconds` on every `/metrics`. Gateway path rules
+make such checks ([#82](https://github.com/laiwf94/authz/issues/82); see
+[the wiki example](#a-wiki-end-to-end)), and MCP tool rules come with the
+agent roadmap week ([#87](https://github.com/laiwf94/authz/issues/87)).
 
 ```console
 $ authz run -config authz.json
@@ -227,6 +227,7 @@ $ ./authz gateway check -online wicket.json    # your config: file checks, then 
 $ WICKET_CONFIG=wicket.json ./authz gateway     # :4180, admin API on 127.0.0.1:4181
 $ ./wicket/examples/demo.sh                     # nginx in Docker, OIDC and SAML logins, end to end
 $ ./wicket/examples/proxies.sh                  # public paths and path rules through nginx, Traefik and Envoy
+$ ./examples/wiki/demo.sh                       # a wiki: public pages, a relationship rule, step-up, explain
 ```
 
 `WICKET_KEYS_FILE` (or `keys_file` in the gateway section) moves the cookie
@@ -306,6 +307,60 @@ it, and for a relationship rule the check sent with the engine's explain
 trace (at most `trace_nodes`, default 1000). It touches no session, writes
 no audit record and counts no metric
 ([internal/authn/server](internal/authn/server/explain.go)).
+
+### A wiki end to end
+
+[examples/wiki](examples/wiki) puts these rules together for a wiki
+([gateway.json](examples/wiki/gateway.json),
+[wiki.schema](examples/wiki/wiki.schema)): `/static` and `GET /pages` are
+public, `PUT` and `DELETE /pages/{id}` need `edit` on `page:{id}` in the
+engine, `/admin` needs the `admins` group and a sign-in with a one-time
+code, `DELETE /admin/audit` is refused to everyone, and any signed-in user
+may open the rest:
+
+```json
+"public": ["/static"],
+"paths": [
+  {"path": "/pages", "methods": ["GET"], "public": true},
+  {"path": "/pages/{id}", "methods": ["PUT", "DELETE"],
+   "check": {"resource": "page:{path.id}", "permission": "edit"}},
+  {"path": "/admin", "allow": {"groups": ["admins"]},
+   "step_up": {"max_age": "15m", "acr_values": ["urn:fakeidp:acr:mfa"]}},
+  {"path": "/admin/audit", "methods": ["DELETE"], "deny": true}
+]
+```
+
+`demo.sh` builds the binary, starts `authz fakeidp` and
+`authz run -parts serve,gateway` over TLS, loads the schema and three
+relationships with `authz ctl`, and plays the browser and Traefik's
+ForwardAuth with curl. It runs in CI on every push:
+
+```console
+$ ./examples/wiki/demo.sh
+== A signed-out visitor
+   ok: public pages are answered with no identity
+   ok: writing a page is not public (401 to an API client), private pages go to the login page
+...
+== alice: signed in with a password, then stepping up for /admin
+   ok: an API client gets 401 step_up_required with the RFC 9470 challenge
+   ok: the browser is sent to sign in again, the IdP asks for the one-time code, and alice is back at /admin/users?sort=name
+...
+== POST /admin/explain: the same answers, and why
+   ok: bob's PUT /pages/roadmap: 403 check_denied by paths[1], chain /pages/{id} (selected) > GET /pages > the app's allow, the engine said no to page:roadmap#edit@user:bob
+   ok: carol's PUT: 200, the engine's trace goes through group:eng#member
+   ok: a synthetic alice signed in with a password: 401 step_up_acr, with the login URL forward-auth would send
+...
+All wiki checks passed.
+```
+
+To ask the running gateway yourself:
+
+```console
+$ curl -s --cacert certs/ca.pem -H "Authorization: Bearer $WICKET_ADMIN_TOKEN" \
+    -H 'Content-Type: application/json' https://localhost:4181/admin/explain \
+    -d '{"url": "https://localhost:8443/pages/roadmap", "method": "PUT", "identity": {"provider": "corp", "sub": "bob"}}'
+{"app":"wiki","method":"PUT","path":"/pages/roadmap","status":403,"decision":"forbidden","reason":"check_denied","rule":"paths[1]","rules":[...],"identity":{"provider":"corp","sub":"bob"},"check":{"resource":"page:roadmap","permission":"edit","subject":"user:bob","consistency":"minimize_latency","result":"denied","revision":2,"trace":{...}}}
+```
 
 `"revalidate": {"interval": "5m"}` on an OpenID provider confirms every
 session with its refresh token at that interval and ends it when the
