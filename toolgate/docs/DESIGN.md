@@ -71,6 +71,12 @@ reaching the upstream (audit failure, upstream busy); a rule's own daily
 quota is refunded with it. A rule's limits are counted under a key made of
 its id and the limits themselves, in limiters that outlive policy reloads,
 so a reload carries the counts of every rule whose limits it leaves alone.
+Nothing else is kept for them: `GET /admin/limits` and the per-rule
+metrics walk the two tables when asked and split each key back into the
+limits and the agent, so the call path pays nothing for being observable
+and an agent id never becomes a metric label. The walk holds each table's
+lock for about a millisecond per 10,000 keys, which a scrape every few
+seconds can afford.
 Time windows and `when` conditions are part of policy, decided at the
 gateway's clock. And the "started"
 record is durable before the upstream is contacted, so a crash after that

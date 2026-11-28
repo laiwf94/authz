@@ -53,6 +53,9 @@ toolgate_redactions_total 1
 # TYPE toolgate_relationship_checks_total counter
 toolgate_relationship_checks_total{result="allowed"} 1
 toolgate_relationship_checks_total{result="denied"} 1
+# HELP toolgate_rule_limit_refusals_total Calls refused by a tool rule's own rate limit or daily quota, by rule.
+# TYPE toolgate_rule_limit_refusals_total counter
+toolgate_rule_limit_refusals_total{rule_id="search-cap",limit="rate"} 1
 # HELP toolgate_tool_calls_total Tool calls by outcome.
 # TYPE toolgate_tool_calls_total counter
 toolgate_tool_calls_total{upstream="",tool="",outcome="unknown_tool"} 1
@@ -116,6 +119,17 @@ toolgate_approvals_pending 1
 # HELP toolgate_audit_records Records in the audit log.
 # TYPE toolgate_audit_records gauge
 toolgate_audit_records 128
+# HELP toolgate_rule_limit_agents Agents holding state under a tool rule's limit: a rate bucket that is not full, or calls counted today.
+# TYPE toolgate_rule_limit_agents gauge
+toolgate_rule_limit_agents{rule_id="search-cap",limit="daily"} 3
+toolgate_rule_limit_agents{rule_id="search-cap",limit="rate"} 3
+# HELP toolgate_rule_limit_daily_used Calls counted today under a tool rule's daily quota, all agents together.
+# TYPE toolgate_rule_limit_daily_used gauge
+toolgate_rule_limit_daily_used{rule_id="search-cap"} 40
+# HELP toolgate_rule_limit_exhausted Agents that a tool rule's limit refuses now: less than one token in the rate bucket, or the daily quota used up.
+# TYPE toolgate_rule_limit_exhausted gauge
+toolgate_rule_limit_exhausted{rule_id="search-cap",limit="daily"} 1
+toolgate_rule_limit_exhausted{rule_id="search-cap",limit="rate"} 1
 # HELP toolgate_sessions_open Open legacy MCP sessions.
 # TYPE toolgate_sessions_open gauge
 toolgate_sessions_open 2

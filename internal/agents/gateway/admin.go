@@ -45,6 +45,7 @@ func (g *Gateway) AdminHandler(adminToken string) http.Handler {
 	route("GET /admin/policy", g.getPolicy)
 	route("POST /admin/policy/reload", g.reloadPolicy)
 	route("POST /admin/explain", g.explainCall)
+	route("GET /admin/limits", g.listLimits)
 	route("GET /admin/audit/head", g.auditHead)
 	route("GET /admin/audit/checkpoint", g.auditCheckpoint)
 	route("POST /admin/audit/export", g.auditExport)

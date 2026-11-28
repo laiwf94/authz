@@ -219,6 +219,7 @@ func New(opt Options) (*Gateway, error) {
 	g.m.Gauge("toolgate_tools_quarantined", "Tools whose definition changed and awaits review.", func() float64 { return float64(opt.Pins.QuarantinedCount()) })
 	g.m.Gauge("toolgate_sessions_open", "Open legacy MCP sessions.", func() float64 { return float64(g.server.SessionCount()) })
 	g.m.Gauge("toolgate_audit_records", "Records in the audit log.", func() float64 { n, _ := opt.Audit.Head(); return float64(n) })
+	g.collectRuleLimits()
 	opt.Policy.SetOnReload(g.policyReloaded)
 	return g, nil
 }
@@ -645,6 +646,7 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 		ruleKey = d.Limits.Key(id.AgentID)
 		if ok, wait := g.limiter.Take(ruleKey, d.Limits.Rate); !ok {
 			g.count("toolgate_rate_limited_total", `scope="rule"`, "Requests refused by a rate limit.")
+			g.count("toolgate_rule_limit_refusals_total", metrics.Labels("rule_id", d.RuleID, "limit", "rate"), ruleRefusalsHelp)
 			e := rpcErr(http.StatusTooManyRequests, mcp.CodeRateLimited,
 				map[string]any{"scope": "rule", "rule_id": d.RuleID, "retry_after_ms": wait.Milliseconds()},
 				"rate limit of rule %s exceeded for %s", d.RuleID, name)
@@ -670,6 +672,7 @@ func (g *Gateway) CallTool(ctx context.Context, c *mcp.Caller, name string, args
 	if d.Limits != nil && d.Limits.Daily > 0 {
 		if ok, wait := g.ruleQuota.Take(ruleKey, d.Limits.Daily, d.Limits.Zone); !ok {
 			g.quota.Refund(id.AgentID)
+			g.count("toolgate_rule_limit_refusals_total", metrics.Labels("rule_id", d.RuleID, "limit", "daily"), ruleRefusalsHelp)
 			e := rpcErr(http.StatusTooManyRequests, mcp.CodeQuotaExceeded,
 				map[string]any{"limit": d.Limits.Daily, "rule_id": d.RuleID},
 				"daily quota of %d calls under rule %s is used up", d.Limits.Daily, d.RuleID)

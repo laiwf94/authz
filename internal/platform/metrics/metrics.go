@@ -12,7 +12,9 @@
 // overflow series, the one labelled overflow="true", and
 // authz_metrics_overflow_total{metric="NAME"} counts the lookups that were
 // folded. Nothing is dropped, and a label value an agent or upstream chose
-// cannot grow memory without bound.
+// cannot grow memory without bound. The one exception is a collector
+// (Registry.Collect), whose gauge series are computed at each Write and
+// exist only while it reports them.
 //
 // Names, label sets, bucket bounds and types are checked when a series is
 // created. A mistake there is a programming error and panics: a family
@@ -75,6 +77,9 @@ type family struct {
 	series int       // series created, not counting the overflow series
 	limit  int       // 0: the registry's limit
 	folded atomic.Uint64
+	// collected is the collector key of a family whose series a
+	// collector reports at each Write; it has no stored series.
+	collected string
 }
 
 // Registry holds every metric. The zero value is not usable; call New. All
@@ -86,7 +91,14 @@ type Registry struct {
 	gauges     map[string]*Gauge
 	gaugeFns   map[string]func() float64
 	histograms map[string]*Histogram
+	collectors map[string]*collector // by the names it owns, joined
 	limit      int
+}
+
+// collector computes the series of some gauge families at each Write.
+type collector struct {
+	names []string
+	fn    func(emit func(name, labels string, v float64))
 }
 
 // New returns an empty registry with a series cap of DefaultLimit per family.
@@ -97,6 +109,7 @@ func New() *Registry {
 		gauges:     map[string]*Gauge{},
 		gaugeFns:   map[string]func() float64{},
 		histograms: map[string]*Histogram{},
+		collectors: map[string]*collector{},
 		limit:      DefaultLimit,
 	}
 }
@@ -239,6 +252,7 @@ func (r *Registry) GaugeSeries(name, labels, help string) *Gauge {
 	if _, ok := r.gaugeFns[k]; ok {
 		panic(fmt.Sprintf("metrics: %s is already a gauge read from a function", k))
 	}
+	r.notCollected(name)
 	f, k := r.admit(name, labels, help, kindGauge, nil)
 	if g, ok := r.gauges[k]; ok {
 		return g
@@ -258,11 +272,112 @@ func (r *Registry) Gauge(name, help string, fn func() float64) {
 	if _, ok := r.gauges[name]; ok {
 		panic(fmt.Sprintf("metrics: %s is already a settable gauge", name))
 	}
+	r.notCollected(name)
 	f := r.family(name, help, kindGauge, nil)
 	if _, ok := r.gaugeFns[name]; !ok {
 		f.series++
 	}
 	r.gaugeFns[name] = fn
+}
+
+// GaugeFamily names and describes one gauge family a collector reports.
+type GaugeFamily struct{ Name, Help string }
+
+// Collect registers fn to report the series of these gauge families at
+// each Write, for state that is cheaper to read whole when scraped than to
+// keep in series as it changes, and whose label sets come and go: a series
+// fn does not report is not written, so nothing outlives what it measures.
+// fn is called once per Write without the registry's lock held, and calls
+// emit once for each series, with a family's name and a label set (built
+// with Labels); emit panics on a name not listed or a malformed label set.
+//
+// The families' caps hold per Write: past the cap, a family's values are
+// added into its overflow series and counted in OverflowMetric. A series
+// reported twice in one Write is added up the same way. The families must
+// be new, or owned by a collector of exactly these families, which fn then
+// replaces, as Gauge replaces a function.
+func (r *Registry) Collect(families []GaugeFamily, fn func(emit func(name, labels string, v float64))) {
+	if len(families) == 0 {
+		panic("metrics: Collect with no families")
+	}
+	names := make([]string, len(families))
+	for i, fam := range families {
+		names[i] = fam.Name
+	}
+	key := strings.Join(names, ",")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, fam := range families {
+		if f, ok := r.families[fam.Name]; ok && f.kind != 0 && f.collected != key {
+			if f.collected != "" {
+				panic(fmt.Sprintf("metrics: %s is reported by another collector", fam.Name))
+			}
+			panic(fmt.Sprintf("metrics: %s already has series of its own", fam.Name))
+		}
+	}
+	for _, fam := range families {
+		f := r.family(fam.Name, fam.Help, kindGauge, nil)
+		f.collected = key
+	}
+	r.collectors[key] = &collector{names: names, fn: fn}
+}
+
+// notCollected panics when name belongs to a collector. r.mu is held.
+func (r *Registry) notCollected(name string) {
+	if f, ok := r.families[name]; ok && f.collected != "" {
+		panic(fmt.Sprintf("metrics: %s is reported by a collector", name))
+	}
+}
+
+// collect runs the collectors and returns their series as samples.
+func (r *Registry) collect(cs []*collector) []sample {
+	var out []sample
+	for _, c := range cs {
+		type famState struct {
+			f     *family
+			limit int
+			seen  map[string]int // series key -> index in out
+		}
+		fams := make(map[string]*famState, len(c.names))
+		r.mu.RLock()
+		for _, n := range c.names {
+			f := r.families[n]
+			limit := f.limit
+			if limit == 0 {
+				limit = r.limit
+			}
+			fams[n] = &famState{f: f, limit: limit, seen: map[string]int{}}
+		}
+		r.mu.RUnlock()
+		c.fn(func(name, labels string, v float64) {
+			fs, ok := fams[name]
+			if !ok {
+				panic(fmt.Sprintf("metrics: the collector of %s reported %s", strings.Join(c.names, ","), name))
+			}
+			if labels == OverflowLabels {
+				panic(fmt.Sprintf("metrics: %s: the overflow series is the registry's", name))
+			}
+			if err := checkLabels(labels, false); err != nil {
+				panic(fmt.Sprintf("metrics: %s: %v", series(name, labels), err))
+			}
+			k := series(name, labels)
+			if i, ok := fs.seen[k]; ok {
+				out[i].v += v
+				return
+			}
+			if len(fs.seen) >= fs.limit {
+				fs.f.folded.Add(1)
+				k = series(name, OverflowLabels)
+				if i, ok := fs.seen[k]; ok {
+					out[i].v += v
+					return
+				}
+			}
+			fs.seen[k] = len(out)
+			out = append(out, sample{key: k, v: v, fixed: true})
+		})
+	}
+	return out
 }
 
 // Histogram returns the histogram with this name and labels, creating it
@@ -400,13 +515,14 @@ func splitSeries(k string) (name, labels string) {
 // counters, then gauges, then histograms, each in series order. Gauge
 // functions are called after the registry's lock is released.
 func (r *Registry) Write(w io.Writer) error {
-	type sample struct {
-		key string
-		c   *Counter
-		g   *Gauge
-		fn  func() float64
-		h   *Histogram
+	r.mu.RLock()
+	cs := make([]*collector, 0, len(r.collectors))
+	for _, c := range r.collectors {
+		cs = append(cs, c)
 	}
+	r.mu.RUnlock()
+	// Collected first, so the overflow counts below include this Write's.
+	collected := r.collect(cs)
 	r.mu.RLock()
 	counters := make([]sample, 0, len(r.counters)+1)
 	gauges := make([]sample, 0, len(r.gauges)+len(r.gaugeFns))
@@ -424,6 +540,7 @@ func (r *Registry) Write(w io.Writer) error {
 	for k, h := range r.histograms {
 		hists = append(hists, sample{key: k, h: h})
 	}
+	gauges = append(gauges, collected...)
 	var overflow []sample
 	for name, f := range r.families {
 		help[name] = f.help
@@ -462,10 +579,11 @@ func (r *Registry) Write(w io.Writer) error {
 	for _, s := range gauges {
 		name, _ := splitSeries(s.key)
 		header(name, "gauge")
-		v := 0.0
-		if s.fn != nil {
+		v := s.v
+		switch {
+		case s.fn != nil:
 			v = s.fn()
-		} else {
+		case !s.fixed:
 			v = s.g.Value()
 		}
 		fmt.Fprintf(&b, "%s %s\n", s.key, formatFloat(v))
@@ -490,6 +608,17 @@ func (r *Registry) Write(w io.Writer) error {
 	}
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// sample is one series of a Write.
+type sample struct {
+	key   string
+	c     *Counter
+	g     *Gauge
+	fn    func() float64
+	h     *Histogram
+	v     float64 // a collected value, when fixed
+	fixed bool
 }
 
 func braces(labels string) string {

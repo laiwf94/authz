@@ -81,6 +81,18 @@ func registerTracks(r *Registry) {
 	for _, res := range []string{"allowed", "denied"} {
 		r.Counter("toolgate_relationship_checks_total", `result="`+res+`"`, "Relationship checks made by tool rules, by result.").Inc()
 	}
+	r.Counter("toolgate_rule_limit_refusals_total", `rule_id="search-cap",limit="rate"`, "Calls refused by a tool rule's own rate limit or daily quota, by rule.").Inc()
+	r.Collect([]GaugeFamily{
+		{Name: "toolgate_rule_limit_agents", Help: "Agents holding state under a tool rule's limit: a rate bucket that is not full, or calls counted today."},
+		{Name: "toolgate_rule_limit_exhausted", Help: "Agents that a tool rule's limit refuses now: less than one token in the rate bucket, or the daily quota used up."},
+		{Name: "toolgate_rule_limit_daily_used", Help: "Calls counted today under a tool rule's daily quota, all agents together."},
+	}, func(emit func(name, labels string, v float64)) {
+		for _, l := range []string{"rate", "daily"} {
+			emit("toolgate_rule_limit_agents", `rule_id="search-cap",limit="`+l+`"`, 3)
+			emit("toolgate_rule_limit_exhausted", `rule_id="search-cap",limit="`+l+`"`, 1)
+		}
+		emit("toolgate_rule_limit_daily_used", `rule_id="search-cap"`, 40)
+	})
 	r.Counter("toolgate_audit_failures_total", "", "Audit records that could not be written.")
 	r.Counter("toolgate_audit_records_total", fmt.Sprintf("event=%q", "tool.call"), "Audit records written.").Add(6)
 	r.Counter("toolgate_tool_calls_total", fmt.Sprintf(`upstream="",tool="",outcome=%q`, "unknown_tool"), "Tool calls by outcome.").Inc()

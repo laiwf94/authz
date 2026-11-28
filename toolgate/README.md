@@ -143,7 +143,34 @@ Rules can also say when they apply and how often they allow:
   `"scope": "rule"` or `-31003`, both with the `rule_id` and a
   `Retry-After` (until midnight in the zone for the daily quota). The
   counts carry across reloads while a rule keeps its id and its limits;
-  changing the limits starts them afresh.
+  changing the limits starts them afresh. `GET /admin/limits` shows them
+  per rule and agent, and the metrics below count them per rule.
+
+Each rule's limits are visible while they run. `GET /admin/limits` lists
+every rule of the policy in force that has `limits`, with totals and the
+agents holding state under it, nearest to being refused first:
+
+```json
+{"rule_id": "search-cap",
+ "rate": {"per_second": 0.1, "burst": 2, "agents": 2, "exhausted": 1},
+ "daily": {"limit": 20, "zone": "Europe/Berlin", "agents": 2, "exhausted": 0, "used": 23},
+ "agents": [{"agent": "alice-bot", "tokens": 0.4, "full_in_ms": 16000,
+             "used": 19, "remaining": 1, "resets_at": "2026-12-05T23:00:00Z"}, ...]}
+```
+
+An agent is listed while its bucket is not full or it has calls counted
+today. `?rule=ID` and `?agent=ID` narrow the answer and `?agents=N` lists at
+most N agents a rule (100 by default, up to 1000; `agents_omitted` counts
+the rest, and the totals count every agent the filters keep). Reading
+counts nothing. The same state is in `/metrics`, labelled only by
+`rule_id` and `limit` (`rate` or `daily`), never by agent, so the series
+are bounded by the policy's rules and go with them:
+`toolgate_rule_limit_agents`, `toolgate_rule_limit_exhausted` (no token
+left, or the quota used up), `toolgate_rule_limit_daily_used` (all agents'
+calls today) and the counter `toolgate_rule_limit_refusals_total`. They are
+read from the limiters when scraped, which costs about 2 ms for 10,000
+agents under a rule (`BenchmarkRuleLimitsScan`), and nothing on the call
+path.
 
 Decisions are made at the gateway's clock. A case file gives a call case
 its time as `"now": "2026-12-05T10:00:00+01:00"` and the subject its
@@ -469,6 +496,7 @@ Administrators (`TOOLGATE_ADMIN_ADDR`, default `127.0.0.1:8081`), `Authorization
 | `POST /admin/tools/{name}/approve` | `{"hash":"<pending_hash>"}` trusts the reviewed definition (compare-and-set). |
 | `GET /admin/policy`, `POST /admin/policy/reload` | Policy hash; reload now (also on SIGHUP and when the file changes). |
 | `POST /admin/explain` | A call file (`subject`, `call`, optional `now` and `trace_nodes`) decided against the live policy without being made: every rule considered and what it found, the decision, and the `outcome`, `code` and `status` the agent would get. 400 for an invalid call, 415 without `application/json`. |
+| `GET /admin/limits` | Each rule with `limits`: the limits, how many agents hold state under them and how many are refused now, and per agent the tokens left, `full_in_ms`, calls `used` and `remaining` today and `resets_at`, nearest to being refused first. `?rule=ID`, `?agent=ID`, `?agents=N` (0 to 1000, default 100). 400 for bad parameters, 404 for a rule the policy lacks. |
 | `GET /admin/audit/head` | Record count and head hash, to anchor the log elsewhere. |
 | `GET /admin/audit/checkpoint` | The newest signed checkpoint of the audit log (`text/plain`, a signed note), with `AUTHZ_AUDIT_SIGNING_KEY` set; 404 without it. Check a log against it with `authz audit verify -key`. |
 | `POST /admin/audit/export` | The newest signed checkpoint, as `GET /admin/audit/checkpoint` serves it, recorded as exported beside the log: with `AUTHZ_AUDIT_RETAIN_BYTES` or `AUTHZ_AUDIT_RETAIN_AGE`, retention may then remove the rotated-out segments it covers. 404 without a signing key. |

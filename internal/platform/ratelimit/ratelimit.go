@@ -29,6 +29,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -272,4 +273,69 @@ func AppendKey(dst []byte, dims ...string) []byte {
 		dst = append(dst, d...)
 	}
 	return dst
+}
+
+// CutKey splits the first dimension off a key Key produced: Key(d0,
+// d1...) gives d0 and Key(d1...). ok is false when key is empty or does
+// not start with a dimension Key could have written.
+func CutKey(key string) (first, rest string, ok bool) {
+	colon := strings.IndexByte(key, ':')
+	if colon <= 0 || colon > 18 || colon > 1 && key[0] == '0' {
+		return "", "", false
+	}
+	n := 0
+	for _, c := range []byte(key[:colon]) {
+		if c < '0' || c > '9' {
+			return "", "", false
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n < 0 || n > len(key)-colon-1 {
+		return "", "", false
+	}
+	return key[colon+1 : colon+1+n], key[colon+1+n:], true
+}
+
+// SplitKey returns the dimensions Key joined into key, and false when key
+// is not a key Key could have produced.
+func SplitKey(key string) ([]string, bool) {
+	var dims []string
+	for key != "" {
+		d, rest, ok := CutKey(key)
+		if !ok {
+			return nil, false
+		}
+		dims, key = append(dims, d), rest
+	}
+	return dims, true
+}
+
+// Range calls fn for each key whose bucket is not full, with how long the
+// bucket takes to refill completely (its debt), until fn returns false.
+// The tokens a bucket holds are lim.Burst minus debt divided by the
+// emission interval; Limit.TokensAt computes it. fn runs with the
+// limiter's lock held, so it must be quick and must not use the limiter:
+// Range is for occasional readers such as an admin endpoint or a metrics
+// scrape, and it blocks Take for as long as it runs.
+func (l *Limiter) Range(fn func(key string, debt time.Duration) bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clockLocked()
+	for k, tat := range l.tat {
+		if tat > now && !fn(k, time.Duration(tat-now)) {
+			return
+		}
+	}
+}
+
+// TokensAt returns the tokens a bucket under l holds when it takes debt to
+// refill completely: Burst when debt is zero, never below zero.
+func (l Limit) TokensAt(debt time.Duration) float64 {
+	if l.Unlimited() {
+		return math.Inf(1)
+	}
+	if debt <= 0 {
+		return float64(l.burst())
+	}
+	return max(float64(l.burst())-float64(debt)/float64(l.interval()), 0)
 }

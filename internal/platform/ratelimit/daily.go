@@ -183,3 +183,18 @@ func (q *Daily) Evicted() uint64 {
 	defer q.mu.Unlock()
 	return q.evicted
 }
+
+// Range calls fn for each key that has counted calls in a day that has
+// not ended, with the count and the end of that day, until fn returns
+// false. As with Limiter.Range, fn runs with the lock held and must not
+// use the counter.
+func (q *Daily) Range(fn func(key string, count int, end time.Time) bool) {
+	t := q.now().UnixNano()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for k, c := range q.days {
+		if t < c.end && c.count > 0 && !fn(k, c.count, time.Unix(0, c.end)) {
+			return
+		}
+	}
+}

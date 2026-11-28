@@ -218,6 +218,11 @@ type Limits struct {
 // same across reloads for as long as the rule keeps its id and its limits.
 func (l *Limits) Key(agent string) string { return ratelimit.Key(l.key, agent) }
 
+// Prefix is the first dimension of every Key of these limits: Key(agent)
+// is ratelimit.Key(Prefix(), agent), so ratelimit.SplitKey of a key
+// returns the prefix and the agent.
+func (l *Limits) Prefix() string { return l.key }
+
 // String is the limits as written, for messages.
 func (l *Limits) String() string {
 	var parts []string

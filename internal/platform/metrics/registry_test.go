@@ -110,6 +110,18 @@ func TestTrackNames(t *testing.T) {
 							prefixes = append(prefixes, s)
 						}
 					}
+				case *ast.CompositeLit:
+					// The families of a collector: metrics.GaugeFamily{Name: ...},
+					// alone or as the elements of a []metrics.GaugeFamily.
+					if isGaugeFamily(n.Type) {
+						addFamily(fset, n, names)
+					} else if at, ok := n.Type.(*ast.ArrayType); ok && isGaugeFamily(at.Elt) {
+						for _, el := range n.Elts {
+							if cl, ok := el.(*ast.CompositeLit); ok {
+								addFamily(fset, cl, names)
+							}
+						}
+					}
 				case *ast.CallExpr:
 					sel, ok := n.Fun.(*ast.SelectorExpr)
 					if !ok || !methods[sel.Sel.Name] || len(n.Args) < 2 {
@@ -147,6 +159,30 @@ func TestTrackNames(t *testing.T) {
 	for f := range families {
 		if _, ok := names[f]; !ok {
 			t.Errorf("testdata/tracks.golden has %s, which no track registers any more", f)
+		}
+	}
+}
+
+// isGaugeFamily reports whether e names the type GaugeFamily.
+func isGaugeFamily(e ast.Expr) bool {
+	switch t := e.(type) {
+	case *ast.SelectorExpr:
+		return t.Sel.Name == "GaugeFamily"
+	case *ast.Ident:
+		return t.Name == "GaugeFamily"
+	}
+	return false
+}
+
+// addFamily records the Name of a GaugeFamily literal.
+func addFamily(fset *token.FileSet, cl *ast.CompositeLit, names map[string]string) {
+	for _, el := range cl.Elts {
+		if kv, ok := el.(*ast.KeyValueExpr); ok {
+			if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Name" {
+				if s, ok := stringLit(kv.Value); ok {
+					names[s] = fset.Position(cl.Pos()).String()
+				}
+			}
 		}
 	}
 }

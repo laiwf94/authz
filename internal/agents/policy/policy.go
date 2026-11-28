@@ -134,6 +134,9 @@ type Rule struct {
 // conditional reports whether the rule has windows or a when expression.
 func (r *Rule) conditional() bool { return len(r.windows) > 0 || r.when != nil }
 
+// Limits returns the rule's limits on the calls it allows, or nil.
+func (r *Rule) Limits() *Limits { return r.limits }
+
 // HasCheck reports whether the rule asks the authorization engine.
 func (r *Rule) HasCheck() bool { return r.check != nil }
 
