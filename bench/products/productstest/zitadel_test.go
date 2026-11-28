@@ -63,7 +63,7 @@ func TestZitadelAPI(t *testing.T) {
 		{"config of a missing app", http.MethodPut, pp + "/apps/9/oidc_config", "pat", `{"devMode":true}`, http.StatusNotFound},
 		{"other project path", http.MethodGet, pp + "/members", "pat", "", http.StatusNotFound},
 		{"user", http.MethodPost, "/v2/users/human", "pat", human("u1", "u1"), http.StatusOK},
-		{"user ID again", http.MethodPost, "/v2/users/human", "pat", human("u1", "x1"), http.StatusConflict},
+		{"user ID again", http.MethodPost, "/v2/users/human", "pat", human("u1", "x1"), http.StatusBadRequest},
 		{"user name again", http.MethodPost, "/v2/users/human", "pat", human("u2", "u1"), http.StatusConflict},
 		{"short password", http.MethodPost, "/v2/users/human", "pat", strings.Replace(human("u3", "u3"), "pw-0123456789", "short", 1), http.StatusBadRequest},
 		{"other org", http.MethodPost, "/v2/users/human", "pat", strings.Replace(human("u3", "u3"), ZitadelOrgID, "1", 1), http.StatusBadRequest},

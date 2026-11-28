@@ -310,7 +310,9 @@ func (z *Zitadel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if z.users[h.UserID] != nil {
-			zerror(w, http.StatusConflict, "Errors.User.AlreadyExisting")
+			// What Zitadel v4 answers for a taken user ID: a failed
+			// precondition, 400, not 409.
+			zerror(w, http.StatusBadRequest, "Errors.User.AlreadyExisting (COMMAND-7yiox1isql)")
 			return
 		}
 		for _, u := range z.users {

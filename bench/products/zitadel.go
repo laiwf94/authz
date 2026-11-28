@@ -97,9 +97,14 @@ func (e *zitadelError) retryable() bool {
 	return e.status == http.StatusTooManyRequests || e.status >= 500
 }
 
-func isStatus(err error, status int) bool {
+// exists reports whether err refuses a write because what it writes is
+// there already. Zitadel answers that 409 for most resources, and 400
+// (failed precondition, Errors.User.AlreadyExisting) for a user ID that is
+// taken.
+func exists(err error) bool {
 	var ze *zitadelError
-	return errors.As(err, &ze) && ze.status == status
+	return errors.As(err, &ze) && (ze.status == http.StatusConflict ||
+		ze.status == http.StatusBadRequest && bytes.Contains(ze.body, []byte(".AlreadyExist")))
 }
 
 // api sends one API request with the token and decodes a 2xx answer into
@@ -316,7 +321,7 @@ func (z *Zitadel) ensureProject(ctx context.Context) (string, error) {
 		if err == nil {
 			return out.ID, nil
 		}
-		if !isStatus(err, http.StatusConflict) {
+		if !exists(err) {
 			return "", err
 		}
 		// Created a moment ago, by an earlier run, and not yet searchable.
@@ -379,7 +384,7 @@ func (z *Zitadel) ensureApp(ctx context.Context) (string, error) {
 			}
 			return out.ClientID, nil
 		}
-		if !isStatus(err, http.StatusConflict) {
+		if !exists(err) {
 			return "", err
 		}
 		if err := z.settle(ctx, func() (bool, error) {
@@ -482,7 +487,7 @@ func (z *Zitadel) ImportUsers(ctx context.Context, g datasets.Graph, n, workers 
 		switch {
 		case err == nil:
 			res.Added++
-		case isStatus(err, http.StatusConflict):
+		case exists(err):
 			res.Skipped++
 		default:
 			return res, err
@@ -551,7 +556,7 @@ func (z *Zitadel) importUser(ctx context.Context, u datasets.User, res *ImportRe
 	switch {
 	case err == nil:
 		wrote = true
-	case !isStatus(err, http.StatusConflict):
+	case !exists(err):
 		return err
 	}
 	if len(u.Groups) > 0 {
@@ -560,7 +565,7 @@ func (z *Zitadel) importUser(ctx context.Context, u datasets.User, res *ImportRe
 		switch {
 		case err == nil:
 			wrote = true
-		case !isStatus(err, http.StatusConflict):
+		case !exists(err):
 			return err
 		}
 	}
