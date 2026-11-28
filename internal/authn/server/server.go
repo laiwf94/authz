@@ -108,6 +108,7 @@ type Server struct {
 	tokens  map[string]cachedToken
 
 	public, adminMux *http.ServeMux
+	envoy            http.Handler // /auth/envoy/, served before the mux
 }
 
 type cachedToken struct {
@@ -196,7 +197,11 @@ func (s *Server) Reload(ctx context.Context) error {
 func (s *Server) routes() {
 	s.public = http.NewServeMux()
 	s.route(s.public, "GET /auth", s.handleAuth)
-	s.route(s.public, "/auth/envoy/", s.handleEnvoyAuth)
+	// Not on the mux: it would answer a "." or ".." segment or a doubled
+	// slash in the original path with a redirect to the cleaned path, which
+	// Envoy passes to the client, instead of a decision. The route rules
+	// resolve those segments themselves.
+	s.envoy = s.wrap("/auth/envoy/", s.handleEnvoyAuth)
 	s.route(s.public, "GET /login", s.limited(s.handleLogin))
 	s.route(s.public, "GET /callback/{provider}", s.limited(s.handleCallback))
 	s.route(s.public, "POST /saml/{provider}/acs", s.limited(s.handleACS))
@@ -229,7 +234,15 @@ func (s *Server) routes() {
 }
 
 // Handler serves the public endpoints (forward-auth, login, logout, JWKS).
-func (s *Server) Handler() http.Handler { return s.public }
+func (s *Server) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.EscapedPath(), "/auth/envoy/") {
+			s.envoy.ServeHTTP(w, r)
+			return
+		}
+		s.public.ServeHTTP(w, r)
+	})
+}
 
 // AdminHandler serves the admin API and metrics.
 func (s *Server) AdminHandler() http.Handler { return s.adminMux }
@@ -293,9 +306,14 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 // route wraps a handler with request IDs, security headers, panic recovery,
 // logging and metrics.
 func (s *Server) route(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
-	path := pattern[strings.IndexByte(pattern, ' ')+1:]
+	mux.Handle(pattern, s.wrap(pattern[strings.IndexByte(pattern, ' ')+1:], h))
+}
+
+// wrap is route's wrapping of h, with path as the route's name in logs
+// and metrics.
+func (s *Server) wrap(path string, h http.HandlerFunc) http.Handler {
 	latency := s.m.Histogram("wicket_http_request_duration_seconds", `route="`+path+`"`, "HTTP request latency.")
-	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		id := newRequestID(r)
 		sw := &statusWriter{ResponseWriter: w}

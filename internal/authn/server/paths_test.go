@@ -114,6 +114,39 @@ func TestForwardAuthPathRules(t *testing.T) {
 			}
 		}
 	}
+	// Envoy does not normalize the path unless told to, so "." and ".."
+	// segments and doubled slashes arrive as the client sent them. The
+	// rules resolve them; the endpoint must not answer with the mux's
+	// redirect to a cleaned /auth/envoy/... URL, which Envoy would hand to
+	// the client.
+	envoy := func(b *browser, method, p string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(method, h.public+"/auth/envoy"+p, nil)
+		req.Host = h.host
+		req.Header.Set("Accept", "text/html")
+		return b.do(req)
+	}
+	for _, p := range []string{"/wiki//x", "/./wiki/x", "/admin/../wiki/x", "//wiki/x"} {
+		if resp := envoy(anon, "GET", p); resp.StatusCode != http.StatusOK || resp.Header.Get(HeaderUser) != "" {
+			t.Fatalf("envoy anonymous GET %s: %d %v", p, resp.StatusCode, resp.Header)
+		}
+	}
+	for _, p := range []string{"/static/../admin/users", "/wiki/./../admin/users", "/static//../admin/users"} {
+		resp := envoy(anon, "GET", p)
+		loc := resp.Header.Get("Location")
+		if resp.StatusCode != http.StatusFound || !strings.Contains(loc, "/login?") || strings.Contains(loc, "/auth/envoy") {
+			t.Fatalf("envoy anonymous GET %s: %d to %q, want the login page", p, resp.StatusCode, loc)
+		}
+	}
+	if resp := envoy(bob, "GET", "/wiki/../admin/users"); resp.StatusCode != http.StatusForbidden || resp.Header.Get("Location") != "" {
+		t.Fatalf("envoy bob GET /wiki/../admin/users: %d %v", resp.StatusCode, resp.Header)
+	}
+	if resp := envoy(alice, "GET", "/static/../admin//users"); resp.StatusCode != http.StatusOK || resp.Header.Get(HeaderUser) != "alice" {
+		t.Fatalf("envoy alice GET /static/../admin//users: %d %v", resp.StatusCode, resp.Header)
+	}
+	if resp := envoy(alice, "DELETE", "/admin/./audit"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("envoy alice DELETE /admin/./audit: %d", resp.StatusCode)
+	}
 }
 
 // TestPublicPathOtherProvider: a session from a provider an app does not
