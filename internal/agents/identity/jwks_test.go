@@ -324,6 +324,58 @@ func TestJWKSUnknownKidConcurrent(t *testing.T) {
 	}
 }
 
+// TestJWKSTokenDuringFirstFetch: a token that arrives while the first
+// fetch (the refresh loop's, before any keys are held) is at the issuer
+// waits for it and is verified by its answer, with no second request
+// (#258). Before the fix the lookup waited for the fetch lock and then
+// fetched again.
+func TestJWKSTokenDuringFirstFetch(t *testing.T) {
+	k := testKeys(t)
+	is := newIssuer(t, jwksDoc(jwkOf(t, "ec1", k.ec.Public(), "")))
+	hold := make(chan struct{})
+	is.set(func(is *issuer) { is.hold = hold })
+	clk := clock.NewFake(t0)
+	j := newJWKS(t, is, clk, nil)
+	a := jwksAuth(t, j, clk)
+	first := make(chan error, 1)
+	go func() { first <- j.Refresh(context.Background()) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for is.hits.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("first fetch never reached the issuer")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	verified := make(chan error, 1)
+	go func() {
+		_, err := a.Authenticate(signAsym(t, k.ec, ES256, hdr(ES256, "ec1"), claims(t0, 600)))
+		verified <- err
+	}()
+	// The lookup has found no keys once it waits for an unknown-kid fetch.
+	for {
+		j.unknownMu.Lock()
+		waiting := j.inflight != nil
+		j.unknownMu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the lookup never waited for a fetch")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(hold)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-verified; err != nil {
+		t.Fatalf("token during the first fetch: %v", err)
+	}
+	if n, s := is.hits.Load(), j.Stats(); n != 1 || s.Fetches != 1 || s.UnknownKid != 0 {
+		t.Fatalf("issuer hits %d, stats %+v, want one fetch", n, s)
+	}
+}
+
 // TestJWKSRun checks the schedule: max-age, clamped, decides the next
 // refresh, ETags make refreshes conditional, and failures back off.
 func TestJWKSRun(t *testing.T) {

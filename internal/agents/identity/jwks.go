@@ -177,12 +177,13 @@ func (j *JWKS) Lookup(kid, alg string) (jose.Key, bool) {
 	if !slices.Contains(AsymmetricAlgorithms, alg) {
 		return jose.Key{}, false
 	}
+	seen := j.cur.Load()
 	if st := j.fresh(); st != nil {
 		if k, ok := st.set.Lookup(kid, alg); ok {
 			return k, true
 		}
 	}
-	if !j.fetchForUnknownKid() {
+	if !j.fetchForUnknownKid(seen) {
 		return jose.Key{}, false
 	}
 	if st := j.fresh(); st != nil {
@@ -203,7 +204,10 @@ func (j *JWKS) fresh() *jwksState {
 
 // fetchForUnknownKid runs, or waits for, the fetch an unknown kid causes.
 // It reports whether one ran or was waited for, so the caller looks again.
-func (j *JWKS) fetchForUnknownKid() bool {
+// seen is the state the caller looked in: when another fetch (the refresh
+// loop's first one, say) stores a newer state while this one waits for it,
+// that state is the answer and no second request is made (#258).
+func (j *JWKS) fetchForUnknownKid(seen *jwksState) bool {
 	j.unknownMu.Lock()
 	if ch := j.inflight; ch != nil {
 		j.unknownMu.Unlock()
@@ -224,10 +228,16 @@ func (j *JWKS) fetchForUnknownKid() bool {
 		j.unknownMu.Unlock()
 		close(ch)
 	}()
-	j.unknownKid.Add(1)
 	ctx, cancel := context.WithTimeout(context.Background(), j.cfg.Timeout)
 	defer cancel()
-	if err := j.Refresh(ctx); err != nil {
+	j.fetchMu.Lock()
+	defer j.fetchMu.Unlock()
+	if j.cur.Load() != seen {
+		return true
+	}
+	j.unknownKid.Add(1)
+	if err := j.fetch(ctx); err != nil {
+		j.failures.Add(1)
 		j.log.Warn("jwks refresh for unknown kid failed", "url", j.url, "error", err)
 	}
 	return true
