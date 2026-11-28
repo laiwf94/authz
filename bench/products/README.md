@@ -4,14 +4,19 @@ The products the benchmark compares with authz (#86), each at a pinned
 version with its recommended production settings, all taking the same
 seeded dataset (`bench/datasets`) and answering the same checks.
 
-This directory holds the authorization products: authz, SpiceDB and
-OpenFGA. The identity products (Keycloak, Zitadel, oauth2-proxy) and the
-MCP gateways (agentgateway, Kong) are the next task of week 5.
+This directory holds the authorization products (authz, SpiceDB and
+OpenFGA) and the first identity products: Keycloak, and oauth2-proxy
+signing in through it, which the gateway's sign-ins and forward-auth
+decisions are compared with. Zitadel and the MCP gateways (agentgateway,
+Kong) are the next tasks of week 5.
 
 | Path | What it is |
 | --- | --- |
 | `compose.yaml` | Every product and its database, pinned by version and digest, on the same limits |
-| `verify.sh` | Brings the products up, loads one dataset into each and fails on any differing answer |
+| `verify.sh` | Brings the authorization products up, loads one dataset into each and fails on any differing answer |
+| `verify-identity.sh` | Brings Keycloak and oauth2-proxy up, imports the sign-in population and proves sign-ins and forward-auth on them |
+| `keycloak/Dockerfile` | Keycloak's optimized production image, built from the pinned release |
+| `keycloak.go` | The realm, client and user import through Keycloak's admin API |
 | `openfga-model.json` | The dataset's model as OpenFGA's API takes it, made by the pinned OpenFGA CLI |
 | `products.go` | The Go side: setup, write formats and checks for each product's HTTP API |
 | `crosscheck.go` | Sampled questions and the cross-check |
@@ -25,11 +30,17 @@ MCP gateways (agentgateway, Kong) are the next task of week 5.
 | OpenFGA | `openfga/openfga:v1.23.0` | PostgreSQL | check, bulk check, lookup, write |
 | PostgreSQL | `postgres:17.12-alpine` | | the datastore of SpiceDB and OpenFGA |
 | OpenFGA CLI | `openfga/cli:v0.9.0` | | turns the model into `openfga-model.json` |
+| Keycloak | `keycloak/keycloak:26.8.2`, built into `authz-bench-keycloak:26.8.2` | PostgreSQL | sign-in |
+| oauth2-proxy | `quay.io/oauth2-proxy/oauth2-proxy:v7.15.6` | Redis, for sessions | sign-in through Keycloak, forward-auth |
+| Redis | `redis:8.12.0-alpine` | | oauth2-proxy's session store |
 
 Each image is pinned by tag and digest in `compose.yaml` (the digest of the
-multi-platform index, read from the registry on 2026-11-22). A test fails
-when an image there is not pinned that way or this table does not name its
-version. The versions were each product's newest release on that day. A new
+multi-platform index, read from the registry on 2026-11-22, and on
+2026-11-28 for Keycloak, oauth2-proxy and Redis). Keycloak is run from an
+image built by `keycloak/Dockerfile`, whose every `FROM` is pinned the same
+way. A test fails when an image there is not pinned that way or this table
+does not name its version. The versions were each product's newest release
+on that day. A new
 version is a change to this file and to `compose.yaml` in one commit, and
 the next published run says which versions it measured.
 
@@ -39,9 +50,11 @@ Every server and every database gets the same `BENCH_CPUS` (default 2) and
 `BENCH_MEMORY` (default 4 GB). authz keeps its store in its own process, so
 its one container holds what SpiceDB and OpenFGA split between their server
 and a PostgreSQL container: the comparison gives the competitors twice the
-resources, and the report says so next to each number. Ports are bound to
-127.0.0.1 only: 18080 authz, 18443 SpiceDB's HTTP gateway, 18081 OpenFGA's
-HTTP API.
+resources, and the report says so next to each number. The same holds for
+sign-ins: Keycloak runs with its own PostgreSQL, and oauth2-proxy with its
+own Redis. Ports are bound to 127.0.0.1 only: 18080 authz, 18443 SpiceDB's
+HTTP gateway, 18081 OpenFGA's HTTP API, 18180 Keycloak (19000 its
+management port, with health and metrics), 14180 oauth2-proxy.
 
 ## Production settings
 
@@ -108,7 +121,68 @@ ships.
   two settings cannot drift apart unnoticed. `--max-checks-per-batch-check`
   stays at 50, so a bulk check has at most 50 items.
 
-**PostgreSQL**, the same for both: `shared_buffers=1GB` (a quarter of the
+**Keycloak** (`kc.sh start --optimized`)
+
+- An optimized image: Keycloak's production guide has the build-time
+  options fixed by `kc.sh build` in a custom image, so that a start does
+  not rebuild (which would add tens of seconds to the cold start the
+  benchmark measures). Built in are `KC_DB=postgres` (the guide's
+  production databases are PostgreSQL and the others it lists; the
+  development database is for development only), `KC_HEALTH_ENABLED` and
+  `KC_METRICS_ENABLED` (readiness on the management port, as a production
+  probe uses it) and `KC_CACHE=local`: one node, so no cluster
+  discovery, as the guide says for a single instance.
+- `--db-pool-min-size=20 --db-pool-initial-size=20 --db-pool-max-size=40`:
+  the guide recommends a fixed pool (equal initial and minimum sizes), so
+  that connections are not opened under load, and a maximum sized for the
+  concurrency, here the same 40 as SpiceDB's read pool.
+- `--hostname=http://127.0.0.1:18180 --hostname-backchannel-dynamic=true`:
+  the issuer is the address the benchmark's browser uses, and services in
+  the compose network (oauth2-proxy) reach the token and keys endpoints at
+  `keycloak:8080`, as a backchannel inside a cluster does.
+- `--http-enabled=true --proxy-headers=xforwarded`: plain HTTP behind a
+  TLS-terminating proxy, the guide's edge setup; the benchmark measures
+  every product without TLS.
+- `--log-level=warn --log-console-output=json`: structured logs, none per
+  request.
+- The heap stays at Keycloak's container default, 70% of the memory limit
+  (`JAVA_OPTS_KC_HEAP`), with the initial heap at 50%.
+- The realm (`bench`) keeps Keycloak's default password policy, Argon2
+  hashing, and has brute-force detection on, as the server administration
+  guide recommends. Its client `bench-proxy` is confidential, has only the
+  authorization code flow, requires PKCE (S256) and puts the user's group
+  names in a `groups` claim of the ID token, the access token and userinfo.
+
+**oauth2-proxy** (`oauth2-proxy`)
+
+- `--provider=keycloak-oidc` with the realm as issuer: the provider its
+  documentation names for Keycloak. Discovery is skipped and each endpoint
+  is named (`--login-url` at the browser's address, `--redeem-url` and
+  `--oidc-jwks-url` at `keycloak:8080`), because the browser and
+  oauth2-proxy reach Keycloak at different addresses; the issuer of every
+  token is still checked.
+- `--code-challenge-method=S256`: PKCE, which its documentation recommends
+  and the client requires.
+- `--reverse-proxy=true --upstream=static://200`: behind a reverse proxy
+  that asks `/oauth2/auth` before passing a request on (202 with a valid
+  session, 401 without), the forward-auth setup of its nginx and Traefik
+  guides; `--set-xauthrequest` answers the user, email and groups in
+  `X-Auth-Request-*` headers. `--skip-provider-button` goes straight to
+  Keycloak.
+- `--cookie-secure=true --cookie-samesite=lax` and a 32-byte
+  `--cookie-secret`: its production cookie settings.
+- `--session-store-type=redis`: its documentation recommends Redis once
+  sessions carry an OIDC provider's tokens: in cookies, Keycloak's access,
+  ID and refresh tokens pass the 4 KB cookie limit and are split, and every
+  request carries all of them. The session cookie then holds only a ticket.
+- `--request-logging=false --auth-logging=false --standard-logging=false`:
+  no log line for each request.
+
+**Redis**, oauth2-proxy's session store: no persistence (`--save ""
+--appendonly no`), as for a cache, and `noeviction`, so that a full store
+refuses new sessions instead of dropping signed-in ones.
+
+**PostgreSQL**, the same for all three: `shared_buffers=1GB` (a quarter of the
 memory limit, PostgreSQL's own starting point), `effective_cache_size=3GB`,
 `max_connections=200`, `track_commit_timestamp=on` (SpiceDB's Watch API needs
 it) and synchronous commits, so that a write is durable when it is answered,
@@ -199,3 +273,64 @@ SpiceDB's LookupResources costs about 170 ms of CPU at this size, so lookups
 at 20 a second take most of its 2 CPUs and slow its checks too; at 100
 requests a second it fell 13 s behind. authz's lookups are four times
 slower than OpenFGA's ListObjects, the first target for W11.
+
+## Importing users
+
+`authzdata import` creates the realm and the client in Keycloak, or brings
+them back to these settings when they exist, and imports the first `-n` of
+the dataset's sign-in population (`datasets.User`) with Keycloak's partial
+import: first every group the users are in, in one request, then the users
+200 to a request, 4 requests at a time, each with its password, email
+(verified) and groups. Existing groups and users are skipped, so an import
+can be repeated or resumed; `-verify` reads users back and fails on one
+that is missing or differs from the graph.
+
+```
+export AUTHZBENCH_KEYCLOAK_ADMIN_PASSWORD=bench-keycloak-admin-0123456789
+export AUTHZBENCH_KEYCLOAK_CLIENT_SECRET=bench-keycloak-client-0123456789
+docker compose -f bench/products/compose.yaml --profile keycloak up -d --build
+./authzdata import -size 1m -n 5000 -api http://127.0.0.1:18180
+./authzdata users -size 1m -n 5000 -format credentials -o credentials
+./authzbench -mix oidc_login=1 -rate 20 -login-credentials @credentials \
+  -login-start 'http://127.0.0.1:14180/oauth2/start?rd=%2F' -login-cookie _oauth2_proxy
+```
+
+Keycloak hashes each imported password with the realm's policy, as a
+sign-up would, so an import costs what that many sign-ups cost: on 2 CPUs,
+about 50 to 60 users a second (2,000 users in 32 s). A group is named by
+its graph ID (`g12`), the value of the `groups` claim, so the groups a
+provider asserts are the user's direct groups in the graph.
+
+## verify-identity.sh
+
+```
+bench/products/verify-identity.sh                # SIZE=100k USERS=500
+SIZE=1m USERS=5000 bench/products/verify-identity.sh
+```
+
+It starts Keycloak and oauth2-proxy on fresh volumes, imports `USERS`
+users, imports them again (every user and group must be skipped) and reads
+every one back. Then it signs `u0` in through oauth2-proxy with curl and
+checks that `/oauth2/auth` accepts the session and asserts the user's email
+and exactly the user's groups in the graph. Last it runs `authzbench` with
+no error allowed: sign-ins straight at Keycloak (which end at its account
+page with the `KEYCLOAK_IDENTITY` cookie set) and through oauth2-proxy
+(ending with its session cookie), both at `LOGIN_RATE` (10 a second), and
+forward-auth decisions of oauth2-proxy at `BENCH_RATE` (200 a second) with
+20 signed-in sessions (202) and with none (401), each for `BENCH_DURATION`
+(10 s). A run on the 4 vCPU container, everything in Docker at 2 CPUs a
+container, at 100k with 500 users:
+
+| Step | Result |
+| --- | --- |
+| first import | 500 users and 46 groups in 9.6 s, 52 users/s |
+| second import | 546 skipped, 0 added, in 0.5 s |
+| read back | 500 users, email and groups as in the graph |
+| sign-in at Keycloak | 100, 0 errors, p50 48 ms, p99 71 ms |
+| sign-in through oauth2-proxy | 100, 0 errors, p50 48 ms, p99 82 ms |
+| forward-auth, signed in (202) | 2,000, 0 errors, p50 1.3 ms, p99 2.1 ms |
+| forward-auth, no session (401) | 2,000, 0 errors, p50 1.1 ms, p99 1.8 ms |
+
+Afterwards Keycloak held 715 MB, its PostgreSQL 126 MB, oauth2-proxy 9 MB
+and Redis 6 MB. As for the authorization products, these runs prove the
+setups; the measured numbers come from the collection and report tasks.

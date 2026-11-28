@@ -6,8 +6,12 @@
 # each, loads part of it again, and fails if any of 2,000 sampled checks
 # is answered differently, then runs a short authzbench mix of check, bulk
 # check, lookup and write against each product's own API with no error
-# allowed. It runs when the setups, the datasets, the loader or the
-# runner change, and on demand at a larger SIZE.
+# allowed. bench/products/verify-identity.sh starts Keycloak and
+# oauth2-proxy, imports the sign-in population, reads it back, checks the
+# groups oauth2-proxy asserts for a signed-in user, and runs sign-ins and
+# forward-auth decisions with no error allowed. It runs when the setups,
+# the datasets, the loader or the runner change, and on demand at a
+# larger SIZE.
 name: bench-products
 
 on:
@@ -54,3 +58,7 @@ jobs:
           SIZE: ${{ inputs.size || '100k' }}
           N: ${{ inputs.questions || '2000' }}
         run: ./bench/products/verify.sh
+      - name: Verify the identity products
+        env:
+          SIZE: ${{ inputs.size || '100k' }}
+        run: ./bench/products/verify-identity.sh

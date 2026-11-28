@@ -7,6 +7,7 @@
 //	authzdata load -size 1m -api URL [-target authz|spicedb|openfga] [-schema] [-batch N] [-workers 4] [-from N -to N]
 //	authzdata crosscheck -size 1m [-n 1000] -authz URL [-spicedb URL] [-openfga URL]
 //	authzdata users -size 1m [-n N] [-format json|credentials] [-o FILE]
+//	authzdata import -size 1m -n N -target keycloak -api URL [-workers 4] [-verify 100]
 //	authzdata tools [-n 100] [-calls 0] [-o FILE]
 //
 // Every subcommand takes -seed (default 1); a size and a seed name one
@@ -27,6 +28,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/laiwf94/authz/bench/datasets"
@@ -49,6 +51,7 @@ commands:
   load      write a graph into a running authz, SpiceDB or OpenFGA through its API
   crosscheck ask authz and the products the same sampled checks; fail on a disagreement
   users     write the sign-in population of a graph's users
+  import    set up an identity provider and import the sign-in population into it
   tools     write an MCP tool catalog, or with -calls, calls of it for authzbench
 
 run authzdata COMMAND -h for a command's flags
@@ -227,6 +230,8 @@ func command(ctx context.Context, name string, args []string, getenv func(string
 			return usageError{fmt.Errorf("-format %q: want %s or %s", f.format, datasets.FormatUsersJSON, datasets.FormatCredentials)}
 		}
 		return f.write(stdout, func(w io.Writer) error { return datasets.WriteUsers(w, g, *n, f.format) })
+	case "import":
+		return importUsers(ctx, args, getenv, stdout, stderr)
 	case "tools":
 		f := newFlags(name, stderr, false, "")
 		f.output()
@@ -323,6 +328,71 @@ func load(ctx context.Context, args []string, getenv func(string) string, stdout
 	fmt.Fprintf(stdout, "loaded %d relationships in %d writes (%d retried) in %v: %.0f/s\n",
 		res.Relationships, res.Writes, res.Retries, res.Elapsed.Round(1e6), res.PerSecond())
 	return err
+}
+
+// Keycloak's defaults are compose.yaml's: its bootstrap admin, and the
+// addresses oauth2-proxy and Keycloak's own account page answer at.
+const (
+	keycloakAdmin    = "bench-admin"
+	keycloakRedirect = "http://127.0.0.1:14180/oauth2/callback,http://127.0.0.1:18180/realms/bench/account/*"
+)
+
+func importUsers(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
+	f := newFlags("import", stderr, true, "")
+	n := f.fs.Int("n", 1000, "users to import, from u0 (-1: every user of the graph)")
+	name := f.fs.String("target", "keycloak", "the identity provider at -api: keycloak")
+	api := f.fs.String("api", "", "base URL, such as http://127.0.0.1:18180")
+	admin := f.fs.String("admin", keycloakAdmin, "admin user of the master realm; its password is read from AUTHZBENCH_KEYCLOAK_ADMIN_PASSWORD")
+	realm := f.fs.String("realm", "bench", "realm to create or update")
+	client := f.fs.String("client", "bench-proxy", "OpenID Connect client to create or update; its secret is read from AUTHZBENCH_KEYCLOAK_CLIENT_SECRET")
+	redirects := f.fs.String("redirect-uris", keycloakRedirect, "comma-separated redirect URIs of the client")
+	batch := f.fs.Int("batch", products.KeycloakBatch, "users per partial import")
+	workers := f.fs.Int("workers", 4, "imports in flight")
+	verify := f.fs.Int("verify", 100, "users to read back and compare afterwards (0: none, -1: every one)")
+	if err := f.parse(args); err != nil {
+		return err
+	}
+	g, err := f.graph()
+	if err != nil {
+		return err
+	}
+	if *n == -1 {
+		*n = g.Users
+	}
+	switch {
+	case *name != "keycloak":
+		return usageError{fmt.Errorf("-target %q: want keycloak", *name)}
+	case *n < 0 || *n > g.Users:
+		return usageError{fmt.Errorf("-n %d: the graph has %d users", *n, g.Users)}
+	case *batch < 1 || *workers < 1 || *verify < -1:
+		return usageError{fmt.Errorf("-batch %d -workers %d -verify %d: want at least 1, 1 and -1", *batch, *workers, *verify)}
+	}
+	kc := &products.Keycloak{URL: *api, AdminUser: *admin, AdminPassword: getenv("AUTHZBENCH_KEYCLOAK_ADMIN_PASSWORD"),
+		Realm: *realm, ClientID: *client, ClientSecret: getenv("AUTHZBENCH_KEYCLOAK_CLIENT_SECRET"),
+		RedirectURIs: strings.Split(*redirects, ",")}
+	if *api == "" || kc.AdminPassword == "" || kc.ClientSecret == "" {
+		return usageError{errors.New("keycloak needs -api, AUTHZBENCH_KEYCLOAK_ADMIN_PASSWORD and AUTHZBENCH_KEYCLOAK_CLIENT_SECRET")}
+	}
+	if err := kc.Setup(ctx); err != nil {
+		return err
+	}
+	res, err := kc.ImportUsers(ctx, g, *n, *batch, *workers)
+	fmt.Fprintf(stdout, "imported %d users in %d groups with %d partial imports (%d retried) in %v: %d added, %d skipped, %.0f users/s\n",
+		res.Users, res.Groups, res.Imports, res.Retries, res.Elapsed.Round(1e6), res.Added, res.Skipped,
+		float64(res.Users)/max(res.Elapsed.Seconds(), 1e-9))
+	if err != nil || *verify == 0 {
+		return err
+	}
+	sample := *verify
+	if sample == -1 {
+		sample = 0
+	}
+	checked, err := kc.VerifyUsers(ctx, g, *n, sample)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "verified %d users: email, enabled and groups as in the graph\n", checked)
+	return nil
 }
 
 func crosscheck(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {

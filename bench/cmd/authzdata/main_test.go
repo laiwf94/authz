@@ -25,7 +25,8 @@ const key = "authzdata-key-0123456789"
 
 func env(k string) string {
 	switch k {
-	case "AUTHZBENCH_API_KEY", "AUTHZBENCH_SPICEDB_KEY", "AUTHZBENCH_OPENFGA_KEY":
+	case "AUTHZBENCH_API_KEY", "AUTHZBENCH_SPICEDB_KEY", "AUTHZBENCH_OPENFGA_KEY",
+		"AUTHZBENCH_KEYCLOAK_ADMIN_PASSWORD", "AUTHZBENCH_KEYCLOAK_CLIENT_SECRET":
 		return key
 	}
 	return ""
@@ -257,5 +258,91 @@ func TestLoadTargetsAndCrossCheck(t *testing.T) {
 	var o, eb bytes.Buffer
 	if code := run(context.Background(), []string{"load", "-size", "1k", "-target", "spicedb", "-api", spice.URL}, noKey, &o, &eb); code != 2 || !strings.Contains(eb.String(), "AUTHZBENCH_SPICEDB_KEY") {
 		t.Errorf("load without the key: %d %s", code, eb.String())
+	}
+}
+
+// import sets Keycloak up, imports the population, reads it back, and a
+// second run skips everything.
+func TestImport(t *testing.T) {
+	fake := &productstest.Keycloak{AdminUser: "bench-admin", AdminPassword: key}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	code, out, errOut := runCmd(t, "import", "-size", "100k", "-n", "120", "-batch", "25", "-api", srv.URL, "-verify", "-1")
+	if code != 0 {
+		t.Fatalf("import: %d %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "imported 120 users in") || !strings.Contains(out, " 0 skipped") ||
+		!strings.Contains(out, "verified 120 users") {
+		t.Errorf("import said %q", out)
+	}
+	realm := fake.Realm("bench")
+	if len(realm.Users) != 120 || realm.Clients["bench-proxy"]["secret"] != key {
+		t.Fatalf("realm after import: %d users, clients %v", len(realm.Users), realm.Clients)
+	}
+	uris, _ := realm.Clients["bench-proxy"]["redirectUris"].([]any)
+	if len(uris) != 2 || uris[0] != "http://127.0.0.1:14180/oauth2/callback" {
+		t.Errorf("redirect URIs %v", uris)
+	}
+	code, out, _ = runCmd(t, "import", "-size", "100k", "-n", "120", "-api", srv.URL, "-verify", "0")
+	if code != 0 || !strings.Contains(out, " 0 added") || strings.Contains(out, "verified") {
+		t.Errorf("second import: %d %q", code, out)
+	}
+	code, out, _ = runCmd(t, "import", "-size", "100k", "-n", "-1", "-api", srv.URL, "-verify", "10")
+	if code != 0 || !strings.Contains(out, "verified 10 users") {
+		t.Errorf("every user: %d %q", code, out)
+	}
+	if got := len(fake.Realm("bench").Users); got != 2346 {
+		t.Errorf("-n -1 imported %d users, want the 100k graph's 2346", got)
+	}
+
+	// A provider that refuses fails with status 1.
+	fake.SetFail(func(r *http.Request) int {
+		if strings.HasSuffix(r.URL.Path, "/users") {
+			return http.StatusForbidden
+		}
+		return 0
+	})
+	if code, _, errOut := runCmd(t, "import", "-size", "100k", "-n", "5", "-api", srv.URL); code != 1 || !strings.Contains(errOut, "status 403") {
+		t.Errorf("refused verify: %d %s", code, errOut)
+	}
+	fake.SetFail(func(*http.Request) int { return http.StatusBadRequest })
+	if code, _, _ := runCmd(t, "import", "-size", "100k", "-n", "5", "-api", srv.URL); code != 1 {
+		t.Errorf("refused setup: %d", code)
+	}
+	fake.SetFail(func(r *http.Request) int {
+		if strings.HasSuffix(r.URL.Path, "/partialImport") {
+			return http.StatusBadRequest
+		}
+		return 0
+	})
+	if code, out, _ := runCmd(t, "import", "-size", "100k", "-n", "5", "-api", srv.URL); code != 1 || !strings.Contains(out, "imported 5 users") {
+		t.Errorf("refused import: %d %q", code, out)
+	}
+
+	for _, args := range [][]string{
+		{"-api", srv.URL, "-target", "zitadel"},
+		{"-api", srv.URL, "-n", "-2"},
+		{"-api", srv.URL, "-n", "100000"},
+		{"-api", srv.URL, "-batch", "0"},
+		{"-api", srv.URL, "-workers", "0"},
+		{"-api", srv.URL, "-verify", "-2"},
+		{"-size", "nope", "-api", srv.URL},
+		{"-n", "5"},
+		{"-api", srv.URL, "extra"},
+	} {
+		if code, _, _ := runCmd(t, append([]string{"import", "-size", "100k"}, args...)...); code != 2 {
+			t.Errorf("import %v: status %d, want 2", args, code)
+		}
+	}
+	var out2, errOut2 bytes.Buffer
+	noSecret := func(k string) string {
+		if k == "AUTHZBENCH_KEYCLOAK_CLIENT_SECRET" {
+			return ""
+		}
+		return env(k)
+	}
+	if code := run(context.Background(), []string{"import", "-size", "100k", "-api", srv.URL}, noSecret, &out2, &errOut2); code != 2 ||
+		!strings.Contains(errOut2.String(), "AUTHZBENCH_KEYCLOAK_CLIENT_SECRET") {
+		t.Errorf("no client secret: %d %s", code, errOut2.String())
 	}
 }

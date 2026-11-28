@@ -68,7 +68,9 @@ generated tuples.
 `u<n>@bench.example`, a password derived from the seed (public by design:
 it exists so every provider signs in the same accounts) and the groups the
 user is a direct member of in the graph, so group claims and relationships
-agree.
+agree. `authzdata users` writes it as JSON lines or as authzbench
+credentials, and `authzdata import -target keycloak` imports it into
+Keycloak through its admin API (`bench/products` says how).
 
 **The MCP tool catalog** has `verb_noun` tools with one to six arguments
 (strings with lengths, IDs with a pattern, bounded integers, booleans,

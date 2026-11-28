@@ -1,11 +1,13 @@
-# The authorization products of the benchmark, each at a pinned version
-# with its recommended production settings (README.md says what each
-# setting is for), on the same CPU and memory limits:
+# The products of the benchmark, each at a pinned version with its
+# recommended production settings (README.md says what each setting is
+# for), on the same CPU and memory limits:
 #
 #   docker compose -f bench/products/compose.yaml --profile spicedb up -d
 #
-# Profiles: authz, spicedb, openfga. Every image is pinned by tag and
-# digest; products_test.go fails on an image without both. Ports are bound
+# Profiles: authz, spicedb, openfga (authorization) and keycloak (Keycloak
+# with oauth2-proxy in front of it, for sign-ins and forward-auth). Every
+# image is pinned by tag and digest, and an image built here is built
+# from pinned images; products_test.go fails on an image without both. Ports are bound
 # to 127.0.0.1 only. The keys below are the benchmark's own, public on
 # purpose like the dataset's passwords; set the variables to replace them.
 # BENCH_CPUS and BENCH_MEMORY set the limits of each server and each
@@ -19,7 +21,7 @@ x-limits: &limits
   cpus: ${BENCH_CPUS:-2}
   mem_limit: ${BENCH_MEMORY:-4g}
 
-# Both products' databases run the same PostgreSQL with the same settings:
+# Every product's database runs the same PostgreSQL with the same settings:
 # shared_buffers a quarter of the memory limit, as PostgreSQL's own tuning
 # guide suggests, synchronous commits kept (durable writes, as in
 # production), and track_commit_timestamp, which SpiceDB's Watch API needs.
@@ -146,6 +148,102 @@ services:
     ports:
       - 127.0.0.1:18081:8080
 
+  # Keycloak, the identity provider of the sign-in benchmark, on its own
+  # PostgreSQL, from the optimized image keycloak/Dockerfile builds. Its
+  # issuer is the address the benchmark's browser uses (127.0.0.1:18180);
+  # services inside this network reach it as keycloak:8080, which the
+  # dynamic backchannel allows. 9000 is the management port (health and
+  # metrics), not the API.
+  keycloak-postgres:
+    <<: *postgres
+    profiles: [keycloak]
+    volumes:
+      - keycloak-pg:/var/lib/postgresql/data
+
+  keycloak:
+    <<: *limits
+    profiles: [keycloak]
+    build:
+      context: keycloak
+    image: authz-bench-keycloak:26.8.2
+    command:
+      - start
+      - --optimized
+      - --db-url=jdbc:postgresql://keycloak-postgres:5432/bench
+      - --db-username=bench
+      - --db-password=bench
+      - --db-pool-min-size=20
+      - --db-pool-initial-size=20
+      - --db-pool-max-size=40
+      - --hostname=http://127.0.0.1:18180
+      - --hostname-backchannel-dynamic=true
+      - --http-enabled=true
+      - --proxy-headers=xforwarded
+      - --log-level=warn
+      - --log-console-output=json
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: bench-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-bench-keycloak-admin-0123456789}
+    depends_on:
+      keycloak-postgres: {condition: service_healthy}
+    ports:
+      - 127.0.0.1:18180:8080
+      - 127.0.0.1:19000:9000
+
+  # oauth2-proxy in front of an app, signing in through Keycloak: the
+  # forward-auth product the gateway is compared with. A reverse proxy
+  # asks /oauth2/auth (202 or 401) before passing a request on. The
+  # browser goes to Keycloak at its public address and oauth2-proxy
+  # redeems codes and reads keys at keycloak:8080, so discovery is
+  # skipped and each endpoint is named.
+  oauth2-proxy:
+    <<: *limits
+    profiles: [keycloak]
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.6@sha256:c3415e8660af553f5e18f5d90db050614c02493c0ac6260ac59442f6d9b12048
+    command:
+      - --http-address=0.0.0.0:4180
+      - --provider=keycloak-oidc
+      - --client-id=bench-proxy
+      - --client-secret=${KEYCLOAK_CLIENT_SECRET:-bench-keycloak-client-0123456789}
+      - --oidc-issuer-url=http://127.0.0.1:18180/realms/bench
+      - --skip-oidc-discovery=true
+      - --login-url=http://127.0.0.1:18180/realms/bench/protocol/openid-connect/auth
+      - --redeem-url=http://keycloak:8080/realms/bench/protocol/openid-connect/token
+      - --oidc-jwks-url=http://keycloak:8080/realms/bench/protocol/openid-connect/certs
+      - --redirect-url=http://127.0.0.1:14180/oauth2/callback
+      - --code-challenge-method=S256
+      - --email-domain=*
+      - --upstream=static://200
+      - --reverse-proxy=true
+      - --skip-provider-button=true
+      - --set-xauthrequest=true
+      - --cookie-secret=${OAUTH2_PROXY_COOKIE_SECRET:-YmVuY2gtb2F1dGgyLXByb3h5LWNvb2tpZS1zZWNyZXQ=}
+      - --cookie-secure=true
+      - --cookie-samesite=lax
+      - --session-store-type=redis
+      - --redis-connection-url=redis://oauth2-proxy-redis:6379
+      - --request-logging=false
+      - --auth-logging=false
+      - --standard-logging=false
+    depends_on:
+      oauth2-proxy-redis: {condition: service_healthy}
+    ports:
+      - 127.0.0.1:14180:4180
+
+  # oauth2-proxy's session store. Its documentation recommends Redis once
+  # sessions hold an OIDC provider's tokens: in cookies they pass the 4 KB
+  # cookie limit and are split, and every request carries them.
+  oauth2-proxy-redis:
+    <<: *limits
+    profiles: [keycloak]
+    image: redis:8.12.0-alpine@sha256:5af80107c1eeecb484a2269b80a26d12bfa6521787da4663bd9f19f60a163483
+    command: [redis-server, --save, "", --appendonly, "no", --maxmemory-policy, noeviction]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
   # The OpenFGA CLI, for verify.sh to turn the dataset's model into the
   # JSON in openfga-model.json: docker compose run --rm openfga-cli ...
   openfga-cli:
@@ -156,3 +254,4 @@ volumes:
   authz-data:
   spicedb-pg:
   openfga-pg:
+  keycloak-pg:

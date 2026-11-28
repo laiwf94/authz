@@ -270,7 +270,9 @@ func TestCheckAnswers(t *testing.T) {
 }
 
 // Every image compose.yaml runs is pinned by a version tag and a digest,
-// and README.md names the same version of each.
+// and README.md names the same version of each. An image the benchmark
+// builds is authz:bench (this checkout) or authz-bench-NAME:VERSION, built
+// from NAME/Dockerfile, whose every FROM is pinned at that version.
 func TestComposePinned(t *testing.T) {
 	f, err := os.Open("compose.yaml")
 	if err != nil {
@@ -294,6 +296,21 @@ func TestComposePinned(t *testing.T) {
 			images[ref] = true
 			continue // built from this checkout
 		}
+		if built, ok := strings.CutPrefix(ref, "authz-bench-"); ok {
+			name, version, _ := strings.Cut(built, ":")
+			for _, base := range dockerfileFROM(t, name+"/Dockerfile") {
+				m := pinned.FindStringSubmatch(base)
+				if m == nil || m[2] != version {
+					t.Errorf("%s/Dockerfile: FROM %q is not pinned as name:%s@sha256:digest", name, base, version)
+					continue
+				}
+				images[m[1]] = true
+				if !bytes.Contains(readme, []byte("`"+m[1]+":"+m[2]+"`")) {
+					t.Errorf("README.md does not name %s:%s", m[1], m[2])
+				}
+			}
+			continue
+		}
 		m := pinned.FindStringSubmatch(ref)
 		if m == nil {
 			t.Errorf("image %q is not pinned as name:version@sha256:digest", ref)
@@ -304,11 +321,33 @@ func TestComposePinned(t *testing.T) {
 			t.Errorf("README.md does not name %s:%s", m[1], m[2])
 		}
 	}
-	for _, want := range []string{"authz:bench", "authzed/spicedb", "openfga/openfga", "openfga/cli", "postgres"} {
+	for _, want := range []string{"authz:bench", "authzed/spicedb", "openfga/openfga", "openfga/cli", "postgres",
+		"keycloak/keycloak", "quay.io/oauth2-proxy/oauth2-proxy", "redis"} {
 		if !images[want] {
 			t.Errorf("compose.yaml runs no %s image", want)
 		}
 	}
+}
+
+// dockerfileFROM returns the image of each FROM in a Dockerfile.
+func dockerfileFROM(t *testing.T, path string) []string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Error(err)
+		return nil
+	}
+	var out []string
+	for line := range strings.Lines(string(b)) {
+		f := strings.Fields(line)
+		if len(f) >= 2 && strings.EqualFold(f[0], "FROM") {
+			out = append(out, f[1])
+		}
+	}
+	if len(out) == 0 {
+		t.Errorf("%s has no FROM", path)
+	}
+	return out
 }
 
 // OpenFGAModel has the types and relations of the dataset's model.
