@@ -102,6 +102,18 @@ func TestForwardAuthPathRules(t *testing.T) {
 	if resp := anon.do(req); resp.StatusCode != http.StatusOK {
 		t.Fatalf("envoy anonymous GET /wiki/x: %d", resp.StatusCode)
 	}
+	// The same ambiguous paths are refused on the Envoy endpoint, which must
+	// not decode them before the rules run.
+	for _, b := range []*browser{anon, alice} {
+		for _, p := range []string{"/admin%2F..%2Fwiki", "/admin%5C..%5Cwiki", "/wiki%2Fx"} {
+			req, _ = http.NewRequest(http.MethodGet, h.public+"/auth/envoy"+p, nil)
+			req.Host = h.host
+			resp := b.do(req)
+			if resp.StatusCode != http.StatusForbidden || resp.Header.Get("Location") != "" {
+				t.Fatalf("envoy %s: %d %v", p, resp.StatusCode, resp.Header)
+			}
+		}
+	}
 }
 
 // TestPublicPathOtherProvider: a session from a provider an app does not

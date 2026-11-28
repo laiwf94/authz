@@ -43,11 +43,19 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 // handleEnvoyAuth is the endpoint for Envoy's HTTP ext_authz service with
 // path_prefix "/auth/envoy": Envoy appends the original path and keeps the
 // original Host header. Denied responses are passed to the client, so
-// browsers get a redirect directly.
+// browsers get a redirect directly. The path keeps its raw form, so the
+// route rules see what Envoy sent and refuse an encoded slash or backslash
+// the way they do on the nginx and Traefik endpoint.
 func (s *Server) handleEnvoyAuth(w http.ResponseWriter, r *http.Request) {
-	u := &url.URL{Scheme: "https", Host: r.Host, Path: strings.TrimPrefix(r.URL.Path, "/auth/envoy"), RawQuery: r.URL.RawQuery}
+	u := &url.URL{
+		Scheme:   "https",
+		Host:     r.Host,
+		Path:     strings.TrimPrefix(r.URL.Path, "/auth/envoy"),
+		RawPath:  strings.TrimPrefix(r.URL.EscapedPath(), "/auth/envoy"),
+		RawQuery: r.URL.RawQuery,
+	}
 	if u.Path == "" {
-		u.Path = "/"
+		u.Path, u.RawPath = "/", ""
 	}
 	if p := r.Header.Get("X-Forwarded-Proto"); p == "http" {
 		u.Scheme = "http"
